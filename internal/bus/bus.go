@@ -24,6 +24,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/runtime/aspect/wsasp"
 	"github.com/CarriedWorldUniverse/nexus/runtime/keyfile"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
+	"github.com/google/uuid"
 
 	"github.com/CarriedWorldUniverse/agora/internal/inbox"
 )
@@ -119,6 +120,7 @@ func Connect(ctx context.Context, cfg Config) (*Bus, error) {
 			PID:         os.Getpid(),
 			StartedAt:   time.Now().UTC(),
 			Model:       vr.Model,
+			SessionID:   uuid.NewString(),
 		},
 	}
 	wc, err := wsasp.NewClient(wsCfg)
