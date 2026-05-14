@@ -35,6 +35,13 @@ type Config struct {
 	CursorDir   string // dir for the wsasp cursor file; default ~/.agora
 	Logger      *slog.Logger
 	Inbox       *inbox.Inbox
+
+	// OnChat, if set, is invoked synchronously on every chat.deliver
+	// alongside the inbox.Push. Used by the TUI to render the message
+	// in the chat panel without having to drain the inbox (which would
+	// rob the engine of its work). Optional — leave nil for headless
+	// callers.
+	OnChat func(it inbox.Item)
 }
 
 // Bus is the agora-side handle to the WS transport. Constructed by
@@ -138,7 +145,7 @@ func (b *Bus) onDeliver(msg wsasp.DeliveredMessage) {
 	if err != nil {
 		received = time.Now().UTC()
 	}
-	b.cfg.Inbox.Push(inbox.Item{
+	it := inbox.Item{
 		Source:     inbox.SourceChat,
 		From:       msg.From,
 		Content:    msg.Content,
@@ -147,7 +154,11 @@ func (b *Bus) onDeliver(msg wsasp.DeliveredMessage) {
 		ThreadRoot: msg.ThreadRoot,
 		Reason:     msg.Reason,
 		ReceivedAt: received,
-	})
+	}
+	b.cfg.Inbox.Push(it)
+	if b.cfg.OnChat != nil {
+		b.cfg.OnChat(it)
+	}
 	b.cfg.Logger.Debug("inbox push (chat)",
 		"from", msg.From,
 		"msg_id", msg.ID,

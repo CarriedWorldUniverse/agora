@@ -57,10 +57,26 @@ func main() {
 
 	box := inbox.New()
 
+	// Wire OnChat after the program is built so we can call p.Send;
+	// declared here so bus.Config can reference it.
+	var p *tea.Program
+	onChat := func(it inbox.Item) {
+		if p == nil {
+			return
+		}
+		p.Send(ui.ChatDelivered{
+			From:       it.From,
+			Content:    it.Content,
+			MsgID:      it.MsgID,
+			ReceivedAt: it.ReceivedAt,
+		})
+	}
+
 	b, err := bus.Connect(rootCtx, bus.Config{
 		KeyfilePath: *keyfilePath,
 		Logger:      log,
 		Inbox:       box,
+		OnChat:      onChat,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "agora: bus connect: %v\n", err)
@@ -82,7 +98,7 @@ func main() {
 	}
 
 	model := ui.NewModel(cfg)
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p = tea.NewProgram(model, tea.WithAltScreen())
 
 	// Inbox wake-ups → tea.Msg. Goroutine bridges the channel into
 	// the bubbletea program so the UI repaints (and later, kicks the

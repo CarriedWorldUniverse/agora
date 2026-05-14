@@ -23,12 +23,21 @@ import (
 )
 
 // InboxUpdated is the bubbletea message agora's cmd pump sends on
-// every inbox.Push. The Model reacts by draining the inbox into the
-// chat panel buffer (chat-source items) and updating the depth
-// counter. tty-source items are echoed locally already at submit time
-// so the chat panel doesn't double-render them — but the inbox still
-// holds them for the engine.
+// every inbox.Push. The Model uses it to refresh the inbox-depth
+// counter on the status line — chat rendering is driven by the
+// separate ChatDelivered message (the bus invokes both on a chat
+// frame; the engine consumes the inbox).
 type InboxUpdated struct{}
+
+// ChatDelivered carries one chat.deliver frame into the UI for
+// rendering. The bus emits these from its OnChat callback so the
+// chat panel can render without touching the engine-bound inbox.
+type ChatDelivered struct {
+	From       string
+	Content    string
+	MsgID      int64
+	ReceivedAt time.Time
+}
 
 // Config bundles construction-time settings for the Model. Populated
 // by cmd/agora/main.go from the keyfile + flags.
@@ -123,16 +132,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.input.SetValue("")
-			// Echo locally — the engine wiring (NEX-54) pushes the
-			// canonical inbox item. View-only echo here keeps the
-			// operator's typing immediately visible.
+			now := time.Now()
 			m.chat = appendChatLine(m.chat, chatLine{
 				class: classTTYIn,
-				when:  time.Now(),
+				when:  now,
 				from:  m.cfg.OperatorName,
 				body:  text,
 			}, m.cfg.HistoryDepth)
-			// NEX-54 wires the inbox.Push for tty items here.
+			if m.cfg.Inbox != nil {
+				m.cfg.Inbox.Push(inbox.Item{
+					Source:     inbox.SourceTTY,
+					From:       m.cfg.OperatorName,
+					Content:    text,
+					ReceivedAt: now,
+				})
+			}
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -140,59 +154,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case InboxUpdated:
-		m = m.drainInbox()
+		if m.cfg.Inbox != nil {
+			m.inboxDepth = m.cfg.Inbox.Len()
+		}
+		return m, nil
+
+	case ChatDelivered:
+		if msg.MsgID <= m.lastRenderedMsgID {
+			return m, nil
+		}
+		m.lastRenderedMsgID = msg.MsgID
+		m.chat = appendChatLine(m.chat, chatLine{
+			class: classChatIn,
+			when:  msg.ReceivedAt,
+			from:  msg.From,
+			body:  msg.Content,
+		}, m.cfg.HistoryDepth)
 		return m, nil
 	}
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
-}
-
-// drainInbox peeks at the inbox without consuming items (the engine
-// owns Take). It updates inboxDepth and pulls any not-yet-rendered
-// chat items into the chat panel. Since Inbox.Take pops the head,
-// agora can't both peek and leave items for the engine; we work
-// around this by tracking the highest rendered MsgID and only
-// rendering rows whose Item.MsgID exceeds it. This works because the
-// engine doesn't yet exist (NEX-55+) and chat items aren't actually
-// popped — they accumulate. Once the engine lands, the chat panel
-// will instead render in response to the engine's per-turn ingest
-// event, not the raw inbox.
-func (m Model) drainInbox() Model {
-	if m.cfg.Inbox == nil {
-		return m
-	}
-	m.inboxDepth = m.cfg.Inbox.Len()
-	// We can't iterate the inbox in place — no Peek API by design
-	// (FIFO is for the engine, not the renderer). For NEX-53 we
-	// special-case: every InboxUpdated wake-up corresponds to one
-	// just-pushed item, so we Take it, render it, and stash it on
-	// a side-buffer for the engine to consume later. NEX-54/55
-	// replace this with proper engine ingestion.
-	for {
-		it, ok := m.cfg.Inbox.Take()
-		if !ok {
-			break
-		}
-		switch it.Source {
-		case inbox.SourceChat:
-			if it.MsgID <= m.lastRenderedMsgID {
-				continue
-			}
-			m.lastRenderedMsgID = it.MsgID
-			m.chat = appendChatLine(m.chat, chatLine{
-				class: classChatIn,
-				when:  it.ReceivedAt,
-				from:  it.From,
-				body:  it.Content,
-			}, m.cfg.HistoryDepth)
-		case inbox.SourceTTY:
-			// Already echoed at submit time; nothing to render here.
-		}
-	}
-	m.inboxDepth = m.cfg.Inbox.Len()
-	return m
 }
 
 // View renders the current Model state.
