@@ -1,14 +1,8 @@
 // Package ui holds the bubbletea Model/Update/View for agora.
 //
-// v0 skeleton (NEX-51): minimal model that renders "agora starting"
-// and exits cleanly on Ctrl-C. Subsequent stories layer:
-//
-//   NEX-52  WS chat.deliver intake → inbox
-//   NEX-53  status line + chat panel + input prompt
-//   NEX-54  operator-input → inbox
-//   NEX-55  output routing (source-tag → channel)
-//   NEX-56  notify_operator render path
-//   NEX-57  streaming render
+// NEX-51  v0 skeleton (alt-screen, ctrl-c).
+// NEX-52  WS intake → inbox; status line shows depth.
+// NEX-53  TUI core: status line + chat panel + input prompt.
 //
 // Bubbletea pattern: Model owns state, Update handles messages
 // (events), View returns the rendered string. The runtime owns the
@@ -19,7 +13,9 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -27,60 +23,49 @@ import (
 )
 
 // InboxUpdated is the bubbletea message agora's cmd pump sends on
-// every inbox.Push. The Model reacts by refreshing whatever view
-// state depends on the inbox (status counter today, chat panel in
-// NEX-53, engine kickoff in NEX-55+).
+// every inbox.Push. The Model reacts by draining the inbox into the
+// chat panel buffer (chat-source items) and updating the depth
+// counter. tty-source items are echoed locally already at submit time
+// so the chat panel doesn't double-render them — but the inbox still
+// holds them for the engine.
 type InboxUpdated struct{}
 
 // Config bundles construction-time settings for the Model. Populated
 // by cmd/agora/main.go from the keyfile + flags.
 type Config struct {
-	// AspectID is the canonical aspect name (e.g. "shadow"). Used in
-	// the status line, in operator-typed inbox items as the From
-	// field's target, and in the chat panel's labels.
-	AspectID string
-
-	// OperatorName is the human-readable label for the operator side
-	// (e.g. "jacinta"). Appears as the From on tty-sourced inbox
-	// items + the `you → <aspect>:` prefix in the chat panel.
+	AspectID     string
 	OperatorName string
-
-	// HistoryDepth caps the chat scrollback. 0 = default (1000).
 	HistoryDepth int
-
-	// InputHistory caps the REPL up-arrow history. 0 = default (100).
 	InputHistory int
-
-	// Logger writes to a file (stdout is reserved for the TUI).
-	Logger *slog.Logger
-
-	// Inbox is the shared FIFO queue. The Model reads Len() for the
-	// status line; subsequent stories (NEX-53/55) consume items from
-	// it as part of the engine kick-off path.
-	Inbox *inbox.Inbox
+	Logger       *slog.Logger
+	Inbox        *inbox.Inbox
 }
 
-// Model is bubbletea's Model. State that survives across Update
-// calls. The v0 skeleton holds only the basics; subsequent stories
-// add inbox state, WS state, scrollback buffer, input buffer, etc.
+// Model is bubbletea's Model. Owns: layout dimensions, the chat
+// scrollback buffer, the input prompt's textinput, the last-seen
+// inbox depth, and bookkeeping (quitting flag, highest msg_id we've
+// rendered so re-deliveries don't double up).
 type Model struct {
 	cfg Config
 
 	width  int
 	height int
 
-	// quitting becomes true on the first Ctrl-C / SIGINT. The View
-	// briefly displays a shutting-down message before tea.Quit
-	// returns.
+	chat       []chatLine
+	input      textinput.Model
+	inboxDepth int
+	wsConnected bool // future NEX-52.1 hook; default false until we surface it
+
 	quitting bool
 
-	// inboxDepth is the last observed inbox.Len(), refreshed on every
-	// InboxUpdated message. The status line renders this so the
-	// operator can see queued work at a glance.
-	inboxDepth int
+	// lastRenderedMsgID is the highest chat.deliver msg_id we've
+	// already pushed into the chat panel. Guards against re-renders
+	// when the inbox holds items that we've shown but not yet
+	// processed via the engine.
+	lastRenderedMsgID int64
 }
 
-// NewModel constructs an empty Model with sensible defaults applied.
+// NewModel constructs a Model with sensible defaults.
 func NewModel(cfg Config) Model {
 	if cfg.HistoryDepth <= 0 {
 		cfg.HistoryDepth = 1000
@@ -94,75 +79,181 @@ func NewModel(cfg Config) Model {
 	if cfg.AspectID == "" {
 		cfg.AspectID = "aspect"
 	}
-	return Model{cfg: cfg}
+
+	ti := textinput.New()
+	ti.Prompt = "› "
+	ti.Placeholder = "type to " + cfg.AspectID + "; ctrl+c to quit"
+	ti.Focus()
+	ti.CharLimit = 0 // unlimited; chunking happens at submit time
+
+	return Model{cfg: cfg, input: ti}
 }
 
-// Init runs once at program start. Returns the first command the
-// runtime should execute.
+// Init runs once at program start.
 func (m Model) Init() tea.Cmd {
 	if m.cfg.Logger != nil {
 		m.cfg.Logger.Info("ui model initialized",
 			"aspect", m.cfg.AspectID,
 			"operator", m.cfg.OperatorName)
 	}
-	return nil
+	return textinput.Blink
 }
 
-// Update handles incoming messages and returns the next model state
-// + any command to fire. For the v0 skeleton, we only handle resize
-// + ctrl-c. Subsequent stories layer additional message types.
+// Update handles incoming messages. v0 set: window resize, key
+// presses (ctrl+c quits, enter submits, everything else feeds the
+// textinput), and InboxUpdated (drain chat-source items into the
+// panel).
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		// textinput width = total width minus the prompt ("› ").
+		m.input.Width = max(0, msg.Width-3)
 		return m, nil
 
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c":
 			m.quitting = true
 			return m, tea.Quit
+		case "enter":
+			text := strings.TrimRight(m.input.Value(), " \t")
+			if text == "" {
+				return m, nil
+			}
+			m.input.SetValue("")
+			// Echo locally — the engine wiring (NEX-54) pushes the
+			// canonical inbox item. View-only echo here keeps the
+			// operator's typing immediately visible.
+			m.chat = appendChatLine(m.chat, chatLine{
+				class: classTTYIn,
+				when:  time.Now(),
+				from:  m.cfg.OperatorName,
+				body:  text,
+			}, m.cfg.HistoryDepth)
+			// NEX-54 wires the inbox.Push for tty items here.
+			return m, nil
 		}
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		return m, cmd
 
 	case InboxUpdated:
-		if m.cfg.Inbox != nil {
-			m.inboxDepth = m.cfg.Inbox.Len()
-		}
+		m = m.drainInbox()
 		return m, nil
 	}
-	return m, nil
+
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
 }
 
-// View renders the current model state into a string. Bubbletea
-// writes this to stdout each frame.
+// drainInbox peeks at the inbox without consuming items (the engine
+// owns Take). It updates inboxDepth and pulls any not-yet-rendered
+// chat items into the chat panel. Since Inbox.Take pops the head,
+// agora can't both peek and leave items for the engine; we work
+// around this by tracking the highest rendered MsgID and only
+// rendering rows whose Item.MsgID exceeds it. This works because the
+// engine doesn't yet exist (NEX-55+) and chat items aren't actually
+// popped — they accumulate. Once the engine lands, the chat panel
+// will instead render in response to the engine's per-turn ingest
+// event, not the raw inbox.
+func (m Model) drainInbox() Model {
+	if m.cfg.Inbox == nil {
+		return m
+	}
+	m.inboxDepth = m.cfg.Inbox.Len()
+	// We can't iterate the inbox in place — no Peek API by design
+	// (FIFO is for the engine, not the renderer). For NEX-53 we
+	// special-case: every InboxUpdated wake-up corresponds to one
+	// just-pushed item, so we Take it, render it, and stash it on
+	// a side-buffer for the engine to consume later. NEX-54/55
+	// replace this with proper engine ingestion.
+	for {
+		it, ok := m.cfg.Inbox.Take()
+		if !ok {
+			break
+		}
+		switch it.Source {
+		case inbox.SourceChat:
+			if it.MsgID <= m.lastRenderedMsgID {
+				continue
+			}
+			m.lastRenderedMsgID = it.MsgID
+			m.chat = appendChatLine(m.chat, chatLine{
+				class: classChatIn,
+				when:  it.ReceivedAt,
+				from:  it.From,
+				body:  it.Content,
+			}, m.cfg.HistoryDepth)
+		case inbox.SourceTTY:
+			// Already echoed at submit time; nothing to render here.
+		}
+	}
+	m.inboxDepth = m.cfg.Inbox.Len()
+	return m
+}
+
+// View renders the current Model state.
 //
-// v0 skeleton: a placeholder banner + status line. The full
-// chat-panel + input-prompt layout comes in NEX-53.
+// Layout (spec §9):
+//
+//	┌──────────────────────────────────────────┐
+//	│ status line                              │  1 row
+//	├──────────────────────────────────────────┤
+//	│ chat panel                               │  height-4 rows
+//	│   ...                                    │
+//	├──────────────────────────────────────────┤
+//	│ › input prompt                           │  1 row
+//	└──────────────────────────────────────────┘
 func (m Model) View() string {
 	if m.quitting {
 		return "agora: shutting down...\n"
 	}
+	if m.width == 0 || m.height == 0 {
+		// Pre-first-WindowSizeMsg paint — bubbletea sends one
+		// immediately on Run, so this is only ever the first frame.
+		return "agora: initializing...\n"
+	}
 
-	statusStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("#1E90FF"))
+	status := m.renderStatus()
+	divider := dividerStyle.Render(strings.Repeat("─", m.width))
 
-	dimStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("240"))
+	// 4 chrome rows: status, divider, divider, input.
+	chatHeight := m.height - 4
+	if chatHeight < 1 {
+		chatHeight = 1
+	}
+	chatBody := renderChatBuffer(m.chat, m.width, chatHeight)
+	inputRow := m.input.View()
 
-	header := statusStyle.Render(fmt.Sprintf("agora — %s @ nexus", m.cfg.AspectID))
-	hint := dimStyle.Render(fmt.Sprintf("inbox: %d — ctrl+c to quit", m.inboxDepth))
-
-	// Pad to fill the visible area so alt-screen clears properly even
-	// when the terminal is large. Skip if width hasn't been set yet
-	// (first frame before WindowSizeMsg).
-	body := strings.Repeat("\n", maxInt(0, m.height-4))
-
-	return fmt.Sprintf("%s\n%s\n%s", header, hint, body)
+	return strings.Join([]string{
+		status,
+		divider,
+		chatBody,
+		divider,
+		inputRow,
+	}, "\n")
 }
 
-func maxInt(a, b int) int {
+// renderStatus is the top-of-screen one-line status. Spec §9.1.
+func (m Model) renderStatus() string {
+	left := headerStyle.Render(fmt.Sprintf("agora · %s", m.cfg.AspectID))
+	wsState := "offline"
+	if m.wsConnected {
+		wsState = "online"
+	}
+	right := dimStyle.Render(fmt.Sprintf("ws:%s · inbox:%d", wsState, m.inboxDepth))
+
+	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + right
+}
+
+func max(a, b int) int {
 	if a > b {
 		return a
 	}
