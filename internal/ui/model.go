@@ -123,7 +123,17 @@ type Model struct {
 	vp         viewport.Model
 	vpReady    bool // becomes true once the first WindowSizeMsg sizes the viewport
 	inboxDepth int
-	wsConnected bool // future NEX-52.1 hook; default false until we surface it
+	wsConnected bool
+
+	// inputHistory is the ring of past submitted lines, oldest first.
+	// Capped at cfg.InputHistory.
+	inputHistory []string
+	// historyIdx points at the current entry being browsed. -1 means
+	// not browsing — the input shows the user's live draft.
+	historyIdx int
+	// draftSnapshot saves the user's live draft when they begin
+	// browsing history, so Down past the newest entry restores it.
+	draftSnapshot string
 
 	// liveLine is the streaming model output rendered between the
 	// chat panel and the input prompt. Cleared on ModelTurnEnd; the
@@ -160,7 +170,7 @@ func NewModel(cfg Config) Model {
 	ti.Focus()
 	ti.CharLimit = 0 // unlimited; chunking happens at submit time
 
-	return Model{cfg: cfg, input: ti}
+	return Model{cfg: cfg, input: ti, historyIdx: -1}
 }
 
 // Init runs once at program start.
@@ -219,6 +229,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.input.SetValue("")
+			// Record into history. Skip duplicates of the previous
+			// entry (so holding-tap on Enter doesn't bloat the ring).
+			if n := len(m.inputHistory); n == 0 || m.inputHistory[n-1] != text {
+				m.inputHistory = append(m.inputHistory, text)
+				if cap := m.cfg.InputHistory; cap > 0 && len(m.inputHistory) > cap {
+					m.inputHistory = m.inputHistory[len(m.inputHistory)-cap:]
+				}
+			}
+			m.historyIdx = -1
+			m.draftSnapshot = ""
 			// Slash command? Dispatch via the command processor —
 			// skips the chat-and-inbox path entirely on hit.
 			if cmd, handled := dispatchCommand(&m, text); handled {
@@ -248,12 +268,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.vp, vpCmd = m.vp.Update(msg)
 			return m, vpCmd
 		}
-		// Arrow keys when the input is empty → viewport line scroll.
-		// When the input has content, arrow keys belong to textinput
-		// (cursor movement / future history recall).
-		if m.input.Value() == "" {
-			switch msg.String() {
-			case "up", "down":
+		// Arrow keys: history first (when there's history to browse),
+		// then viewport when input is empty, then fall through to
+		// textinput for cursor positioning.
+		switch msg.String() {
+		case "up":
+			if len(m.inputHistory) > 0 {
+				m.historyBack()
+				return m, nil
+			}
+			if m.input.Value() == "" {
+				var vpCmd tea.Cmd
+				m.vp, vpCmd = m.vp.Update(msg)
+				return m, vpCmd
+			}
+		case "down":
+			if m.historyIdx != -1 {
+				m.historyForward()
+				return m, nil
+			}
+			if m.input.Value() == "" {
 				var vpCmd tea.Cmd
 				m.vp, vpCmd = m.vp.Update(msg)
 				return m, vpCmd
@@ -393,6 +427,43 @@ func (m Model) View() string {
 	rows = append(rows, divider, inputRow)
 
 	return strings.Join(rows, "\n")
+}
+
+// historyBack moves one step deeper into input history (toward
+// older entries). Saves the live draft on first step. No-op when
+// already at the oldest entry.
+func (m *Model) historyBack() {
+	if len(m.inputHistory) == 0 {
+		return
+	}
+	if m.historyIdx == -1 {
+		m.draftSnapshot = m.input.Value()
+		m.historyIdx = len(m.inputHistory) - 1
+	} else if m.historyIdx > 0 {
+		m.historyIdx--
+	} else {
+		return // already at the oldest
+	}
+	m.input.SetValue(m.inputHistory[m.historyIdx])
+	m.input.CursorEnd()
+}
+
+// historyForward moves one step toward newer entries. Past the
+// newest entry, restores the live draft.
+func (m *Model) historyForward() {
+	if m.historyIdx == -1 {
+		return
+	}
+	if m.historyIdx+1 >= len(m.inputHistory) {
+		m.historyIdx = -1
+		m.input.SetValue(m.draftSnapshot)
+		m.draftSnapshot = ""
+		m.input.CursorEnd()
+		return
+	}
+	m.historyIdx++
+	m.input.SetValue(m.inputHistory[m.historyIdx])
+	m.input.CursorEnd()
 }
 
 // chatHeight is the height available to the chat viewport given the
