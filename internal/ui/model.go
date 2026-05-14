@@ -15,7 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -119,7 +120,7 @@ type Model struct {
 	height int
 
 	chat       []chatLine
-	input      textinput.Model
+	input      textarea.Model
 	vp         viewport.Model
 	vpReady    bool // becomes true once the first WindowSizeMsg sizes the viewport
 	inboxDepth int
@@ -164,13 +165,23 @@ func NewModel(cfg Config) Model {
 		cfg.AspectID = "aspect"
 	}
 
-	ti := textinput.New()
-	ti.Prompt = "› "
-	ti.Placeholder = "type to " + cfg.AspectID + "; ctrl+c to quit"
-	ti.Focus()
-	ti.CharLimit = 0 // unlimited; chunking happens at submit time
+	ta := textarea.New()
+	ta.Prompt = "› "
+	ta.Placeholder = "type to " + cfg.AspectID + "; shift+enter for newline; /exit to quit"
+	ta.ShowLineNumbers = false
+	ta.CharLimit = 0
+	// Enter submits; shift+enter (and alt+enter) inserts a newline.
+	// Default mapping has Enter as insert-newline + ctrl+m as alias;
+	// we override so Enter is reserved for submission and the user
+	// has to ask for a newline explicitly.
+	ta.KeyMap.InsertNewline = key.NewBinding(
+		key.WithKeys("shift+enter", "alt+enter"),
+		key.WithHelp("shift+enter", "insert newline"),
+	)
+	ta.SetHeight(1)
+	ta.Focus()
 
-	return Model{cfg: cfg, input: ti, historyIdx: -1}
+	return Model{cfg: cfg, input: ta, historyIdx: -1}
 }
 
 // Init runs once at program start.
@@ -181,7 +192,7 @@ func (m Model) Init() tea.Cmd {
 			"operator", m.cfg.OperatorName)
 	}
 	return tea.Batch(
-		textinput.Blink,
+		textarea.Blink,
 		tea.Tick(wsTickInterval, func(time.Time) tea.Msg { return wsTick{} }),
 	)
 }
@@ -195,8 +206,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		// textinput width = total width minus the prompt ("› ").
-		m.input.Width = max(0, msg.Width-3)
+		// textarea width = total width minus the prompt ("› ").
+		m.input.SetWidth(max(0, msg.Width-3))
 		chatHeight := m.chatHeight()
 		if !m.vpReady {
 			m.vp = viewport.New(msg.Width, chatHeight)
@@ -224,11 +235,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, func() tea.Msg { return QuitGraceful{} }
 		case "enter":
-			text := strings.TrimRight(m.input.Value(), " \t")
+			text := strings.TrimRight(m.input.Value(), " \t\n")
 			if text == "" {
 				return m, nil
 			}
 			m.input.SetValue("")
+			m.input.SetHeight(1)
 			// Record into history. Skip duplicates of the previous
 			// entry (so holding-tap on Enter doesn't bloat the ring).
 			if n := len(m.inputHistory); n == 0 || m.inputHistory[n-1] != text {
@@ -273,6 +285,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// textinput for cursor positioning.
 		switch msg.String() {
 		case "up":
+			// Multi-line cursor up wins when there's content above.
+			// At the top line, fall through to history (if any)
+			// or viewport (if input is empty).
+			if m.input.Line() > 0 {
+				break
+			}
 			if len(m.inputHistory) > 0 {
 				m.historyBack()
 				return m, nil
@@ -283,6 +301,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, vpCmd
 			}
 		case "down":
+			if m.input.LineCount() > 1 && m.input.Line() < m.input.LineCount()-1 {
+				break
+			}
 			if m.historyIdx != -1 {
 				m.historyForward()
 				return m, nil
@@ -295,6 +316,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
+		m.resizeInputForContent()
 		return m, cmd
 
 	case InboxUpdated:
@@ -380,6 +402,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	m.resizeInputForContent()
 	return m, cmd
 }
 
@@ -466,13 +489,35 @@ func (m *Model) historyForward() {
 	m.input.CursorEnd()
 }
 
+// resizeInputForContent grows the textarea height up to a cap as
+// the user inserts newlines, and shrinks it as they delete them.
+// Keeps the chat viewport area maximal when no multi-line content
+// is present.
+func (m *Model) resizeInputForContent() {
+	const maxInputLines = 6
+	lines := m.input.LineCount()
+	if lines < 1 {
+		lines = 1
+	}
+	if lines > maxInputLines {
+		lines = maxInputLines
+	}
+	if m.input.Height() != lines {
+		m.input.SetHeight(lines)
+	}
+}
+
 // chatHeight is the height available to the chat viewport given the
-// current chrome state: status (1) + 2 dividers (2) + input (1) +
+// current chrome state: status (1) + 2 dividers (2) + input (N) +
 // liveLine (0 or 1).
 func (m Model) chatHeight() int {
-	chrome := 4
+	inputLines := 1
+	if h := m.input.Height(); h > 0 {
+		inputLines = h
+	}
+	chrome := 3 + inputLines // status + 2 dividers + input
 	if m.liveLine != "" {
-		chrome = 5
+		chrome++
 	}
 	h := m.height - chrome
 	if h < 1 {
