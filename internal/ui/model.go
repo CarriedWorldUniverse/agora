@@ -68,6 +68,18 @@ type NotifyOperator struct {
 	Body string
 }
 
+// ModelChunk feeds one streamed chunk of model output to the TUI for
+// the live-line render (spec §10). The chunk is appended to the live
+// line; ModelTurnEnd clears it.
+type ModelChunk struct {
+	Text string
+}
+
+// ModelTurnEnd signals the per-turn engine finished. The Model
+// clears the live line — the canonical reply is rendered separately
+// via ChatSent / ChatPanelReply / EngineError.
+type ModelTurnEnd struct{}
+
 // Config bundles construction-time settings for the Model. Populated
 // by cmd/agora/main.go from the keyfile + flags.
 type Config struct {
@@ -93,6 +105,11 @@ type Model struct {
 	input      textinput.Model
 	inboxDepth int
 	wsConnected bool // future NEX-52.1 hook; default false until we surface it
+
+	// liveLine is the streaming model output rendered between the
+	// chat panel and the input prompt. Cleared on ModelTurnEnd; the
+	// committed reply lands in chat via ChatSent / ChatPanelReply.
+	liveLine string
 
 	quitting bool
 
@@ -234,6 +251,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			body:  msg.Body,
 		}, m.cfg.HistoryDepth)
 		return m, nil
+
+	case ModelChunk:
+		m.liveLine += msg.Text
+		return m, nil
+
+	case ModelTurnEnd:
+		m.liveLine = ""
+		return m, nil
 	}
 
 	var cmd tea.Cmd
@@ -266,21 +291,29 @@ func (m Model) View() string {
 	status := m.renderStatus()
 	divider := dividerStyle.Render(strings.Repeat("─", m.width))
 
-	// 4 chrome rows: status, divider, divider, input.
-	chatHeight := m.height - 4
+	// Chrome rows: status, divider, [live line], divider, input.
+	// 4 rows when no live line; 5 with one.
+	chrome := 4
+	liveRow := ""
+	if m.liveLine != "" {
+		chrome = 5
+		liveRow = modelStyle.Render(m.cfg.AspectID+":") + " " + m.liveLine
+		liveRow = wrapLines(liveRow, m.width)
+	}
+	chatHeight := m.height - chrome
 	if chatHeight < 1 {
 		chatHeight = 1
 	}
 	chatBody := renderChatBuffer(m.chat, m.width, chatHeight)
 	inputRow := m.input.View()
 
-	return strings.Join([]string{
-		status,
-		divider,
-		chatBody,
-		divider,
-		inputRow,
-	}, "\n")
+	rows := []string{status, divider, chatBody}
+	if liveRow != "" {
+		rows = append(rows, liveRow)
+	}
+	rows = append(rows, divider, inputRow)
+
+	return strings.Join(rows, "\n")
 }
 
 // renderStatus is the top-of-screen one-line status. Spec §9.1.

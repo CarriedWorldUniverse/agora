@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -34,6 +35,13 @@ type TurnContext interface {
 	// chat panel only. Never goes to the bus. Safe to call any number
 	// of times during a turn.
 	NotifyOperator(body string)
+
+	// EmitChunk feeds one chunk of streamed model output into the
+	// TUI's live-line render. Spec §10. The chunk is appended to the
+	// live line as-is; line-break + final flushing happen when the
+	// turn returns (engine clears the live line and the returned
+	// reply becomes the canonical chat-panel entry).
+	EmitChunk(chunk string)
 }
 
 // TurnFunc is the per-turn model invocation. Takes an inbox item +
@@ -53,6 +61,10 @@ type turnCtx struct {
 
 func (t turnCtx) NotifyOperator(body string) {
 	t.prog.Send(ui.NotifyOperator{Body: body})
+}
+
+func (t turnCtx) EmitChunk(chunk string) {
+	t.prog.Send(ui.ModelChunk{Text: chunk})
 }
 
 // Config bundles dependencies for the engine. All fields are
@@ -106,9 +118,13 @@ func (e *Engine) drain(ctx context.Context) {
 	e.cfg.Program.Send(ui.InboxUpdated{})
 }
 
-// handle runs one turn + routes the reply by Source tag.
+// handle runs one turn + routes the reply by Source tag. Clears any
+// streamed-but-not-yet-committed live line at the end of every turn,
+// regardless of outcome, so a partial render doesn't linger if the
+// turn errored mid-stream.
 func (e *Engine) handle(ctx context.Context, it inbox.Item) {
 	tc := turnCtx{prog: e.cfg.Program}
+	defer e.cfg.Program.Send(ui.ModelTurnEnd{})
 	reply, err := e.cfg.Turn(ctx, tc, it)
 	if err != nil {
 		e.cfg.Logger.Error("turn failed",
@@ -154,9 +170,19 @@ func (e *Engine) handle(ctx context.Context, it inbox.Item) {
 
 // StubTurn is the NEX-55 placeholder TurnFunc. Echoes a fixed
 // acknowledgement so the routing path can be validated end-to-end
-// without a model. Calls NotifyOperator once per turn so NEX-56's
-// notify path is exercised too. Swap to bridle in NEX-58/59.
+// without a model. Calls NotifyOperator once per turn (NEX-56) and
+// emits the reply char-by-char via EmitChunk (NEX-57) to exercise
+// the live-line render path. Swap to bridle in NEX-58/59.
 func StubTurn(ctx context.Context, tc TurnContext, it inbox.Item) (string, error) {
 	tc.NotifyOperator(fmt.Sprintf("stub turn fired (source=%s, from=%s)", it.Source, it.From))
-	return fmt.Sprintf("[stub engine] received via %s: %q", it.Source, it.Content), nil
+	reply := fmt.Sprintf("[stub engine] received via %s: %q", it.Source, it.Content)
+	for _, r := range reply {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(8 * time.Millisecond):
+			tc.EmitChunk(string(r))
+		}
+	}
+	return reply, nil
 }
