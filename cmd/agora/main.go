@@ -129,12 +129,17 @@ func main() {
 			"model", model,
 			"claude_path", *claudePath,
 			"cwd", *cwd)
+		sysPrompt := b.SystemPrompt()
+		log.Info("system prompt composed",
+			"bytes", len(sysPrompt),
+			"empty", sysPrompt == "")
 		turn = engine.NewBridleTurn(engine.BridleConfig{
-			Provider:   provider,
-			ProviderID: providerID,
-			Model:      model,
-			AspectID:   b.AspectName(),
-			Cwd:        *cwd,
+			Provider:     provider,
+			ProviderID:   providerID,
+			Model:        model,
+			AspectID:     b.AspectName(),
+			Cwd:          *cwd,
+			SystemPrompt: sysPrompt,
 		})
 	}
 

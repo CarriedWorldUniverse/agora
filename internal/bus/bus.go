@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/CarriedWorldUniverse/nexus/runtime/aspect/wsasp"
@@ -47,11 +48,12 @@ type Config struct {
 // Bus is the agora-side handle to the WS transport. Constructed by
 // Connect, driven by Run, addressed by callers via SendChat / ReactTo.
 type Bus struct {
-	cfg        Config
-	client     *wsasp.Client
-	aspectName string
-	provider   string
-	model      string
+	cfg          Config
+	client       *wsasp.Client
+	aspectName   string
+	provider     string
+	model        string
+	systemPrompt string
 }
 
 // Connect validates the keyfile against the nexus it points at,
@@ -97,10 +99,11 @@ func Connect(ctx context.Context, cfg Config) (*Bus, error) {
 	cursorFile := wsasp.CursorFileForAspect(cursorDir)
 
 	b := &Bus{
-		cfg:        cfg,
-		aspectName: vr.AspectName,
-		provider:   vr.Provider,
-		model:      vr.Model,
+		cfg:          cfg,
+		aspectName:   vr.AspectName,
+		provider:     vr.Provider,
+		model:        vr.Model,
+		systemPrompt: composeSystemPrompt(vr),
 	}
 
 	wsCfg := wsasp.Config{
@@ -141,6 +144,49 @@ func (b *Bus) Provider() string { return b.provider }
 
 // Model is the provider-specific model id from validation.
 func (b *Bus) Model() string { return b.model }
+
+// SystemPrompt is the composed personality bundle: central nexus_md
+// ⊕ aspect personality (composed, or nexus_md ⊕ soul_md ⊕ primer_md
+// fallback). Empty if the Nexus didn't return any of those (legacy
+// or unprovisioned aspect). Mirrors agentfunnel's composeSystemPrompt.
+func (b *Bus) SystemPrompt() string { return b.systemPrompt }
+
+// composeSystemPrompt layers a validation result into the four-section
+// concat per spec §3 (personality decomposition):
+//
+//	central.nexus_md ⊕ aspect.nexus_md ⊕ aspect.soul_md ⊕ aspect.primer_md
+//
+// When personality.composed is non-empty (Part 7 renderer populated
+// it), uses central + composed instead — the renderer must NOT
+// double-bake central into composed (no-double-bake invariant pinned
+// in nexus/frame/embed_personality_test.go).
+//
+// Mirrored from runtime/cmd/agentfunnel/main.go.composeSystemPrompt;
+// duplicated rather than imported because agentfunnel's main isn't a
+// library. Keep in sync if either side changes.
+func composeSystemPrompt(res *keyfile.ValidationResult) string {
+	if res == nil {
+		return ""
+	}
+	parts := make([]string, 0, 4)
+	if res.CentralNexusMD != "" {
+		parts = append(parts, res.CentralNexusMD)
+	}
+	if res.Personality.Composed != "" {
+		parts = append(parts, res.Personality.Composed)
+	} else {
+		if res.Personality.NexusMD != "" {
+			parts = append(parts, res.Personality.NexusMD)
+		}
+		if res.Personality.SoulMD != "" {
+			parts = append(parts, res.Personality.SoulMD)
+		}
+		if res.Personality.PrimerMD != "" {
+			parts = append(parts, res.Personality.PrimerMD)
+		}
+	}
+	return strings.Join(parts, "\n\n---\n\n")
+}
 
 // SendChat forwards to wsasp for outbound chat (spec §8.1 routing).
 func (b *Bus) SendChat(ctx context.Context, content string, replyTo int64, topic string) (int64, error) {
