@@ -116,6 +116,12 @@ func main() {
 	} else {
 		provider := claudecode.New()
 		provider.ClaudePath = *claudePath
+		// Task spawns subagents whose lifetime is bound to the parent
+		// claude -p process; the parent exits as soon as it produces
+		// FinalText, killing any in-flight subagent before its work
+		// returns. Disallow it under agora so the model doesn't pick
+		// up the pattern. Revisit when the engine lifecycle changes.
+		provider.ExtraArgs = append(provider.ExtraArgs, "--disallowedTools", "Task")
 		providerID := bridle.ProviderID(b.Provider())
 		if providerID == "" {
 			providerID = "claude-code"
