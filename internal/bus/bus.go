@@ -1,4 +1,4 @@
-// Package bus wires the nexus WebSocket transport into agora's inbox.
+// Package bus wires the nexus WebSocket transport into agora.
 //
 // Owns the long-lived wsasp.Client and the keyfile validation step.
 // The OnDeliver callback installed on the wsasp client pushes each
@@ -26,9 +26,21 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/runtime/keyfile"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 	"github.com/google/uuid"
-
-	"github.com/CarriedWorldUniverse/agora/internal/inbox"
 )
+
+// ChatItem is the payload bus.Config.OnChat receives per chat.deliver
+// frame. Decoupled from any agora-internal queue type so callers
+// (main.go, UI) can map it into whatever shape they need (funnel
+// inbox push, UI render event, etc.).
+type ChatItem struct {
+	From       string
+	Content    string
+	MsgID      int64
+	ReplyTo    int64
+	ThreadRoot int64
+	Reason     string
+	ReceivedAt time.Time
+}
 
 // Config bundles what the Bus needs to come online. KeyfilePath is the
 // canonical input; everything else (NexusURL, AspectName, JWT) is
@@ -37,14 +49,12 @@ type Config struct {
 	KeyfilePath string
 	CursorDir   string // dir for the wsasp cursor file; default ~/.agora
 	Logger      *slog.Logger
-	Inbox       *inbox.Inbox
 
-	// OnChat, if set, is invoked synchronously on every chat.deliver
-	// alongside the inbox.Push. Used by the TUI to render the message
-	// in the chat panel without having to drain the inbox (which would
-	// rob the engine of its work). Optional — leave nil for headless
-	// callers.
-	OnChat func(it inbox.Item)
+	// OnChat, if set, is invoked synchronously on every chat.deliver.
+	// The caller decides what to do with the item (push to funnel,
+	// render in UI, etc.). Required for any caller that wants
+	// inbound chat (which is all of them in practice).
+	OnChat func(it ChatItem)
 }
 
 // Bus is the agora-side handle to the WS transport. Constructed by
@@ -66,8 +76,8 @@ func Connect(ctx context.Context, cfg Config) (*Bus, error) {
 	if cfg.KeyfilePath == "" {
 		return nil, errors.New("bus: KeyfilePath required")
 	}
-	if cfg.Inbox == nil {
-		return nil, errors.New("bus: Inbox required")
+	if cfg.OnChat == nil {
+		return nil, errors.New("bus: OnChat required")
 	}
 	if cfg.Logger == nil {
 		return nil, errors.New("bus: Logger required")
@@ -228,27 +238,24 @@ func (b *Bus) Deregister(ctx context.Context, reason string) error {
 }
 
 // onDeliver is the wsasp.Config.OnDeliver callback. Each chat.deliver
-// frame becomes one inbox.Item with Source: "chat".
+// frame becomes one ChatItem surfaced via Config.OnChat.
 func (b *Bus) onDeliver(msg wsasp.DeliveredMessage) {
 	received, err := time.Parse(time.RFC3339, msg.ReceivedAt)
 	if err != nil {
 		received = time.Now().UTC()
 	}
-	it := inbox.Item{
-		Source:     inbox.SourceChat,
-		From:       msg.From,
-		Content:    msg.Content,
-		MsgID:      msg.ID,
-		ReplyTo:    msg.ReplyTo,
-		ThreadRoot: msg.ThreadRoot,
-		Reason:     msg.Reason,
-		ReceivedAt: received,
-	}
-	b.cfg.Inbox.Push(it)
 	if b.cfg.OnChat != nil {
-		b.cfg.OnChat(it)
+		b.cfg.OnChat(ChatItem{
+			From:       msg.From,
+			Content:    msg.Content,
+			MsgID:      msg.ID,
+			ReplyTo:    msg.ReplyTo,
+			ThreadRoot: msg.ThreadRoot,
+			Reason:     msg.Reason,
+			ReceivedAt: received,
+		})
 	}
-	b.cfg.Logger.Debug("inbox push (chat)",
+	b.cfg.Logger.Debug("chat.deliver",
 		"from", msg.From,
 		"msg_id", msg.ID,
 		"reason", msg.Reason,

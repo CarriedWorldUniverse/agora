@@ -1,14 +1,13 @@
 // Command agora is the operator-facing CLI for the nexus cluster.
 //
 // Connects to nexus over WS, opens a TUI chat panel, lets the operator
-// type into the aspect's inbox, renders incoming chat in real time,
-// and spawns a per-turn engine (claude-code subprocess via bridle)
-// when the inbox has work.
+// type into the funnel-backed deliberation engine, and surfaces
+// results either to the bus (chat-source) or to the panel (tty-source).
 //
-// See docs/spec.md for the full architecture + behaviour rules.
-//
-// NEX-51: v0 skeleton (alt-screen, ctrl-c, keyfile load).
-// NEX-52: WS intake — keyfile.Validate, wsasp.Client.Run, chat.deliver → inbox.
+// As of NEX-82, the deliberation engine is funnel.Funnel — agora
+// consumes the same compaction/session-resolver/filter pipeline the
+// rest of the network uses, and plugs in its source-aware routing
+// via AgoraReturnHandler + UIHook (see internal/engine/).
 package main
 
 import (
@@ -25,9 +24,10 @@ import (
 	"github.com/CarriedWorldUniverse/bridle/provider/claudecode"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
+
 	"github.com/CarriedWorldUniverse/agora/internal/bus"
 	"github.com/CarriedWorldUniverse/agora/internal/engine"
-	"github.com/CarriedWorldUniverse/agora/internal/inbox"
 	"github.com/CarriedWorldUniverse/agora/internal/ui"
 )
 
@@ -35,7 +35,6 @@ func main() {
 	var (
 		keyfilePath = flag.String("keyfile", "", "Path to aspect keyfile JSON (required)")
 		logFile     = flag.String("log-file", "", "Write logs here; default /tmp/agora.log")
-		stub        = flag.Bool("stub", false, "Use the StubTurn (no model); default false = bridle/claude-code")
 		claudePath  = flag.String("claude", "claude", "Path to the claude binary (claudecode provider)")
 		cwd         = flag.String("cwd", "", "Working directory for the claude-code subprocess; empty = inherit")
 	)
@@ -77,26 +76,33 @@ func main() {
 		}()
 	}
 
-	box := inbox.New()
+	// Engine pointer (filled after we build it below) — bus.OnChat
+	// needs to call engine.Receive when a chat.deliver arrives.
+	var eng *engine.Engine
 
-	// Wire OnChat after the program is built so we can call p.Send;
-	// declared here so bus.Config can reference it.
-	onChat := func(it inbox.Item) {
-		if p == nil {
-			return
+	onChat := func(it bus.ChatItem) {
+		if p != nil {
+			p.Send(ui.ChatDelivered{
+				From:       it.From,
+				Content:    it.Content,
+				MsgID:      it.MsgID,
+				ReceivedAt: it.ReceivedAt,
+			})
 		}
-		p.Send(ui.ChatDelivered{
-			From:       it.From,
-			Content:    it.Content,
-			MsgID:      it.MsgID,
-			ReceivedAt: it.ReceivedAt,
-		})
+		if eng != nil {
+			eng.Receive(bridle.InboxItem{
+				From:       it.From,
+				Content:    it.Content,
+				MsgID:      it.MsgID,
+				ThreadRoot: it.ThreadRoot,
+				Source:     engine.SourceChat,
+			})
+		}
 	}
 
 	b, err := bus.Connect(rootCtx, bus.Config{
 		KeyfilePath: *keyfilePath,
 		Logger:      log,
-		Inbox:       box,
 		OnChat:      onChat,
 	})
 	if err != nil {
@@ -111,72 +117,93 @@ func main() {
 	busDone := make(chan error, 1)
 	go func() { busDone <- b.Run(rootCtx) }()
 
+	// Provider + system prompt construction
+	provider := claudecode.New()
+	provider.ClaudePath = *claudePath
+	// Task subagents inherit claude -p's lifetime; SIGKILL'd at
+	// FinalText emission. Disallow under agora; delegate parallelism
+	// to worker aspects via chat per the work-routing policy.
+	provider.DisallowedTools = append(provider.DisallowedTools, "Task")
+
+	providerID := bridle.ProviderID(b.Provider())
+	if providerID == "" {
+		providerID = "claude-code"
+	}
+	modelID := b.Model()
+	if modelID == "" {
+		modelID = "claude-opus-4-7"
+	}
+
+	sysPrompt := engine.AppendAgoraConventions(b.SystemPrompt())
+	log.Info("system prompt composed",
+		"bytes", len(sysPrompt),
+		"provider", providerID,
+		"model", modelID,
+		"cwd", *cwd)
+
+	// UI Program: build before constructing the return handler since
+	// the handler needs to send tea.Msgs into it.
 	cfg := ui.Config{
 		Logger:       log,
 		AspectID:     b.AspectName(),
 		OperatorName: "operator",
-		Inbox:        box,
 		WSConnected:  b.Connected,
 	}
 
+	// onSubmit + inboxLen wired below once engine exists.
 	model := ui.NewModel(cfg)
 	p = tea.NewProgram(model, tea.WithAltScreen())
 
-	// Engine: pulls items off the inbox, runs a turn, routes the
-	// reply by Source tag. Default to bridle/claude-code (NEX-59);
-	// -stub falls back to engine.StubTurn for routing-only tests.
-	var turn engine.TurnFunc
-	if *stub {
-		log.Info("engine: using StubTurn (-stub set)")
-		turn = engine.StubTurn
-	} else {
-		provider := claudecode.New()
-		provider.ClaudePath = *claudePath
-		// Task spawns subagents whose lifetime is bound to the parent
-		// claude -p process; the parent exits as soon as it produces
-		// FinalText, killing any in-flight subagent before its work
-		// returns. Use bridle's proper DisallowedTools surface
-		// (landed 29d8908) instead of the previous --extra-args hack.
-		provider.DisallowedTools = append(provider.DisallowedTools, "Task")
-		providerID := bridle.ProviderID(b.Provider())
-		if providerID == "" {
-			providerID = "claude-code"
-		}
-		model := b.Model()
-		if model == "" {
-			model = "claude-opus-4-7"
-		}
-		log.Info("engine: using bridle/claude-code",
-			"provider_id", providerID,
-			"model", model,
-			"claude_path", *claudePath,
-			"cwd", *cwd)
-		sysPrompt := b.SystemPrompt()
-		// Append agora-side conventions (notify_operator fenced
-		// block, etc.) after the nexus-composed personality so the
-		// model picks up the local side-channel format.
-		sysPrompt = engine.AppendAgoraConventions(sysPrompt)
-		log.Info("system prompt composed",
-			"bytes", len(sysPrompt),
-			"empty", sysPrompt == "")
-		turn = engine.NewBridleTurn(engine.BridleConfig{
-			Provider:     provider,
-			ProviderID:   providerID,
-			Model:        model,
-			AspectID:     b.AspectName(),
-			Cwd:          *cwd,
-			SystemPrompt: sysPrompt,
-		})
-	}
-
-	eng := engine.New(engine.Config{
-		Inbox:   box,
+	// Funnel construction. AgoraReturnHandler routes by Source tag;
+	// UIHook pipes bridle ModelChunks to the live-line.
+	returnHandler := &engine.AgoraReturnHandler{
 		Bus:     b,
 		Program: p,
 		Logger:  log,
-		Turn:    turn,
+	}
+	hook := &engine.UIHook{Program: p}
+
+	f, err := funnel.New(funnel.Config{
+		AspectID:          b.AspectName(),
+		AspectHome:        *cwd,
+		SystemPrompt:      sysPrompt,
+		Harness:           bridle.NewHarness(provider),
+		Provider:          providerID,
+		Model:             modelID,
+		ContextMode:       funnel.ContextGlobal,
+		Return:            returnHandler,
+		ObservabilityHook: hook,
+		Runner:            funnel.NullRunner{},
+		Logger:            log,
+	})
+	if err != nil {
+		log.Error("funnel build failed", "err", err)
+		fmt.Fprintf(os.Stderr, "agora: funnel build: %v\n", err)
+		os.Exit(1)
+	}
+
+	eng = engine.New(engine.Config{
+		Funnel: f,
+		Logger: log,
 	})
 	go eng.Run(rootCtx)
+
+	// Wire the UI → engine paths now that engine exists. UI calls
+	// these on Enter (text → tty-source inbox push) and per-frame
+	// (inbox depth for status line).
+	p.Send(ui.RegisterSubmit{
+		OnSubmit: func(text string) {
+			eng.Receive(bridle.InboxItem{
+				From:    cfg.OperatorName,
+				Content: text,
+				Source:  engine.SourceTTY,
+			})
+			// Wake the UI's depth counter; engine.Run will signal
+			// InboxUpdated after the drain.
+			p.Send(ui.InboxUpdated{})
+		},
+		InboxLen: eng.InboxLen,
+	})
 
 	if _, err := p.Run(); err != nil {
 		log.Error("bubbletea program ended with error", "err", err)

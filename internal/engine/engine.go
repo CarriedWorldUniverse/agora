@@ -1,94 +1,83 @@
-// Package engine drives the per-turn dispatch loop.
+// Package engine drives agora's deliberation loop.
 //
-// Spec §8 — output routing by Source tag:
+// NEX-82: agora consumes funnel.Funnel as the deliberation engine.
+// All compaction, session resolution, filter judgment, and
+// observability live in funnel; agora plugs in via:
 //
-//   - inbox.SourceChat → reply goes to nexus chat via bus.SendChat,
-//     threaded on the original message (reply_to = item.MsgID).
-//   - inbox.SourceTTY  → reply renders in the chat panel only,
-//     via a ChatPanelReply tea.Msg sent to the bubbletea program.
+//   - AgoraReturnHandler — funnel.ReturnHandler that routes results
+//     by trigger.Source (chat → bus.SendChat; tty → panel only).
+//   - UIHook — funnel.ObservabilityHook that pipes bridle ModelChunk
+//     events into the TUI live-line render.
+//   - notify_operator post-hoc parse (NEX-63) — applied inside the
+//     ReturnHandler's Handle path before routing the cleaned reply.
 //
-// The actual model invocation is a pluggable TurnFunc. NEX-55 ships
-// with a stub that acknowledges the input — NEX-58/59 swap in the
-// bridle/claudecode subprocess driver. Routing is settled now so the
-// engine implementation can drop in without disturbing the shell.
+// The engine itself is a thin loop that pushes items into funnel
+// and wakes funnel.Deliberate when there's pending work.
 package engine
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"log/slog"
-	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	bridle "github.com/CarriedWorldUniverse/bridle"
 
-	"github.com/CarriedWorldUniverse/agora/internal/bus"
-	"github.com/CarriedWorldUniverse/agora/internal/inbox"
-	"github.com/CarriedWorldUniverse/agora/internal/ui"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 )
 
-// TurnContext exposes side-effect channels the TurnFunc may invoke
-// during a turn. Spec §8.3: notify_operator is the only sanctioned
-// proactive-operator channel — the model can surface context the
-// operator should see without polluting nexus chat.
-type TurnContext interface {
-	// NotifyOperator renders the body as a notify-class line in the
-	// chat panel only. Never goes to the bus. Safe to call any number
-	// of times during a turn.
-	NotifyOperator(body string)
-
-	// EmitChunk feeds one chunk of streamed model output into the
-	// TUI's live-line render. Spec §10. The chunk is appended to the
-	// live line as-is; line-break + final flushing happen when the
-	// turn returns (engine clears the live line and the returned
-	// reply becomes the canonical chat-panel entry).
-	EmitChunk(chunk string)
-}
-
-// TurnFunc is the per-turn model invocation. Takes an inbox item +
-// turn context (notify_operator etc.), returns the assistant's reply
-// text or an error. NEX-55 wires a stub; NEX-58/59 swap in a
-// bridle-backed implementation that registers the notify_operator
-// tool with claude-code so the model can call it mid-turn.
-type TurnFunc func(ctx context.Context, tc TurnContext, it inbox.Item) (string, error)
-
-// turnCtx is the in-process TurnContext the engine hands to each
-// TurnFunc call. Sends notify messages through the bubbletea
-// program. Constructed per-turn so it captures the current item if a
-// future hook needs it.
-type turnCtx struct {
-	prog *tea.Program
-}
-
-func (t turnCtx) NotifyOperator(body string) {
-	t.prog.Send(ui.NotifyOperator{Body: body})
-}
-
-func (t turnCtx) EmitChunk(chunk string) {
-	t.prog.Send(ui.ModelChunk{Text: chunk})
-}
-
-// Config bundles dependencies for the engine. All fields are
-// required.
+// Config bundles the engine's dependencies. All fields are required.
 type Config struct {
-	Inbox   *inbox.Inbox
-	Bus     *bus.Bus
-	Program *tea.Program
-	Logger  *slog.Logger
-	Turn    TurnFunc
+	Funnel *funnel.Funnel
+	Logger *slog.Logger
 }
 
-// Engine is the dispatch loop. One per agora process.
+// Engine wraps a funnel.Funnel with a wake-up signal channel so
+// agora can push inbox items at any time and have the deliberate
+// loop drain them promptly.
 type Engine struct {
-	cfg Config
+	cfg  Config
+	wake chan struct{}
 }
 
-// New builds an Engine with the given config.
+// New constructs an Engine. The funnel must already be wired with
+// its ReturnHandler + ObservabilityHook before construction.
 func New(cfg Config) *Engine {
-	return &Engine{cfg: cfg}
+	return &Engine{
+		cfg:  cfg,
+		wake: make(chan struct{}, 1),
+	}
 }
 
-// Run blocks until ctx is cancelled. Each Updates wake-up drains
-// the inbox synchronously (one item per turn).
+// Receive pushes an inbox item into the funnel + wakes the deliberate
+// loop. Convenience wrapper; equivalent to Funnel.Receive + Signal.
+//
+// Callers set item.Source ("chat" or "tty") to drive the
+// ReturnHandler's routing decision. Empty Source defaults to "chat"
+// downstream.
+func (e *Engine) Receive(item bridle.InboxItem) {
+	e.cfg.Funnel.Receive(item)
+	e.signal()
+}
+
+// signal coalesces wake-ups: multiple Receive calls between
+// deliberate-loop iterations produce one wake. Cap-1 buffered chan +
+// non-blocking send.
+func (e *Engine) signal() {
+	select {
+	case e.wake <- struct{}{}:
+	default:
+	}
+}
+
+// InboxLen surfaces funnel's queue depth for the UI status line.
+func (e *Engine) InboxLen() int {
+	return e.cfg.Funnel.InboxLen()
+}
+
+// Run blocks until ctx is cancelled. Each wake drains the funnel's
+// inbox (calling Deliberate until ErrEmptyInbox). One Deliberate
+// pops exactly one item per #224; the funnel's compaction + session
+// machinery runs per turn.
 func (e *Engine) Run(ctx context.Context) {
 	e.cfg.Logger.Info("engine running")
 	for {
@@ -96,105 +85,31 @@ func (e *Engine) Run(ctx context.Context) {
 		case <-ctx.Done():
 			e.cfg.Logger.Info("engine stopping", "err", ctx.Err())
 			return
-		case <-e.cfg.Inbox.Updates():
+		case <-e.wake:
 			e.drain(ctx)
 		}
 	}
 }
 
-// drain pops every queued item and processes it in order. Each turn
-// runs to completion before the next starts (per-turn synchronicity
-// matches the per-turn engine model — no interleaving). After
-// draining we notify the UI so the status-line depth counter
-// reflects the new state.
+// drain calls Deliberate in a loop until the funnel's inbox is empty
+// or an error fires. Per-turn errors are logged but don't kill the
+// loop — the ReturnHandler has already surfaced the error to the UI
+// (or chat) by the time we see it here.
 func (e *Engine) drain(ctx context.Context) {
 	for {
-		it, ok := e.cfg.Inbox.Take()
-		if !ok {
-			break
-		}
-		e.handle(ctx, it)
-	}
-	e.cfg.Program.Send(ui.InboxUpdated{})
-}
-
-// handle runs one turn + routes the reply by Source tag. Clears any
-// streamed-but-not-yet-committed live line at the end of every turn,
-// regardless of outcome, so a partial render doesn't linger if the
-// turn errored mid-stream.
-//
-// Post-turn the reply text is scanned for ```notify-operator```
-// blocks (NEX-63); extracted bodies fire NotifyOperator and the
-// cleaned reply continues through Source-tag routing.
-func (e *Engine) handle(ctx context.Context, it inbox.Item) {
-	tc := turnCtx{prog: e.cfg.Program}
-	defer e.cfg.Program.Send(ui.ModelTurnEnd{})
-	reply, err := e.cfg.Turn(ctx, tc, it)
-	if err != nil {
-		e.cfg.Logger.Error("turn failed",
-			"source", it.Source,
-			"from", it.From,
-			"err", err)
-		// Surface to the chat panel so the operator sees what
-		// happened. Chat-source failures still get a chat-panel
-		// notification (not a bus reply) because we don't want to
-		// shove model errors at the rest of the cluster.
-		e.cfg.Program.Send(ui.EngineError{
-			Source: string(it.Source),
-			Error:  err.Error(),
-		})
-		return
-	}
-
-	// Strip + route any notify-operator fenced blocks before
-	// dispatching the reply (NEX-63).
-	notifications, cleaned := extractNotifyBlocks(reply)
-	for _, n := range notifications {
-		tc.NotifyOperator(n)
-	}
-	reply = cleaned
-
-	switch it.Source {
-	case inbox.SourceChat:
-		if _, sendErr := e.cfg.Bus.SendChat(ctx, reply, it.MsgID, ""); sendErr != nil {
-			e.cfg.Logger.Error("send chat reply failed",
-				"reply_to", it.MsgID,
-				"err", sendErr)
-			// Surface in the panel so the operator knows.
-			e.cfg.Program.Send(ui.EngineError{
-				Source: "chat",
-				Error:  fmt.Sprintf("send to nexus: %v", sendErr),
-			})
-			return
-		}
-		// Mirror the outgoing chat into the panel so the operator can
-		// see what we replied with, without needing to read it back
-		// from the bus.
-		e.cfg.Program.Send(ui.ChatSent{
-			To:   it.From,
-			Body: reply,
-		})
-
-	case inbox.SourceTTY:
-		e.cfg.Program.Send(ui.ChatPanelReply{Body: reply})
-	}
-}
-
-// StubTurn is the NEX-55 placeholder TurnFunc. Echoes a fixed
-// acknowledgement so the routing path can be validated end-to-end
-// without a model. Calls NotifyOperator once per turn (NEX-56) and
-// emits the reply char-by-char via EmitChunk (NEX-57) to exercise
-// the live-line render path. Swap to bridle in NEX-58/59.
-func StubTurn(ctx context.Context, tc TurnContext, it inbox.Item) (string, error) {
-	tc.NotifyOperator(fmt.Sprintf("stub turn fired (source=%s, from=%s)", it.Source, it.From))
-	reply := fmt.Sprintf("[stub engine] received via %s: %q", it.Source, it.Content)
-	for _, r := range reply {
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(8 * time.Millisecond):
-			tc.EmitChunk(string(r))
+			return
+		default:
+		}
+		_, err := e.cfg.Funnel.Deliberate(ctx, "")
+		if errors.Is(err, funnel.ErrEmptyInbox) {
+			return
+		}
+		if err != nil {
+			e.cfg.Logger.Error("deliberate failed", "err", err)
+			// Don't return — try the next item if there is one. The
+			// loop terminates naturally on ErrEmptyInbox.
 		}
 	}
-	return reply, nil
 }

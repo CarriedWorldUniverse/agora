@@ -20,8 +20,6 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-
-	"github.com/CarriedWorldUniverse/agora/internal/inbox"
 )
 
 // InboxUpdated is the bubbletea message agora's cmd pump sends on
@@ -87,6 +85,15 @@ type ModelTurnEnd struct{}
 // tea.Quit — this is the final exit signal.
 type ReadyToQuit struct{}
 
+// RegisterSubmit lets main.go hand the engine callbacks to the UI
+// after the engine has been constructed. Sent once via p.Send right
+// after engine.New so the Model can route input submissions and
+// read inbox depth.
+type RegisterSubmit struct {
+	OnSubmit func(text string)
+	InboxLen func() int
+}
+
 // wsTick is the internal heartbeat that drives the WSConnected
 // poll. Tickled at a fixed cadence (see wsTickInterval).
 type wsTick struct{}
@@ -101,7 +108,6 @@ type Config struct {
 	HistoryDepth int
 	InputHistory int
 	Logger       *slog.Logger
-	Inbox        *inbox.Inbox
 
 	// WSConnected returns the current WS state. Used by the TUI's
 	// periodic refresh to drive the status-line indicator. Nil-safe
@@ -125,6 +131,13 @@ type Model struct {
 	vpReady    bool // becomes true once the first WindowSizeMsg sizes the viewport
 	inboxDepth int
 	wsConnected bool
+
+	// onSubmit is the callback main.go registers via RegisterSubmit
+	// so the Model can hand input lines to the engine. Nil until
+	// registered; submissions before registration are silently dropped.
+	onSubmit func(text string)
+	// inboxLen is similarly registered post-construction; nil-safe.
+	inboxLen func() int
 
 	// inputHistory is the ring of past submitted lines, oldest first.
 	// Capped at cfg.InputHistory.
@@ -269,14 +282,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				from:  m.cfg.OperatorName,
 				body:  text,
 			})
-			if m.cfg.Inbox != nil {
-				m.cfg.Inbox.Push(inbox.Item{
-					Source:     inbox.SourceTTY,
-					From:       m.cfg.OperatorName,
-					Content:    text,
-					ReceivedAt: now,
-				})
+			if m.onSubmit != nil {
+				m.onSubmit(text)
 			}
+			_ = now // reserved for future "submitted at" rendering
 			return m, nil
 		case "pgup", "pgdown", "ctrl+u", "ctrl+d":
 			// Always route paging to the viewport regardless of
@@ -326,8 +335,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case InboxUpdated:
-		if m.cfg.Inbox != nil {
-			m.inboxDepth = m.cfg.Inbox.Len()
+		if m.inboxLen != nil {
+			m.inboxDepth = m.inboxLen()
 		}
 		return m, nil
 
@@ -343,6 +352,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ReadyToQuit:
 		return m, tea.Quit
+
+	case RegisterSubmit:
+		m.onSubmit = msg.OnSubmit
+		m.inboxLen = msg.InboxLen
+		return m, nil
 
 	case wsTick:
 		if m.cfg.WSConnected != nil {
