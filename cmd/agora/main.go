@@ -134,9 +134,9 @@ func main() {
 		// Task spawns subagents whose lifetime is bound to the parent
 		// claude -p process; the parent exits as soon as it produces
 		// FinalText, killing any in-flight subagent before its work
-		// returns. Disallow it under agora so the model doesn't pick
-		// up the pattern. Revisit when the engine lifecycle changes.
-		provider.ExtraArgs = append(provider.ExtraArgs, "--disallowedTools", "Task")
+		// returns. Use bridle's proper DisallowedTools surface
+		// (landed 29d8908) instead of the previous --extra-args hack.
+		provider.DisallowedTools = append(provider.DisallowedTools, "Task")
 		providerID := bridle.ProviderID(b.Provider())
 		if providerID == "" {
 			providerID = "claude-code"
