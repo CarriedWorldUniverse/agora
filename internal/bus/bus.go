@@ -50,6 +50,8 @@ type Bus struct {
 	cfg        Config
 	client     *wsasp.Client
 	aspectName string
+	provider   string
+	model      string
 }
 
 // Connect validates the keyfile against the nexus it points at,
@@ -94,7 +96,12 @@ func Connect(ctx context.Context, cfg Config) (*Bus, error) {
 	}
 	cursorFile := wsasp.CursorFileForAspect(cursorDir)
 
-	b := &Bus{cfg: cfg, aspectName: vr.AspectName}
+	b := &Bus{
+		cfg:        cfg,
+		aspectName: vr.AspectName,
+		provider:   vr.Provider,
+		model:      vr.Model,
+	}
 
 	wsCfg := wsasp.Config{
 		URL:        vr.NexusURL,
@@ -127,6 +134,13 @@ func (b *Bus) Run(ctx context.Context) error {
 
 // AspectName is the canonical aspect id pulled from validation.
 func (b *Bus) AspectName() string { return b.aspectName }
+
+// Provider is the bridle provider id ("claude-code", "claude-api",
+// "openai-api", "ollama-local") pulled from validation.
+func (b *Bus) Provider() string { return b.provider }
+
+// Model is the provider-specific model id from validation.
+func (b *Bus) Model() string { return b.model }
 
 // SendChat forwards to wsasp for outbound chat (spec §8.1 routing).
 func (b *Bus) SendChat(ctx context.Context, content string, replyTo int64, topic string) (int64, error) {

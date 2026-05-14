@@ -20,6 +20,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	bridle "github.com/CarriedWorldUniverse/bridle"
+	"github.com/CarriedWorldUniverse/bridle/provider/claudecode"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/CarriedWorldUniverse/agora/internal/bus"
@@ -32,6 +34,9 @@ func main() {
 	var (
 		keyfilePath = flag.String("keyfile", "", "Path to aspect keyfile JSON (required)")
 		logFile     = flag.String("log-file", "", "Write logs here; default /tmp/agora.log")
+		stub        = flag.Bool("stub", false, "Use the StubTurn (no model); default false = bridle/claude-code")
+		claudePath  = flag.String("claude", "claude", "Path to the claude binary (claudecode provider)")
+		cwd         = flag.String("cwd", "", "Working directory for the claude-code subprocess; empty = inherit")
 	)
 	flag.Parse()
 
@@ -102,17 +107,43 @@ func main() {
 	p = tea.NewProgram(model, tea.WithAltScreen())
 
 	// Engine: pulls items off the inbox, runs a turn, routes the
-	// reply by Source tag. NEX-55 ships with engine.StubTurn —
-	// NEX-58/59 swap in the bridle-backed real turn. The engine
-	// also sends ui.InboxUpdated{} after each drain so the status
-	// line reflects the new depth (it's always 0 after a drain,
-	// but the message also covers the transient pre-drain state).
+	// reply by Source tag. Default to bridle/claude-code (NEX-59);
+	// -stub falls back to engine.StubTurn for routing-only tests.
+	var turn engine.TurnFunc
+	if *stub {
+		log.Info("engine: using StubTurn (-stub set)")
+		turn = engine.StubTurn
+	} else {
+		provider := claudecode.New()
+		provider.ClaudePath = *claudePath
+		providerID := bridle.ProviderID(b.Provider())
+		if providerID == "" {
+			providerID = "claude-code"
+		}
+		model := b.Model()
+		if model == "" {
+			model = "claude-opus-4-7"
+		}
+		log.Info("engine: using bridle/claude-code",
+			"provider_id", providerID,
+			"model", model,
+			"claude_path", *claudePath,
+			"cwd", *cwd)
+		turn = engine.NewBridleTurn(engine.BridleConfig{
+			Provider:   provider,
+			ProviderID: providerID,
+			Model:      model,
+			AspectID:   b.AspectName(),
+			Cwd:        *cwd,
+		})
+	}
+
 	eng := engine.New(engine.Config{
 		Inbox:   box,
 		Bus:     b,
 		Program: p,
 		Logger:  log,
-		Turn:    engine.StubTurn,
+		Turn:    turn,
 	})
 	go eng.Run(rootCtx)
 
