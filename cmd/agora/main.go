@@ -188,22 +188,23 @@ func main() {
 	})
 	go eng.Run(rootCtx)
 
-	// Wire the UI → engine paths now that engine exists. UI calls
-	// these on Enter (text → tty-source inbox push) and per-frame
-	// (inbox depth for status line).
-	p.Send(ui.RegisterSubmit{
-		OnSubmit: func(text string) {
-			eng.Receive(bridle.InboxItem{
-				From:    cfg.OperatorName,
-				Content: text,
-				Source:  engine.SourceTTY,
-			})
-			// Wake the UI's depth counter; engine.Run will signal
-			// InboxUpdated after the drain.
-			p.Send(ui.InboxUpdated{})
-		},
-		InboxLen: eng.InboxLen,
-	})
+	// Wire the UI → engine paths now that engine exists. p.Send
+	// blocks before p.Run starts the runtime, so do this in a
+	// goroutine — Run consumes the message once it begins. Briefly
+	// races user input: if they hit Enter before this lands, onSubmit
+	// is nil and the keystroke is dropped. Acceptable (<1ms window).
+	go func() {
+		p.Send(ui.RegisterSubmit{
+			OnSubmit: func(text string) {
+				eng.Receive(bridle.InboxItem{
+					From:    cfg.OperatorName,
+					Content: text,
+					Source:  engine.SourceTTY,
+				})
+			},
+			InboxLen: eng.InboxLen,
+		})
+	}()
 
 	if _, err := p.Run(); err != nil {
 		log.Error("bubbletea program ended with error", "err", err)
