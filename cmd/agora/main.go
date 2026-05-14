@@ -23,6 +23,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/CarriedWorldUniverse/agora/internal/bus"
+	"github.com/CarriedWorldUniverse/agora/internal/engine"
 	"github.com/CarriedWorldUniverse/agora/internal/inbox"
 	"github.com/CarriedWorldUniverse/agora/internal/ui"
 )
@@ -100,10 +101,20 @@ func main() {
 	model := ui.NewModel(cfg)
 	p = tea.NewProgram(model, tea.WithAltScreen())
 
-	// Inbox wake-ups → tea.Msg. Goroutine bridges the channel into
-	// the bubbletea program so the UI repaints (and later, kicks the
-	// engine) on every Push.
-	go pumpInbox(rootCtx, box, p)
+	// Engine: pulls items off the inbox, runs a turn, routes the
+	// reply by Source tag. NEX-55 ships with engine.StubTurn —
+	// NEX-58/59 swap in the bridle-backed real turn. The engine
+	// also sends ui.InboxUpdated{} after each drain so the status
+	// line reflects the new depth (it's always 0 after a drain,
+	// but the message also covers the transient pre-drain state).
+	eng := engine.New(engine.Config{
+		Inbox:   box,
+		Bus:     b,
+		Program: p,
+		Logger:  log,
+		Turn:    engine.StubTurn,
+	})
+	go eng.Run(rootCtx)
 
 	if _, err := p.Run(); err != nil {
 		log.Error("bubbletea program ended with error", "err", err)
@@ -114,21 +125,6 @@ func main() {
 	cancel()
 	if err := <-busDone; err != nil && rootCtx.Err() == nil {
 		log.Error("bus exited with error", "err", err)
-	}
-}
-
-// pumpInbox forwards inbox wake-ups to the bubbletea Program as
-// ui.InboxUpdated messages. The UI's Update sees these and refreshes
-// any inbox-derived view state (the status line counter today; the
-// chat panel render in NEX-53).
-func pumpInbox(ctx context.Context, box *inbox.Inbox, p *tea.Program) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-box.Updates():
-			p.Send(ui.InboxUpdated{})
-		}
 	}
 }
 

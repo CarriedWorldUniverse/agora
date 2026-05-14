@@ -39,6 +39,27 @@ type ChatDelivered struct {
 	ReceivedAt time.Time
 }
 
+// ChatSent is emitted by the engine after a successful bus.SendChat
+// so the chat panel can mirror what we replied with.
+type ChatSent struct {
+	To   string
+	Body string
+}
+
+// ChatPanelReply is emitted by the engine for tty-sourced turns —
+// the reply stays local (no bus send) and renders in the chat panel
+// only. Spec §8.2.
+type ChatPanelReply struct {
+	Body string
+}
+
+// EngineError is emitted on a turn failure or a bus send failure so
+// the operator sees the problem in the panel.
+type EngineError struct {
+	Source string
+	Error  string
+}
+
 // Config bundles construction-time settings for the Model. Populated
 // by cmd/agora/main.go from the keyfile + flags.
 type Config struct {
@@ -169,6 +190,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			when:  msg.ReceivedAt,
 			from:  msg.From,
 			body:  msg.Content,
+		}, m.cfg.HistoryDepth)
+		return m, nil
+
+	case ChatSent:
+		m.chat = appendChatLine(m.chat, chatLine{
+			class: classChatOut,
+			when:  time.Now(),
+			from:  msg.To,
+			body:  msg.Body,
+		}, m.cfg.HistoryDepth)
+		return m, nil
+
+	case ChatPanelReply:
+		m.chat = appendChatLine(m.chat, chatLine{
+			class: classModel,
+			when:  time.Now(),
+			from:  m.cfg.AspectID,
+			body:  msg.Body,
+		}, m.cfg.HistoryDepth)
+		return m, nil
+
+	case EngineError:
+		m.chat = appendChatLine(m.chat, chatLine{
+			class: classSystem,
+			when:  time.Now(),
+			body:  fmt.Sprintf("engine error (%s): %s", msg.Source, msg.Error),
 		}, m.cfg.HistoryDepth)
 		return m, nil
 	}
