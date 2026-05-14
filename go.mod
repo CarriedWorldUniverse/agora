@@ -3,16 +3,17 @@ module github.com/CarriedWorldUniverse/agora
 go 1.26.2
 
 require (
+	github.com/CarriedWorldUniverse/bridle v0.0.0-20260514060234-33de2342e535
 	github.com/CarriedWorldUniverse/nexus v0.0.0
+	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/google/uuid v1.6.0
 )
 
 require (
-	github.com/CarriedWorldUniverse/bridle v0.0.0-20260514060234-33de2342e535 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
-	github.com/charmbracelet/bubbles v1.0.0 // indirect
 	github.com/charmbracelet/colorprofile v0.4.1 // indirect
 	github.com/charmbracelet/x/ansi v0.11.6 // indirect
 	github.com/charmbracelet/x/cellbuf v0.0.15 // indirect
@@ -23,7 +24,6 @@ require (
 	github.com/coder/websocket v1.8.14 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/google/jsonschema-go v0.4.2 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
 	github.com/mark3labs/mcp-go v0.50.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect

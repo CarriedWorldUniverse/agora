@@ -19,9 +19,19 @@ import (
 	"sync"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
+	"github.com/google/uuid"
 
 	"github.com/CarriedWorldUniverse/agora/internal/inbox"
 )
+
+// agoraSessionNamespace is the uuid_v5 namespace for agora-derived
+// claude-code session ids. Constant so the derivation is stable
+// across processes and reboots — same (aspect, source) pair → same
+// session id → same jsonl on disk.
+//
+// Generated once with `uuidgen` and pinned here; never change it
+// (would orphan every existing session jsonl).
+var agoraSessionNamespace = uuid.MustParse("6f8c4d7e-1a3b-4c5d-9e2f-7a1b2c3d4e5f")
 
 // BridleConfig bundles what the bridle-backed TurnFunc needs.
 type BridleConfig struct {
@@ -103,15 +113,16 @@ func NewBridleTurn(cfg BridleConfig) TurnFunc {
 	}
 }
 
-// deriveSessionID returns a stable per-source session id. v0:
-//   - tty:  "agora-tty-<aspect>"
-//   - chat: "agora-chat-<aspect>"
+// deriveSessionID returns a stable per-source session id, as a
+// uuid_v5 string (claude-code rejects non-UUID session ids). v0
+// derivation: uuid_v5(agoraSessionNamespace, "<source>:<aspect>").
 //
-// Per-thread session derivation (uuid_v5 of thread_root) is deferred
-// to a follow-up; for the dogfood window, one chat session and one
-// tty session per aspect is enough to validate the engine path.
+// Per-thread session derivation (incorporating thread_root) is
+// deferred to a follow-up; for the dogfood window, one chat session
+// and one tty session per aspect is enough.
 func deriveSessionID(aspectID string, it inbox.Item) string {
-	return fmt.Sprintf("agora-%s-%s", it.Source, aspectID)
+	name := fmt.Sprintf("%s:%s", it.Source, aspectID)
+	return uuid.NewSHA1(agoraSessionNamespace, []byte(name)).String()
 }
 
 // renderUserMessage shapes the inbox item into the prompt body for
