@@ -25,10 +25,35 @@ import (
 	"github.com/CarriedWorldUniverse/agora/internal/ui"
 )
 
-// TurnFunc is the per-turn model invocation. Takes an inbox item,
-// returns the assistant's reply text (or an error). NEX-55 wires a
-// stub; NEX-58/59 swap in a bridle-backed implementation.
-type TurnFunc func(ctx context.Context, it inbox.Item) (string, error)
+// TurnContext exposes side-effect channels the TurnFunc may invoke
+// during a turn. Spec §8.3: notify_operator is the only sanctioned
+// proactive-operator channel — the model can surface context the
+// operator should see without polluting nexus chat.
+type TurnContext interface {
+	// NotifyOperator renders the body as a notify-class line in the
+	// chat panel only. Never goes to the bus. Safe to call any number
+	// of times during a turn.
+	NotifyOperator(body string)
+}
+
+// TurnFunc is the per-turn model invocation. Takes an inbox item +
+// turn context (notify_operator etc.), returns the assistant's reply
+// text or an error. NEX-55 wires a stub; NEX-58/59 swap in a
+// bridle-backed implementation that registers the notify_operator
+// tool with claude-code so the model can call it mid-turn.
+type TurnFunc func(ctx context.Context, tc TurnContext, it inbox.Item) (string, error)
+
+// turnCtx is the in-process TurnContext the engine hands to each
+// TurnFunc call. Sends notify messages through the bubbletea
+// program. Constructed per-turn so it captures the current item if a
+// future hook needs it.
+type turnCtx struct {
+	prog *tea.Program
+}
+
+func (t turnCtx) NotifyOperator(body string) {
+	t.prog.Send(ui.NotifyOperator{Body: body})
+}
 
 // Config bundles dependencies for the engine. All fields are
 // required.
@@ -83,7 +108,8 @@ func (e *Engine) drain(ctx context.Context) {
 
 // handle runs one turn + routes the reply by Source tag.
 func (e *Engine) handle(ctx context.Context, it inbox.Item) {
-	reply, err := e.cfg.Turn(ctx, it)
+	tc := turnCtx{prog: e.cfg.Program}
+	reply, err := e.cfg.Turn(ctx, tc, it)
 	if err != nil {
 		e.cfg.Logger.Error("turn failed",
 			"source", it.Source,
@@ -128,7 +154,9 @@ func (e *Engine) handle(ctx context.Context, it inbox.Item) {
 
 // StubTurn is the NEX-55 placeholder TurnFunc. Echoes a fixed
 // acknowledgement so the routing path can be validated end-to-end
-// without a model. Swap to bridle in NEX-58/59.
-func StubTurn(ctx context.Context, it inbox.Item) (string, error) {
+// without a model. Calls NotifyOperator once per turn so NEX-56's
+// notify path is exercised too. Swap to bridle in NEX-58/59.
+func StubTurn(ctx context.Context, tc TurnContext, it inbox.Item) (string, error) {
+	tc.NotifyOperator(fmt.Sprintf("stub turn fired (source=%s, from=%s)", it.Source, it.From))
 	return fmt.Sprintf("[stub engine] received via %s: %q", it.Source, it.Content), nil
 }

@@ -60,6 +60,14 @@ type EngineError struct {
 	Error  string
 }
 
+// NotifyOperator is emitted by the engine's TurnContext.NotifyOperator
+// — the only proactive-operator channel available to the per-turn
+// model. Renders as a notify-class line in the chat panel; never
+// goes to the bus. Spec §8.3.
+type NotifyOperator struct {
+	Body string
+}
+
 // Config bundles construction-time settings for the Model. Populated
 // by cmd/agora/main.go from the keyfile + flags.
 type Config struct {
@@ -216,6 +224,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			class: classSystem,
 			when:  time.Now(),
 			body:  fmt.Sprintf("engine error (%s): %s", msg.Source, msg.Error),
+		}, m.cfg.HistoryDepth)
+		return m, nil
+
+	case NotifyOperator:
+		m.chat = appendChatLine(m.chat, chatLine{
+			class: classNotify,
+			when:  time.Now(),
+			body:  msg.Body,
 		}, m.cfg.HistoryDepth)
 		return m, nil
 	}
