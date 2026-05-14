@@ -24,14 +24,18 @@ import (
 	"github.com/CarriedWorldUniverse/agora/internal/inbox"
 )
 
-// agoraSessionNamespace is the uuid_v5 namespace for agora-derived
-// claude-code session ids. Constant so the derivation is stable
-// across processes and reboots — same (aspect, source) pair → same
-// session id → same jsonl on disk.
+// sessionNamespace mirrors funnel.sessionNamespace so agora-derived
+// session ids share the same UUID space as the funnel — same aspect,
+// same thread, same jsonl on disk regardless of which harness drove
+// the turn. Derived (not hardcoded) so the value is reproducible
+// from the name string and not bound to any single operator's UUID.
 //
-// Generated once with `uuidgen` and pinned here; never change it
-// (would orphan every existing session jsonl).
-var agoraSessionNamespace = uuid.MustParse("6f8c4d7e-1a3b-4c5d-9e2f-7a1b2c3d4e5f")
+// TODO(NEX-46.x): swap this whole derivation for funnel.SessionResolver
+// rather than duplicating the namespace + derivation logic. Today we
+// don't import nexus/frame/funnel from agora because it pulls in
+// heavier deps; revisit once we want per-thread session isolation
+// (the resolver also tracks the New/Resumed flag the harness needs).
+var sessionNamespace = uuid.NewSHA1(uuid.NameSpaceURL, []byte("nexus.funnel.session.v1"))
 
 // BridleConfig bundles what the bridle-backed TurnFunc needs.
 type BridleConfig struct {
@@ -121,8 +125,11 @@ func NewBridleTurn(cfg BridleConfig) TurnFunc {
 // deferred to a follow-up; for the dogfood window, one chat session
 // and one tty session per aspect is enough.
 func deriveSessionID(aspectID string, it inbox.Item) string {
-	name := fmt.Sprintf("%s:%s", it.Source, aspectID)
-	return uuid.NewSHA1(agoraSessionNamespace, []byte(name)).String()
+	// Matches funnel's derivation shape: namespace + (aspect + ":" + key).
+	// Key is the source tag for now; per-thread isolation lands when we
+	// adopt funnel.SessionResolver and feed it ThreadRoot per NEX-46.x.
+	name := aspectID + ":" + string(it.Source)
+	return uuid.NewSHA1(sessionNamespace, []byte(name)).String()
 }
 
 // renderUserMessage shapes the inbox item into the prompt body for
