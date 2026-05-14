@@ -103,31 +103,13 @@ func wrapLines(s string, width int) string {
 	return lipgloss.NewStyle().Width(width).Render(s)
 }
 
-// renderChatBuffer joins all visible lines into the chat panel body
-// given a target width + height. Lines past the bottom of the visible
-// area (height) get clipped from the *top* so the most recent line is
-// always anchored at the bottom — matching how every chat client
-// behaves.
-func renderChatBuffer(lines []chatLine, width, height int) string {
-	if height <= 0 {
-		return ""
-	}
+// renderChatContent renders the full chat scrollback as a single
+// string, wrapped to width but NOT height-clipped — the caller
+// (bubbles/viewport) owns the scroll region and clipping. Spec §11.
+func renderChatContent(lines []chatLine, width int) string {
 	rendered := make([]string, 0, len(lines))
 	for _, l := range lines {
 		rendered = append(rendered, wrapLines(renderChatLine(l), width))
 	}
-	joined := strings.Join(rendered, "\n")
-
-	// Anchor to the bottom: count the number of visible lines after
-	// wrapping and trim the top if we overflow.
-	visible := strings.Split(joined, "\n")
-	if len(visible) > height {
-		visible = visible[len(visible)-height:]
-	} else if len(visible) < height {
-		// Pad top so the chat stays anchored to the bottom even when
-		// scrollback is short.
-		pad := make([]string, height-len(visible))
-		visible = append(pad, visible...)
-	}
-	return strings.Join(visible, "\n")
+	return strings.Join(rendered, "\n")
 }

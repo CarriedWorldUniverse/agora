@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -103,6 +104,8 @@ type Model struct {
 
 	chat       []chatLine
 	input      textinput.Model
+	vp         viewport.Model
+	vpReady    bool // becomes true once the first WindowSizeMsg sizes the viewport
 	inboxDepth int
 	wsConnected bool // future NEX-52.1 hook; default false until we surface it
 
@@ -165,6 +168,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		// textinput width = total width minus the prompt ("› ").
 		m.input.Width = max(0, msg.Width-3)
+		chatHeight := m.chatHeight()
+		if !m.vpReady {
+			m.vp = viewport.New(msg.Width, chatHeight)
+			m.vpReady = true
+		} else {
+			m.vp.Width = msg.Width
+			m.vp.Height = chatHeight
+		}
+		// Reflow content at the new width.
+		m.refreshChatContent(true)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -179,12 +192,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.input.SetValue("")
 			now := time.Now()
-			m.chat = appendChatLine(m.chat, chatLine{
+			m.appendChat(chatLine{
 				class: classTTYIn,
 				when:  now,
 				from:  m.cfg.OperatorName,
 				body:  text,
-			}, m.cfg.HistoryDepth)
+			})
 			if m.cfg.Inbox != nil {
 				m.cfg.Inbox.Push(inbox.Item{
 					Source:     inbox.SourceTTY,
@@ -194,6 +207,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 			}
 			return m, nil
+		case "pgup", "pgdown", "ctrl+u", "ctrl+d":
+			// Always route paging to the viewport regardless of
+			// input-prompt state — pgup/pgdown have no meaning in
+			// a single-line textinput anyway.
+			var vpCmd tea.Cmd
+			m.vp, vpCmd = m.vp.Update(msg)
+			return m, vpCmd
+		}
+		// Arrow keys when the input is empty → viewport line scroll.
+		// When the input has content, arrow keys belong to textinput
+		// (cursor movement / future history recall).
+		if m.input.Value() == "" {
+			switch msg.String() {
+			case "up", "down":
+				var vpCmd tea.Cmd
+				m.vp, vpCmd = m.vp.Update(msg)
+				return m, vpCmd
+			}
 		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
@@ -210,46 +241,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.lastRenderedMsgID = msg.MsgID
-		m.chat = appendChatLine(m.chat, chatLine{
+		m.appendChat(chatLine{
 			class: classChatIn,
 			when:  msg.ReceivedAt,
 			from:  msg.From,
 			body:  msg.Content,
-		}, m.cfg.HistoryDepth)
+		})
 		return m, nil
 
 	case ChatSent:
-		m.chat = appendChatLine(m.chat, chatLine{
+		m.appendChat(chatLine{
 			class: classChatOut,
 			when:  time.Now(),
 			from:  msg.To,
 			body:  msg.Body,
-		}, m.cfg.HistoryDepth)
+		})
 		return m, nil
 
 	case ChatPanelReply:
-		m.chat = appendChatLine(m.chat, chatLine{
+		m.appendChat(chatLine{
 			class: classModel,
 			when:  time.Now(),
 			from:  m.cfg.AspectID,
 			body:  msg.Body,
-		}, m.cfg.HistoryDepth)
+		})
 		return m, nil
 
 	case EngineError:
-		m.chat = appendChatLine(m.chat, chatLine{
+		m.appendChat(chatLine{
 			class: classSystem,
 			when:  time.Now(),
 			body:  fmt.Sprintf("engine error (%s): %s", msg.Source, msg.Error),
-		}, m.cfg.HistoryDepth)
+		})
 		return m, nil
 
 	case NotifyOperator:
-		m.chat = appendChatLine(m.chat, chatLine{
+		m.appendChat(chatLine{
 			class: classNotify,
 			when:  time.Now(),
 			body:  msg.Body,
-		}, m.cfg.HistoryDepth)
+		})
 		return m, nil
 
 	case ModelChunk:
@@ -291,20 +322,16 @@ func (m Model) View() string {
 	status := m.renderStatus()
 	divider := dividerStyle.Render(strings.Repeat("─", m.width))
 
-	// Chrome rows: status, divider, [live line], divider, input.
-	// 4 rows when no live line; 5 with one.
-	chrome := 4
 	liveRow := ""
 	if m.liveLine != "" {
-		chrome = 5
 		liveRow = modelStyle.Render(m.cfg.AspectID+":") + " " + m.liveLine
 		liveRow = wrapLines(liveRow, m.width)
 	}
-	chatHeight := m.height - chrome
-	if chatHeight < 1 {
-		chatHeight = 1
-	}
-	chatBody := renderChatBuffer(m.chat, m.width, chatHeight)
+
+	// Resize the viewport's height to match current chrome state so
+	// the chat region grows/shrinks when the live line appears.
+	m.vp.Height = m.chatHeight()
+	chatBody := m.vp.View()
 	inputRow := m.input.View()
 
 	rows := []string{status, divider, chatBody}
@@ -314,6 +341,44 @@ func (m Model) View() string {
 	rows = append(rows, divider, inputRow)
 
 	return strings.Join(rows, "\n")
+}
+
+// chatHeight is the height available to the chat viewport given the
+// current chrome state: status (1) + 2 dividers (2) + input (1) +
+// liveLine (0 or 1).
+func (m Model) chatHeight() int {
+	chrome := 4
+	if m.liveLine != "" {
+		chrome = 5
+	}
+	h := m.height - chrome
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
+// appendChat pushes a line onto the ring + refreshes the viewport
+// content. Auto-scrolls to bottom when the user was already at the
+// bottom; preserves manual scroll position otherwise.
+func (m *Model) appendChat(line chatLine) {
+	m.chat = appendChatLine(m.chat, line, m.cfg.HistoryDepth)
+	m.refreshChatContent(false)
+}
+
+// refreshChatContent regenerates the viewport content from m.chat at
+// the current width. If forceBottom is true, snap to bottom; otherwise
+// only auto-scroll if we were already at the bottom (so manual
+// scroll-up sticks).
+func (m *Model) refreshChatContent(forceBottom bool) {
+	if !m.vpReady {
+		return
+	}
+	atBottom := m.vp.AtBottom()
+	m.vp.SetContent(renderChatContent(m.chat, m.vp.Width))
+	if forceBottom || atBottom {
+		m.vp.GotoBottom()
+	}
 }
 
 // renderStatus is the top-of-screen one-line status. Spec §9.1.
