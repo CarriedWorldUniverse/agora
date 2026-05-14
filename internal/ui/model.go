@@ -86,6 +86,12 @@ type ModelTurnEnd struct{}
 // tea.Quit — this is the final exit signal.
 type ReadyToQuit struct{}
 
+// wsTick is the internal heartbeat that drives the WSConnected
+// poll. Tickled at a fixed cadence (see wsTickInterval).
+type wsTick struct{}
+
+const wsTickInterval = 1500 * time.Millisecond
+
 // Config bundles construction-time settings for the Model. Populated
 // by cmd/agora/main.go from the keyfile + flags.
 type Config struct {
@@ -95,6 +101,11 @@ type Config struct {
 	InputHistory int
 	Logger       *slog.Logger
 	Inbox        *inbox.Inbox
+
+	// WSConnected returns the current WS state. Used by the TUI's
+	// periodic refresh to drive the status-line indicator. Nil-safe
+	// (returns "offline" if unset).
+	WSConnected func() bool
 }
 
 // Model is bubbletea's Model. Owns: layout dimensions, the chat
@@ -159,7 +170,10 @@ func (m Model) Init() tea.Cmd {
 			"aspect", m.cfg.AspectID,
 			"operator", m.cfg.OperatorName)
 	}
-	return textinput.Blink
+	return tea.Batch(
+		textinput.Blink,
+		tea.Tick(wsTickInterval, func(time.Time) tea.Msg { return wsTick{} }),
+	)
 }
 
 // Update handles incoming messages. v0 set: window resize, key
@@ -267,6 +281,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ReadyToQuit:
 		return m, tea.Quit
+
+	case wsTick:
+		if m.cfg.WSConnected != nil {
+			m.wsConnected = m.cfg.WSConnected()
+		}
+		return m, tea.Tick(wsTickInterval, func(time.Time) tea.Msg { return wsTick{} })
 
 	case ChatDelivered:
 		if msg.MsgID <= m.lastRenderedMsgID {

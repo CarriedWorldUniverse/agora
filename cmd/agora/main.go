@@ -116,6 +116,7 @@ func main() {
 		AspectID:     b.AspectName(),
 		OperatorName: "operator",
 		Inbox:        box,
+		WSConnected:  b.Connected,
 	}
 
 	model := ui.NewModel(cfg)

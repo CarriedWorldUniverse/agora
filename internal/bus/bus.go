@@ -151,6 +151,10 @@ func (b *Bus) Provider() string { return b.provider }
 // Model is the provider-specific model id from validation.
 func (b *Bus) Model() string { return b.model }
 
+// Connected reports whether the WS is currently open. Delegates to
+// wsasp.Client.Connected; cheap to poll. Used by the TUI status line.
+func (b *Bus) Connected() bool { return b.client.Connected() }
+
 // SystemPrompt is the composed personality bundle: central nexus_md
 // ⊕ aspect personality (composed, or nexus_md ⊕ soul_md ⊕ primer_md
 // fallback). Empty if the Nexus didn't return any of those (legacy
