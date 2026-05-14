@@ -127,19 +127,20 @@ func NewBridleTurn(cfg BridleConfig) TurnFunc {
 	}
 }
 
-// deriveSessionID returns a stable per-source session id, as a
-// uuid_v5 string (claude-code rejects non-UUID session ids). v0
-// derivation: uuid_v5(agoraSessionNamespace, "<source>:<aspect>").
+// deriveSessionID returns a stable per-aspect session id, as a
+// uuid_v5 string (claude-code rejects non-UUID session ids).
 //
-// Per-thread session derivation (incorporating thread_root) is
-// deferred to a follow-up; for the dogfood window, one chat session
-// and one tty session per aspect is enough.
-func deriveSessionID(aspectID string, it inbox.Item) string {
-	// Matches funnel's derivation shape: namespace + (aspect + ":" + key).
-	// Key is the source tag for now; per-thread isolation lands when we
-	// adopt funnel.SessionResolver and feed it ThreadRoot per NEX-46.x.
-	name := aspectID + ":" + string(it.Source)
-	return uuid.NewSHA1(sessionNamespace, []byte(name)).String()
+// Global-context mode (operator preference 2026-05-15): one session
+// per aspect, regardless of source. Chat-source and tty-source turns
+// share the same jsonl on disk, so the model carries coherent context
+// across both channels. Matches the ContextGlobal mode reported on
+// the register frame in bus.go.
+//
+// The inbox.Item is accepted for forward-compatibility (per-thread
+// or per-source modes can branch on it without changing the call
+// site) but currently ignored.
+func deriveSessionID(aspectID string, _ inbox.Item) string {
+	return uuid.NewSHA1(sessionNamespace, []byte(aspectID)).String()
 }
 
 // sessionJSONLExists reports whether claude-code has an on-disk

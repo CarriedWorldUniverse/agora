@@ -119,7 +119,7 @@ func Connect(ctx context.Context, cfg Config) (*Bus, error) {
 		OnDeliver:  b.onDeliver,
 		Register: schemas.RegisterRequest{
 			Name:        vr.AspectName,
-			ContextMode: schemas.ContextThread,
+			ContextMode: schemas.ContextGlobal,
 			Provider:    vr.Provider,
 			PID:         os.Getpid(),
 			StartedAt:   time.Now().UTC(),
