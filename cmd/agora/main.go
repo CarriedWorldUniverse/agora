@@ -151,6 +151,10 @@ func main() {
 			"claude_path", *claudePath,
 			"cwd", *cwd)
 		sysPrompt := b.SystemPrompt()
+		// Append agora-side conventions (notify_operator fenced
+		// block, etc.) after the nexus-composed personality so the
+		// model picks up the local side-channel format.
+		sysPrompt = engine.AppendAgoraConventions(sysPrompt)
 		log.Info("system prompt composed",
 			"bytes", len(sysPrompt),
 			"empty", sysPrompt == "")

@@ -122,6 +122,10 @@ func (e *Engine) drain(ctx context.Context) {
 // streamed-but-not-yet-committed live line at the end of every turn,
 // regardless of outcome, so a partial render doesn't linger if the
 // turn errored mid-stream.
+//
+// Post-turn the reply text is scanned for ```notify-operator```
+// blocks (NEX-63); extracted bodies fire NotifyOperator and the
+// cleaned reply continues through Source-tag routing.
 func (e *Engine) handle(ctx context.Context, it inbox.Item) {
 	tc := turnCtx{prog: e.cfg.Program}
 	defer e.cfg.Program.Send(ui.ModelTurnEnd{})
@@ -141,6 +145,14 @@ func (e *Engine) handle(ctx context.Context, it inbox.Item) {
 		})
 		return
 	}
+
+	// Strip + route any notify-operator fenced blocks before
+	// dispatching the reply (NEX-63).
+	notifications, cleaned := extractNotifyBlocks(reply)
+	for _, n := range notifications {
+		tc.NotifyOperator(n)
+	}
+	reply = cleaned
 
 	switch it.Source {
 	case inbox.SourceChat:
