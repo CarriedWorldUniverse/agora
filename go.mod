@@ -3,7 +3,7 @@ module github.com/CarriedWorldUniverse/agora
 go 1.26.2
 
 require (
-	github.com/CarriedWorldUniverse/bridle v0.0.0-20260514175107-29d890893223
+	github.com/CarriedWorldUniverse/bridle v0.0.0-20260514182908-930939f0a390
 	github.com/CarriedWorldUniverse/nexus v0.0.0-00010101000000-000000000000
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
