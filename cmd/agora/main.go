@@ -7,51 +7,25 @@
 //
 // See docs/spec.md for the full architecture + behaviour rules.
 //
-// This is the v0 skeleton (NEX-51). Subsequent commits add the WS
-// intake (NEX-52), TUI body (NEX-53), operator-input plumbing
-// (NEX-54), output routing (NEX-55), notify_operator tool (NEX-56),
-// and streaming render (NEX-57).
+// NEX-51: v0 skeleton (alt-screen, ctrl-c, keyfile load).
+// NEX-52: WS intake — keyfile.Validate, wsasp.Client.Run, chat.deliver → inbox.
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
+	"os/signal"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/CarriedWorldUniverse/agora/internal/bus"
+	"github.com/CarriedWorldUniverse/agora/internal/inbox"
 	"github.com/CarriedWorldUniverse/agora/internal/ui"
 )
-
-// Keyfile mirrors the subset of nexus's keyfile shape that agora
-// cares about today. Once we wire nexus's runtime/keyfile package as
-// a real dep (with the replace directive in go.mod), this stub is
-// replaced by importing the canonical type. For the v0 skeleton it
-// just lets us load the file off disk and pull the .tty block.
-type Keyfile struct {
-	Version          int       `json:"version"`
-	Format           string    `json:"format"`
-	Envelope         Envelope  `json:"envelope"`
-	EncryptedPayload string    `json:"encrypted_payload"`
-	TTY              *TTYBlock `json:"tty,omitempty"`
-}
-
-type Envelope struct {
-	NexusURL string `json:"nexus_url"`
-	NexusID  string `json:"nexus_id"`
-	IssuedAt string `json:"issued_at"`
-}
-
-// TTYBlock holds agora-specific tuning per the spec §6.2. All fields
-// optional with defaults.
-type TTYBlock struct {
-	OperatorName  string `json:"operator_name,omitempty"`
-	HistoryDepth  int    `json:"history_depth,omitempty"`
-	InputHistory  int    `json:"input_history,omitempty"`
-}
 
 func main() {
 	var (
@@ -62,12 +36,6 @@ func main() {
 
 	if *keyfilePath == "" {
 		fmt.Fprintln(os.Stderr, "agora: -keyfile required")
-		os.Exit(2)
-	}
-
-	kf, err := loadKeyfile(*keyfilePath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "agora: %v\n", err)
 		os.Exit(2)
 	}
 
@@ -82,63 +50,70 @@ func main() {
 	}
 	defer logCloser()
 
-	log.Info("agora starting",
-		"keyfile", *keyfilePath,
-		"nexus_url", kf.Envelope.NexusURL,
-		"log_file", logPath)
+	log.Info("agora starting", "keyfile", *keyfilePath, "log_file", logPath)
+
+	rootCtx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	box := inbox.New()
+
+	b, err := bus.Connect(rootCtx, bus.Config{
+		KeyfilePath: *keyfilePath,
+		Logger:      log,
+		Inbox:       box,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agora: bus connect: %v\n", err)
+		log.Error("bus connect failed", "err", err)
+		os.Exit(1)
+	}
+
+	// Run the WS lifecycle in a goroutine — bubbletea owns the main
+	// goroutine for stdin. When the TUI exits, cancel propagates and
+	// wsasp.Run returns.
+	busDone := make(chan error, 1)
+	go func() { busDone <- b.Run(rootCtx) }()
 
 	cfg := ui.Config{
-		Logger: log,
-		// OperatorName defaults to "operator" if .tty block absent.
+		Logger:       log,
+		AspectID:     b.AspectName(),
 		OperatorName: "operator",
+		Inbox:        box,
 	}
-	if kf.TTY != nil {
-		if kf.TTY.OperatorName != "" {
-			cfg.OperatorName = kf.TTY.OperatorName
-		}
-		if kf.TTY.HistoryDepth > 0 {
-			cfg.HistoryDepth = kf.TTY.HistoryDepth
-		}
-		if kf.TTY.InputHistory > 0 {
-			cfg.InputHistory = kf.TTY.InputHistory
-		}
-	}
-	// AspectID would normally come from the validation handshake; for
-	// the skeleton, derive a placeholder from the keyfile filename
-	// (e.g. "shadow" from "shadow.keyfile.json"). Replaced when NEX-52
-	// wires the real keyfile.Client + validation path.
-	cfg.AspectID = aspectFromKeyfileName(*keyfilePath)
 
 	model := ui.NewModel(cfg)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
+	// Inbox wake-ups → tea.Msg. Goroutine bridges the channel into
+	// the bubbletea program so the UI repaints (and later, kicks the
+	// engine) on every Push.
+	go pumpInbox(rootCtx, box, p)
+
 	if _, err := p.Run(); err != nil {
 		log.Error("bubbletea program ended with error", "err", err)
+		cancel()
 		os.Exit(1)
 	}
 	log.Info("agora shutting down")
+	cancel()
+	if err := <-busDone; err != nil && rootCtx.Err() == nil {
+		log.Error("bus exited with error", "err", err)
+	}
 }
 
-// loadKeyfile reads + JSON-parses the keyfile. v0 skeleton only —
-// no validation handshake with nexus yet (NEX-52 wires the real
-// keyfile.Client).
-func loadKeyfile(path string) (*Keyfile, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolve keyfile path: %w", err)
+// pumpInbox forwards inbox wake-ups to the bubbletea Program as
+// ui.InboxUpdated messages. The UI's Update sees these and refreshes
+// any inbox-derived view state (the status line counter today; the
+// chat panel render in NEX-53).
+func pumpInbox(ctx context.Context, box *inbox.Inbox, p *tea.Program) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-box.Updates():
+			p.Send(ui.InboxUpdated{})
+		}
 	}
-	buf, err := os.ReadFile(abs)
-	if err != nil {
-		return nil, fmt.Errorf("read keyfile: %w", err)
-	}
-	var kf Keyfile
-	if err := json.Unmarshal(buf, &kf); err != nil {
-		return nil, fmt.Errorf("parse keyfile: %w", err)
-	}
-	if kf.Format != "nexus-keyfile-v1" {
-		return nil, fmt.Errorf("unexpected keyfile format %q (want nexus-keyfile-v1)", kf.Format)
-	}
-	return &kf, nil
 }
 
 // openLogger opens the log file (append, mode 0600 — secrets-aware)
@@ -150,19 +125,4 @@ func openLogger(path string) (func(), *slog.Logger, error) {
 	}
 	log := slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	return func() { _ = f.Close() }, log, nil
-}
-
-// aspectFromKeyfileName extracts a best-effort aspect name from the
-// keyfile filename. Used only as a placeholder until the real
-// validation handshake (NEX-52) returns the canonical AspectName.
-// "shadow.keyfile.json" → "shadow"; falls back to "aspect" on weird
-// shapes.
-func aspectFromKeyfileName(path string) string {
-	base := filepath.Base(path)
-	for _, suffix := range []string{".keyfile.json", ".json"} {
-		if len(base) > len(suffix) && base[len(base)-len(suffix):] == suffix {
-			return base[:len(base)-len(suffix)]
-		}
-	}
-	return "aspect"
 }

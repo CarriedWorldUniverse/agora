@@ -22,7 +22,15 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/CarriedWorldUniverse/agora/internal/inbox"
 )
+
+// InboxUpdated is the bubbletea message agora's cmd pump sends on
+// every inbox.Push. The Model reacts by refreshing whatever view
+// state depends on the inbox (status counter today, chat panel in
+// NEX-53, engine kickoff in NEX-55+).
+type InboxUpdated struct{}
 
 // Config bundles construction-time settings for the Model. Populated
 // by cmd/agora/main.go from the keyfile + flags.
@@ -45,6 +53,11 @@ type Config struct {
 
 	// Logger writes to a file (stdout is reserved for the TUI).
 	Logger *slog.Logger
+
+	// Inbox is the shared FIFO queue. The Model reads Len() for the
+	// status line; subsequent stories (NEX-53/55) consume items from
+	// it as part of the engine kick-off path.
+	Inbox *inbox.Inbox
 }
 
 // Model is bubbletea's Model. State that survives across Update
@@ -60,6 +73,11 @@ type Model struct {
 	// briefly displays a shutting-down message before tea.Quit
 	// returns.
 	quitting bool
+
+	// inboxDepth is the last observed inbox.Len(), refreshed on every
+	// InboxUpdated message. The status line renders this so the
+	// operator can see queued work at a glance.
+	inboxDepth int
 }
 
 // NewModel constructs an empty Model with sensible defaults applied.
@@ -106,6 +124,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		}
+
+	case InboxUpdated:
+		if m.cfg.Inbox != nil {
+			m.inboxDepth = m.cfg.Inbox.Len()
+		}
+		return m, nil
 	}
 	return m, nil
 }
@@ -128,7 +152,7 @@ func (m Model) View() string {
 		Foreground(lipgloss.Color("240"))
 
 	header := statusStyle.Render(fmt.Sprintf("agora — %s @ nexus", m.cfg.AspectID))
-	hint := dimStyle.Render("v0 skeleton — ctrl+c to quit")
+	hint := dimStyle.Render(fmt.Sprintf("inbox: %d — ctrl+c to quit", m.inboxDepth))
 
 	// Pad to fill the visible area so alt-screen clears properly even
 	// when the terminal is large. Skip if width hasn't been set yet
