@@ -103,6 +103,40 @@ func wrapLines(s string, width int) string {
 	return lipgloss.NewStyle().Width(width).Render(s)
 }
 
+// renderStreamingLine renders the live-line preview from the raw
+// stream buffer, masking content inside an as-yet-unclosed code
+// fence. Spec §10: code blocks buffer until close fence so partial
+// `\`\`\`go` + half-rendered lines don't flicker into view before
+// the whole block is available.
+//
+// Algorithm: walk the buffer counting `\`\`\`` toggles. If the count
+// is even (zero or all-paired), the whole buffer is visible. If odd
+// (an open fence is in progress), show everything UP TO the open
+// fence + a small placeholder.
+func renderStreamingLine(buf string) string {
+	fence := "```"
+	openIdx := -1
+	open := false
+	i := 0
+	for i+len(fence) <= len(buf) {
+		if buf[i:i+len(fence)] == fence {
+			open = !open
+			if open {
+				openIdx = i
+			} else {
+				openIdx = -1
+			}
+			i += len(fence)
+			continue
+		}
+		i++
+	}
+	if open && openIdx >= 0 {
+		return buf[:openIdx] + dimStyle.Render("[code block streaming…]")
+	}
+	return buf
+}
+
 // renderChatContent renders the full chat scrollback as a single
 // string, wrapped to width but NOT height-clipped — the caller
 // (bubbles/viewport) owns the scroll region and clipping. Spec §11.

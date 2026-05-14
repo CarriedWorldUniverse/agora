@@ -136,10 +136,16 @@ type Model struct {
 	// browsing history, so Down past the newest entry restores it.
 	draftSnapshot string
 
-	// liveLine is the streaming model output rendered between the
-	// chat panel and the input prompt. Cleared on ModelTurnEnd; the
-	// committed reply lands in chat via ChatSent / ChatPanelReply.
+	// liveLine is what the chat panel actually renders for streaming
+	// model output (between the chat scroll region and the input
+	// prompt). Cleared on ModelTurnEnd; the committed reply lands
+	// in chat via ChatSent / ChatPanelReply.
 	liveLine string
+
+	// streamBuffer is the raw accumulator of ModelChunk text — used
+	// to derive liveLine while masking partial code blocks. See
+	// renderStreamingLine.
+	streamBuffer string
 
 	quitting bool
 
@@ -392,10 +398,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ModelChunk:
-		m.liveLine += msg.Text
+		m.streamBuffer += msg.Text
+		m.liveLine = renderStreamingLine(m.streamBuffer)
 		return m, nil
 
 	case ModelTurnEnd:
+		m.streamBuffer = ""
 		m.liveLine = ""
 		return m, nil
 	}
