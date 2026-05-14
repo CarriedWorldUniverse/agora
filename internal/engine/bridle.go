@@ -16,6 +16,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
@@ -95,6 +98,13 @@ func NewBridleTurn(cfg BridleConfig) TurnFunc {
 
 		mu.Lock()
 		isNew := !seenSessions[sid]
+		if isNew && sessionJSONLExists(cfg.Cwd, sid) {
+			// jsonl from a prior agora process exists on disk →
+			// claudecode should --resume, not --session-id (which
+			// works against an existing id but won't load the
+			// prior turn history). NEX-65.
+			isNew = false
+		}
 		seenSessions[sid] = true
 		mu.Unlock()
 
@@ -130,6 +140,41 @@ func deriveSessionID(aspectID string, it inbox.Item) string {
 	// adopt funnel.SessionResolver and feed it ThreadRoot per NEX-46.x.
 	name := aspectID + ":" + string(it.Source)
 	return uuid.NewSHA1(sessionNamespace, []byte(name)).String()
+}
+
+// sessionJSONLExists reports whether claude-code has an on-disk
+// jsonl for the given session id under the project directory it
+// would derive from cwd. Used at first-turn time to decide whether
+// to pass SessionHandle{New:true} (fresh) or {New:false} (resume).
+//
+// claude-code's projects directory layout:
+//
+//	~/.claude/projects/<sanitized-cwd>/<session-id>.jsonl
+//
+// where sanitized-cwd is the absolute cwd with path separators
+// replaced by '-' (a leading '-' falls out naturally since the
+// absolute path starts with '/'). Empty cwd → use process cwd.
+func sessionJSONLExists(cwd, sid string) bool {
+	resolved := cwd
+	if resolved == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return false
+		}
+		resolved = wd
+	}
+	abs, err := filepath.Abs(resolved)
+	if err != nil {
+		return false
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	sanitized := strings.ReplaceAll(abs, string(filepath.Separator), "-")
+	path := filepath.Join(home, ".claude", "projects", sanitized, sid+".jsonl")
+	_, err = os.Stat(path)
+	return err == nil
 }
 
 // renderUserMessage shapes the inbox item into the prompt body for
