@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
 	"github.com/CarriedWorldUniverse/nexus/runtime/aspect/wsasp"
 	"github.com/CarriedWorldUniverse/nexus/runtime/keyfile"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
@@ -52,6 +53,7 @@ type Bus struct {
 	cfg          Config
 	client       *wsasp.Client
 	aspectName   string
+	sessionID    string
 	provider     string
 	model        string
 	systemPrompt string
@@ -99,9 +101,11 @@ func Connect(ctx context.Context, cfg Config) (*Bus, error) {
 	}
 	cursorFile := wsasp.CursorFileForAspect(cursorDir)
 
+	sessionID := uuid.NewString()
 	b := &Bus{
 		cfg:          cfg,
 		aspectName:   vr.AspectName,
+		sessionID:    sessionID,
 		provider:     vr.Provider,
 		model:        vr.Model,
 		systemPrompt: composeSystemPrompt(vr),
@@ -120,7 +124,7 @@ func Connect(ctx context.Context, cfg Config) (*Bus, error) {
 			PID:         os.Getpid(),
 			StartedAt:   time.Now().UTC(),
 			Model:       vr.Model,
-			SessionID:   uuid.NewString(),
+			SessionID:   sessionID,
 		},
 	}
 	wc, err := wsasp.NewClient(wsCfg)
@@ -198,6 +202,25 @@ func (b *Bus) SendChat(ctx context.Context, content string, replyTo int64, topic
 // ReactTo forwards to wsasp.
 func (b *Bus) ReactTo(ctx context.Context, msgID int64, emoji string) error {
 	return b.client.ReactTo(ctx, msgID, emoji)
+}
+
+// Deregister sends a best-effort deregister frame so nexus knows the
+// aspect is leaving cleanly. Fire-and-forget by design — the WS is
+// usually about to close, so waiting for the ack would block exit on
+// a network round-trip. Reason is plain text, displayed in nexus's
+// roster history.
+func (b *Bus) Deregister(ctx context.Context, reason string) error {
+	env, err := frames.NewRequest(frames.KindDeregister, frames.DeregisterPayload{
+		DeregisterRequest: schemas.DeregisterRequest{
+			Name:      b.aspectName,
+			SessionID: b.sessionID,
+			Reason:    reason,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("build deregister frame: %w", err)
+	}
+	return b.client.SendBestEffort(ctx, env)
 }
 
 // onDeliver is the wsasp.Config.OnDeliver callback. Each chat.deliver

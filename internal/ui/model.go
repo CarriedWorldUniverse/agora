@@ -81,6 +81,11 @@ type ModelChunk struct {
 // via ChatSent / ChatPanelReply / EngineError.
 type ModelTurnEnd struct{}
 
+// ReadyToQuit is sent by main.go's shutdown coordinator after the
+// deregister + engine drain completes. Model handles it by calling
+// tea.Quit — this is the final exit signal.
+type ReadyToQuit struct{}
+
 // Config bundles construction-time settings for the Model. Populated
 // by cmd/agora/main.go from the keyfile + flags.
 type Config struct {
@@ -183,14 +188,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c":
-			m.quitting = true
-			return m, tea.Quit
+			// First Ctrl-C: graceful (same path as /exit).
+			// Second Ctrl-C while shutting down: hard quit.
+			if m.quitting {
+				return m, tea.Quit
+			}
+			m.appendChat(chatLine{
+				class: classSystem,
+				when:  time.Now(),
+				body:  "ctrl-c — deregistering... (press again to force exit)",
+			})
+			return m, func() tea.Msg { return QuitGraceful{} }
 		case "enter":
 			text := strings.TrimRight(m.input.Value(), " \t")
 			if text == "" {
 				return m, nil
 			}
 			m.input.SetValue("")
+			// Slash command? Dispatch via the command processor —
+			// skips the chat-and-inbox path entirely on hit.
+			if cmd, handled := dispatchCommand(&m, text); handled {
+				return m, cmd
+			}
 			now := time.Now()
 			m.appendChat(chatLine{
 				class: classTTYIn,
@@ -235,6 +254,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.inboxDepth = m.cfg.Inbox.Len()
 		}
 		return m, nil
+
+	case QuitGraceful:
+		// Mark quitting so a second Ctrl-C path is recognized;
+		// trigger tea.Quit after a brief delay so the chat-line
+		// announcement is visible. main.go runs deregister + bus
+		// teardown after p.Run() returns.
+		m.quitting = true
+		return m, tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg {
+			return ReadyToQuit{}
+		})
+
+	case ReadyToQuit:
+		return m, tea.Quit
 
 	case ChatDelivered:
 		if msg.MsgID <= m.lastRenderedMsgID {

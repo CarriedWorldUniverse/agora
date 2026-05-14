@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
 	"github.com/CarriedWorldUniverse/bridle/provider/claudecode"
@@ -58,14 +59,28 @@ func main() {
 
 	log.Info("agora starting", "keyfile", *keyfilePath, "log_file", logPath)
 
-	rootCtx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	rootCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// SIGTERM/SIGHUP from outside (kill, supervisor) → ask the UI to
+	// exit gracefully via the program's message channel. Bubbletea
+	// owns Ctrl-C internally; we don't NotifyContext on SIGINT here.
+	var p *tea.Program
+	{
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGHUP)
+		go func() {
+			<-sigCh
+			if p != nil {
+				p.Send(ui.QuitGraceful{})
+			}
+		}()
+	}
 
 	box := inbox.New()
 
 	// Wire OnChat after the program is built so we can call p.Send;
 	// declared here so bus.Config can reference it.
-	var p *tea.Program
 	onChat := func(it inbox.Item) {
 		if p == nil {
 			return
@@ -163,7 +178,19 @@ func main() {
 		cancel()
 		os.Exit(1)
 	}
+
+	// Graceful-shutdown tail: UI has exited (either /exit, first
+	// Ctrl-C, second Ctrl-C, or SIGTERM). Send the deregister frame
+	// best-effort then cancel rootCtx so the bus goroutine returns.
 	log.Info("agora shutting down")
+	dctx, dcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	if err := b.Deregister(dctx, "graceful shutdown"); err != nil {
+		log.Warn("deregister failed", "err", err)
+	} else {
+		log.Info("deregister sent")
+	}
+	dcancel()
+
 	cancel()
 	if err := <-busDone; err != nil && rootCtx.Err() == nil {
 		log.Error("bus exited with error", "err", err)
