@@ -1,7 +1,7 @@
 github.com/CarriedWorldUniverse/bridle v0.1.0 h1:VUy4W+ben8lLOlkG5+reOAkVe81BeN/1ZASJNmuWrus=
 github.com/CarriedWorldUniverse/bridle v0.1.0/go.mod h1:nEWWic3aiWRjyUzmjdafUtqXoqS9f92KuUuuKpT5NYE=
-github.com/CarriedWorldUniverse/nexus v0.1.0 h1:HSM+jvpEYDzKkgUR6wiUaoawCfUJ0ve8vZQrbAkD7sk=
-github.com/CarriedWorldUniverse/nexus v0.1.0/go.mod h1:O6scxja22Y6bSL/lZ5N6VdudYFwOtETjVis5OgzSSx0=
+github.com/CarriedWorldUniverse/nexus v0.1.1 h1:7sz2JvrVzWWQeCRJBzBWeMEMMo2LLF2i71iweP6mkaI=
+github.com/CarriedWorldUniverse/nexus v0.1.1/go.mod h1:O6scxja22Y6bSL/lZ5N6VdudYFwOtETjVis5OgzSSx0=
 github.com/MakeNowJust/heredoc v1.0.0 h1:cXCdzVdstXyiTqTvfqk9SDHpKNjxuom+DOlyEeQ4pzQ=
 github.com/MakeNowJust/heredoc v1.0.0/go.mod h1:mG5amYoWBHf8vpLOuehzbGGw0EHxpZZ6lCpQ4fNJ8LE=
 github.com/atotto/clipboard v0.1.4 h1:EH0zSVneZPSuFR11BlR9YppQTVDbh5+16AmcJi4g1z4=
