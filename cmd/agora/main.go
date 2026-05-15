@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -37,6 +38,7 @@ func main() {
 		logFile     = flag.String("log-file", "", "Write logs here; default /tmp/agora.log")
 		claudePath  = flag.String("claude", "claude", "Path to the claude binary (claudecode provider)")
 		cwd         = flag.String("cwd", "", "Working directory for the claude-code subprocess; empty = inherit")
+		cursorDir   = flag.String("cursor-dir", "", "Directory for the per-aspect chat cursor file (default: keyfile's parent directory; falls back to ~/.agora if unresolvable). NEX-119: align with nexus-comms-mcp so swapping shadow surfaces resumes from the same point.")
 	)
 	flag.Parse()
 
@@ -100,8 +102,21 @@ func main() {
 		}
 	}
 
+	// Resolve cursor dir: explicit flag wins; otherwise default to the
+	// keyfile's parent so the cursor lives beside identity material and
+	// any sibling consumer (nexus-comms-mcp once NEX-119 lands) can pick
+	// it up cleanly. bus.Connect falls back to ~/.agora if both this and
+	// the keyfile dir are unresolvable.
+	resolvedCursorDir := *cursorDir
+	if resolvedCursorDir == "" {
+		if abs, err := filepath.Abs(*keyfilePath); err == nil {
+			resolvedCursorDir = filepath.Dir(abs)
+		}
+	}
+
 	b, err := bus.Connect(rootCtx, bus.Config{
 		KeyfilePath: *keyfilePath,
+		CursorDir:   resolvedCursorDir,
 		Logger:      log,
 		OnChat:      onChat,
 	})
