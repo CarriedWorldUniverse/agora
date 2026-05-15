@@ -3,8 +3,8 @@ module github.com/CarriedWorldUniverse/agora
 go 1.26.2
 
 require (
-	github.com/CarriedWorldUniverse/bridle v0.0.0-20260515053058-0966cc185a43
-	github.com/CarriedWorldUniverse/nexus v0.0.0-00010101000000-000000000000
+	github.com/CarriedWorldUniverse/bridle v0.1.0
+	github.com/CarriedWorldUniverse/nexus v0.1.0
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
@@ -41,5 +41,3 @@ require (
 	golang.org/x/sys v0.44.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 )
-
-replace github.com/CarriedWorldUniverse/nexus => ../nexus
