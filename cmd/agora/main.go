@@ -38,7 +38,7 @@ func main() {
 		keyfilePath = flag.String("keyfile", "", "Path to aspect keyfile JSON (required)")
 		logFile     = flag.String("log-file", "", "Write logs here; default /tmp/agora.log")
 		claudePath  = flag.String("claude", "claude", "Path to the claude binary (claudecode provider)")
-		cwd         = flag.String("cwd", "", "Working directory for the claude-code subprocess; empty = inherit")
+		cwd         = flag.String("cwd", "", "Working directory for the claude-code subprocess (default: keyfile's parent directory, so claude-code auto-discovers .mcp.json there)")
 		cursorDir   = flag.String("cursor-dir", "", "Directory for the per-aspect chat cursor file (default: keyfile's parent directory; falls back to ~/.agora if unresolvable). NEX-119: align with nexus-comms-mcp so swapping shadow surfaces resumes from the same point.")
 		showVersion = flag.Bool("version", false, "print version and exit")
 	)
@@ -121,6 +121,20 @@ func main() {
 		}
 	}
 
+	// Resolve cwd for the claude-code subprocess. Explicit -cwd wins;
+	// otherwise default to the keyfile's parent directory. That parent
+	// is where the operator's identity material lives — including the
+	// aspect's .mcp.json, which claude-code auto-discovers from its
+	// spawn cwd. NEX-132: without this default, agora was spawning
+	// claude with empty cwd → no MCP discovery → shadow-under-agora
+	// had no jira/imap/comms tools.
+	resolvedCwd := *cwd
+	if resolvedCwd == "" {
+		if abs, err := filepath.Abs(*keyfilePath); err == nil {
+			resolvedCwd = filepath.Dir(abs)
+		}
+	}
+
 	b, err := bus.Connect(rootCtx, bus.Config{
 		KeyfilePath: *keyfilePath,
 		CursorDir:   resolvedCursorDir,
@@ -161,7 +175,7 @@ func main() {
 		"bytes", len(sysPrompt),
 		"provider", providerID,
 		"model", modelID,
-		"cwd", *cwd)
+		"cwd", resolvedCwd)
 
 	// UI Program: build before constructing the return handler since
 	// the handler needs to send tea.Msgs into it.
@@ -187,7 +201,7 @@ func main() {
 
 	f, err := funnel.New(funnel.Config{
 		AspectID:          b.AspectName(),
-		AspectHome:        *cwd,
+		AspectHome:        resolvedCwd,
 		SystemPrompt:      sysPrompt,
 		Harness:           bridle.NewHarness(provider),
 		Provider:          providerID,
