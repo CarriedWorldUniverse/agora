@@ -3,7 +3,7 @@ module github.com/CarriedWorldUniverse/agora
 go 1.26.2
 
 require (
-	github.com/CarriedWorldUniverse/bridle v0.0.0-20260514213220-3f972d4199a2
+	github.com/CarriedWorldUniverse/bridle v0.0.0-20260515053058-0966cc185a43
 	github.com/CarriedWorldUniverse/nexus v0.0.0-00010101000000-000000000000
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
@@ -23,9 +23,9 @@ require (
 	github.com/clipperhouse/uax29/v2 v2.5.0 // indirect
 	github.com/coder/websocket v1.8.14 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
-	github.com/google/jsonschema-go v0.4.2 // indirect
+	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
-	github.com/mark3labs/mcp-go v0.50.0 // indirect
+	github.com/mark3labs/mcp-go v0.54.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-localereader v0.0.1 // indirect
 	github.com/mattn/go-runewidth v0.0.19 // indirect
@@ -35,7 +35,7 @@ require (
 	github.com/oklog/ulid/v2 v2.1.1 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
-	github.com/spf13/cast v1.7.1 // indirect
+	github.com/spf13/cast v1.10.0 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/sys v0.44.0 // indirect

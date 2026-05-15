@@ -30,6 +30,7 @@ import (
 	"github.com/CarriedWorldUniverse/agora/internal/bus"
 	"github.com/CarriedWorldUniverse/agora/internal/engine"
 	"github.com/CarriedWorldUniverse/agora/internal/ui"
+	"github.com/CarriedWorldUniverse/agora/internal/version"
 )
 
 func main() {
@@ -39,8 +40,14 @@ func main() {
 		claudePath  = flag.String("claude", "claude", "Path to the claude binary (claudecode provider)")
 		cwd         = flag.String("cwd", "", "Working directory for the claude-code subprocess; empty = inherit")
 		cursorDir   = flag.String("cursor-dir", "", "Directory for the per-aspect chat cursor file (default: keyfile's parent directory; falls back to ~/.agora if unresolvable). NEX-119: align with nexus-comms-mcp so swapping shadow surfaces resumes from the same point.")
+		showVersion = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("agora %s\n", version.Version)
+		return
+	}
 
 	if *keyfilePath == "" {
 		fmt.Fprintln(os.Stderr, "agora: -keyfile required")

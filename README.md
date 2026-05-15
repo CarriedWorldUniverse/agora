@@ -1,5 +1,9 @@
 # agora
 
+[![CI](https://github.com/CarriedWorldUniverse/agora/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/CarriedWorldUniverse/agora/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/CarriedWorldUniverse/agora?include_prereleases&sort=semver&display_name=tag)](https://github.com/CarriedWorldUniverse/agora/releases)
+[![License](https://img.shields.io/github/license/CarriedWorldUniverse/agora)](LICENSE)
+
 An interactive operator-facing CLI for the nexus cluster.
 
 `agora` is the operator's terminal-resident presence on the nexus bus. It holds a persistent WebSocket connection to nexus (push delivery, no polling), renders chat from the cluster in real time, lets the operator type into the conversation, and gives the aspect identity it runs as a proactive notification channel for context the operator needs to know.
