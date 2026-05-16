@@ -232,9 +232,19 @@ func main() {
 	go func() {
 		p.Send(ui.RegisterSubmit{
 			OnSubmit: func(text string) {
+				// NEX-129: prefix tty-source content with an in-band hint
+				// so the model sees explicit "panel-route" framing. The
+				// AgoraReturnHandler already routes the FinalText to the
+				// panel for SourceTTY, but without this hint the model
+				// may emit chat-bound side-effects (send_chat tool calls)
+				// before the FinalText commits — answering a private
+				// debug question broadcast to all peers. The prefix sits
+				// inline with the inbox item; bridle renders it as part
+				// of the turn's user content; the model sees it on the
+				// same line as the operator's question.
 				eng.Receive(bridle.InboxItem{
 					From:    cfg.OperatorName,
-					Content: text,
+					Content: engine.PanelSourcePrefix + text,
 					Source:  engine.SourceTTY,
 				})
 			},

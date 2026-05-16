@@ -57,19 +57,39 @@ func AppendAgoraConventions(base string) string {
 	return base + "\n\n---\n\n" + notifyConventionPrompt
 }
 
+// PanelSourcePrefix is the in-band marker agora wraps every tty-source
+// inbox item with. Surfaces the routing intent directly in the user
+// content so the model sees it on the same line as the operator's
+// question; supplements (not replaces) the routing enforced by
+// AgoraReturnHandler. NEX-129.
+const PanelSourcePrefix = "[panel-route: this is a private operator question via the local TUI. " +
+	"Your reply routes to the operator's panel only — do NOT call send_chat for the answer. " +
+	"If you need to broadcast something to other aspects as part of answering, that's a " +
+	"separate decision; the answer itself stays panel-local.]\n\n"
+
 // notifyConventionPrompt is the agora-side system-prompt addendum
-// that teaches the model the fenced-block convention. Appended after
-// the nexus-composed personality so it always wins over any
-// inherited convention.
-const notifyConventionPrompt = "## Operator-only side channel\n\n" +
-	"When you want to surface context to the operator without sending " +
-	"it to nexus chat, output a fenced block at the end of your reply:\n\n" +
+// that teaches the model the routing model + the notify-operator
+// fenced-block convention. Appended after the nexus-composed
+// personality so it always wins over any inherited convention.
+const notifyConventionPrompt = "## Routing — chat vs. panel\n\n" +
+	"agora drives two channels. Every turn arrives with a source tag visible in the " +
+	"user content:\n\n" +
+	"- **`[panel-route: ...]`** prefix → the operator typed this locally in the agora " +
+	"TUI. Your reply stays in the panel — do NOT call `send_chat` for the answer. " +
+	"Private debugging / introspection / one-on-one questions live here.\n" +
+	"- **No panel-route prefix** → message came from nexus chat. Your reply goes to " +
+	"the bus, threaded on the triggering message id. Visible to all peer aspects.\n\n" +
+	"Routing is enforced agora-side regardless, but checking the source prefix lets " +
+	"you avoid emitting chat-bound side-effects (mid-turn `send_chat` calls) on a " +
+	"panel-route turn — those broadcast before the routing layer can intercept.\n\n" +
+	"## Operator-only side channel\n\n" +
+	"When you want to surface context to the operator on a chat-route turn without " +
+	"broadcasting it, output a fenced block at the end of your reply:\n\n" +
 	"```notify-operator\n" +
 	"<short message for the operator>\n" +
 	"```\n\n" +
 	"agora extracts these and renders them in the operator's TUI only — " +
-	"the rest of your reply routes normally (to nexus chat for chat-source " +
-	"turns, to the panel for tty-source turns).\n\n" +
+	"the rest of your reply routes normally (chat for chat-source, panel for tty-source).\n\n" +
 	"Use sparingly. Good fits: mid-task status updates, heads-up about a " +
 	"decision you're making, context the operator should see but the rest " +
 	"of the cluster shouldn't. Not a substitute for chat replies."
