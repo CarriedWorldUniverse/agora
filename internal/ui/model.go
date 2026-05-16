@@ -132,6 +132,14 @@ type Model struct {
 	inboxDepth int
 	wsConnected bool
 
+	// unreadBelow counts chat lines (incl. tty echoes, streaming
+	// commits, system banners) that landed while the viewport was
+	// scrolled away from the bottom. Surfaced in the status line as
+	// "↓ N below" so the operator knows fresh content exists offscreen.
+	// Reset to 0 on any scroll-to-bottom path (auto-tail, Ctrl-E/End,
+	// manual scroll that lands at bottom).
+	unreadBelow int
+
 	// onSubmit is the callback main.go registers via RegisterSubmit
 	// so the Model can hand input lines to the engine. Nil until
 	// registered; submissions before registration are silently dropped.
@@ -293,7 +301,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// a single-line textinput anyway.
 			var vpCmd tea.Cmd
 			m.vp, vpCmd = m.vp.Update(msg)
+			if m.vp.AtBottom() {
+				m.unreadBelow = 0
+			}
 			return m, vpCmd
+		case "ctrl+e", "end":
+			// Jump-to-bottom (NEX-104). End and Ctrl-E both bind
+			// since terminal emulators differ on which they emit;
+			// Ctrl-E mirrors readline's "end of line" convention
+			// and works in every terminal we've tested.
+			if m.vpReady {
+				m.vp.GotoBottom()
+				m.unreadBelow = 0
+			}
+			return m, nil
+		case "ctrl+a", "home":
+			// Jump-to-top. Symmetric with Ctrl-E/End; rarely used
+			// (the top of scrollback is usually old context the
+			// operator doesn't need to revisit) but cheap to bind.
+			if m.vpReady {
+				m.vp.GotoTop()
+			}
+			return m, nil
 		}
 		// Arrow keys: history first (when there's history to browse),
 		// then viewport when input is empty, then fall through to
@@ -560,6 +589,11 @@ func (m *Model) appendChat(line chatLine) {
 // the current width. If forceBottom is true, snap to bottom; otherwise
 // only auto-scroll if we were already at the bottom (so manual
 // scroll-up sticks).
+//
+// NEX-104: when the operator is scrolled back from the bottom and new
+// chat lands, increment unreadBelow so the status line can surface
+// "↓ N below". Reset on any path that brings the viewport to the
+// bottom — auto-tail or explicit jump.
 func (m *Model) refreshChatContent(forceBottom bool) {
 	if !m.vpReady {
 		return
@@ -568,6 +602,9 @@ func (m *Model) refreshChatContent(forceBottom bool) {
 	m.vp.SetContent(renderChatContent(m.chat, m.vp.Width))
 	if forceBottom || atBottom {
 		m.vp.GotoBottom()
+		m.unreadBelow = 0
+	} else {
+		m.unreadBelow++
 	}
 }
 
@@ -578,7 +615,14 @@ func (m Model) renderStatus() string {
 	if m.wsConnected {
 		wsState = "online"
 	}
-	right := dimStyle.Render(fmt.Sprintf("ws:%s · inbox:%d", wsState, m.inboxDepth))
+	rightParts := []string{fmt.Sprintf("ws:%s · inbox:%d", wsState, m.inboxDepth)}
+	if m.vpReady && !m.vp.AtBottom() && m.unreadBelow > 0 {
+		// NEX-104: visual cue when scrolled back from the tail.
+		// Operator sees that fresh chat has landed offscreen and
+		// can hit Ctrl-E/End to jump back.
+		rightParts = append(rightParts, fmt.Sprintf("↓ %d below (Ctrl-E)", m.unreadBelow))
+	}
+	right := dimStyle.Render(strings.Join(rightParts, " · "))
 
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
