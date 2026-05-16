@@ -140,6 +140,12 @@ type Model struct {
 	// manual scroll that lands at bottom).
 	unreadBelow int
 
+	// filterChatter, when true, hides chat lines whose operatorRelevant
+	// flag is false (incoming bus chatter between aspects that doesn't
+	// touch the operator). Default true — the operator's chat panel is
+	// quiet by default; Ctrl-T toggles to show everything. NEX-118.
+	filterChatter bool
+
 	// onSubmit is the callback main.go registers via RegisterSubmit
 	// so the Model can hand input lines to the engine. Nil until
 	// registered; submissions before registration are silently dropped.
@@ -208,7 +214,7 @@ func NewModel(cfg Config) Model {
 	ta.SetHeight(1)
 	ta.Focus()
 
-	return Model{cfg: cfg, input: ta, historyIdx: -1}
+	return Model{cfg: cfg, input: ta, historyIdx: -1, filterChatter: true}
 }
 
 // Init runs once at program start.
@@ -314,6 +320,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.vp.GotoBottom()
 				m.unreadBelow = 0
 			}
+			return m, nil
+		case "ctrl+t":
+			// NEX-118: toggle background-chatter filter. Default is
+			// "operator-relevant only"; toggle shows everything for
+			// when the operator wants to see what the cluster is
+			// doing without leaving agora.
+			m.filterChatter = !m.filterChatter
+			m.refreshChatContent(false)
 			return m, nil
 		case "ctrl+a", "home":
 			// Jump-to-top. Symmetric with Ctrl-E/End; rarely used
@@ -581,6 +595,10 @@ func (m Model) chatHeight() int {
 // content. Auto-scrolls to bottom when the user was already at the
 // bottom; preserves manual scroll position otherwise.
 func (m *Model) appendChat(line chatLine) {
+	// NEX-118: annotate operatorRelevant at the append site so the
+	// renderer doesn't need to know the operator's name. Every chatLine
+	// in m.chat carries the flag; the renderer just reads it.
+	line.operatorRelevant = markOperatorRelevant(line.class, line.from, line.body, m.cfg.OperatorName)
 	m.chat = appendChatLine(m.chat, line, m.cfg.HistoryDepth)
 	m.refreshChatContent(false)
 }
@@ -599,7 +617,7 @@ func (m *Model) refreshChatContent(forceBottom bool) {
 		return
 	}
 	atBottom := m.vp.AtBottom()
-	m.vp.SetContent(renderChatContent(m.chat, m.vp.Width))
+	m.vp.SetContent(renderChatContent(m.chat, m.vp.Width, m.filterChatter))
 	if forceBottom || atBottom {
 		m.vp.GotoBottom()
 		m.unreadBelow = 0
@@ -621,6 +639,11 @@ func (m Model) renderStatus() string {
 		// Operator sees that fresh chat has landed offscreen and
 		// can hit Ctrl-E/End to jump back.
 		rightParts = append(rightParts, fmt.Sprintf("↓ %d below (Ctrl-E)", m.unreadBelow))
+	}
+	if !m.filterChatter {
+		// NEX-118: indicate when filter is OFF so the operator knows
+		// they're seeing all cluster chatter, not the curated view.
+		rightParts = append(rightParts, "all-chat (Ctrl-T)")
 	}
 	right := dimStyle.Render(strings.Join(rightParts, " · "))
 

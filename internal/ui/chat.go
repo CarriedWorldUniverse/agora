@@ -36,6 +36,14 @@ type chatLine struct {
 	when  time.Time
 	from  string
 	body  string
+
+	// operatorRelevant flags lines that touch the operator directly:
+	// operator-authored (tty echoes, outgoing chat), addressed to the
+	// operator (@-mention in body), or system/notify lines. The view's
+	// filter mode hides non-operator-relevant lines by default — intra-
+	// aspect coordination that doesn't include the operator folds out
+	// of sight, restorable via a hotkey. NEX-118.
+	operatorRelevant bool
 }
 
 // appendChatLine pushes onto the ring buffer, trimming the head if
@@ -140,10 +148,45 @@ func renderStreamingLine(buf string) string {
 // renderChatContent renders the full chat scrollback as a single
 // string, wrapped to width but NOT height-clipped — the caller
 // (bubbles/viewport) owns the scroll region and clipping. Spec §11.
-func renderChatContent(lines []chatLine, width int) string {
+//
+// NEX-118: when filterChatter is true, lines without operatorRelevant
+// are skipped. A trailing summary line surfaces the hidden count so
+// the operator knows context exists.
+func renderChatContent(lines []chatLine, width int, filterChatter bool) string {
 	rendered := make([]string, 0, len(lines))
+	hidden := 0
 	for _, l := range lines {
+		if filterChatter && !l.operatorRelevant {
+			hidden++
+			continue
+		}
 		rendered = append(rendered, wrapLines(renderChatLine(l), width))
 	}
+	if filterChatter && hidden > 0 {
+		summary := dimStyle.Render(fmt.Sprintf("… %d background message(s) hidden — Ctrl-T to show all", hidden))
+		rendered = append(rendered, wrapLines(summary, width))
+	}
 	return strings.Join(rendered, "\n")
+}
+
+// markOperatorRelevant computes whether a chatLine touches the operator.
+// Used at line-creation sites so each line carries the boolean without
+// the renderer needing to know the operator's name. NEX-118.
+func markOperatorRelevant(class chatClass, from, body, operatorName string) bool {
+	switch class {
+	case classTTYIn, classChatOut, classNotify, classSystem, classModel:
+		// Operator-authored, operator-routed, or system-banner lines
+		// always surface — the operator drove or needs to see them.
+		return true
+	}
+	// classChatIn: incoming from the bus. Relevant if operator is in
+	// the From (rare; mostly bus relay of operator's own outgoing) or
+	// the body explicitly @-mentions the operator handle.
+	if from == operatorName {
+		return true
+	}
+	if operatorName != "" && strings.Contains(body, "@"+operatorName) {
+		return true
+	}
+	return false
 }
