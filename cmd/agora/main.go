@@ -50,8 +50,7 @@ func main() {
 	}
 
 	if *keyfilePath == "" {
-		fmt.Fprintln(os.Stderr, "agora: -keyfile required")
-		os.Exit(2)
+		emitExit(nil, exitBadFlags, "-keyfile required", 2)
 	}
 
 	logPath := *logFile
@@ -60,10 +59,17 @@ func main() {
 	}
 	logCloser, log, err := openLogger(logPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agora: open log: %v\n", err)
-		os.Exit(2)
+		emitExit(nil, exitBadFlags, fmt.Sprintf("open log: %v", err), 2)
 	}
 	defer logCloser()
+
+	// Top-level panic recovery so the operator sees a reason rather than
+	// the runtime's default stack dump alone. NEX-105.
+	defer func() {
+		if r := recover(); r != nil {
+			emitExit(log, exitPanic, fmt.Sprintf("%v", r), 1)
+		}
+	}()
 
 	log.Info("agora starting", "keyfile", *keyfilePath, "log_file", logPath)
 
@@ -73,12 +79,17 @@ func main() {
 	// SIGTERM/SIGHUP from outside (kill, supervisor) → ask the UI to
 	// exit gracefully via the program's message channel. Bubbletea
 	// owns Ctrl-C internally; we don't NotifyContext on SIGINT here.
+	//
+	// NEX-105: track whether a signal arrived so the final exit line
+	// can report exit reason=signal rather than =clean.
 	var p *tea.Program
+	signalReceived := ""
 	{
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGHUP)
 		go func() {
-			<-sigCh
+			s := <-sigCh
+			signalReceived = s.String()
 			if p != nil {
 				p.Send(ui.QuitGraceful{})
 			}
@@ -142,9 +153,7 @@ func main() {
 		OnChat:      onChat,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agora: bus connect: %v\n", err)
-		log.Error("bus connect failed", "err", err)
-		os.Exit(1)
+		emitExit(log, exitBusConnect, fmt.Sprintf("%v", err), 1)
 	}
 
 	// Run the WS lifecycle in a goroutine — bubbletea owns the main
@@ -213,9 +222,7 @@ func main() {
 		Logger:            log,
 	})
 	if err != nil {
-		log.Error("funnel build failed", "err", err)
-		fmt.Fprintf(os.Stderr, "agora: funnel build: %v\n", err)
-		os.Exit(1)
+		emitExit(log, exitBusConnect, fmt.Sprintf("funnel build: %v", err), 1)
 	}
 
 	eng = engine.New(engine.Config{
@@ -253,9 +260,8 @@ func main() {
 	}()
 
 	if _, err := p.Run(); err != nil {
-		log.Error("bubbletea program ended with error", "err", err)
 		cancel()
-		os.Exit(1)
+		emitExit(log, exitBubbleteaError, fmt.Sprintf("%v", err), 1)
 	}
 
 	// Graceful-shutdown tail: UI has exited (either /exit, first
@@ -271,9 +277,22 @@ func main() {
 	dcancel()
 
 	cancel()
-	if err := <-busDone; err != nil && rootCtx.Err() == nil {
-		log.Error("bus exited with error", "err", err)
+	busErr := <-busDone
+	if busErr != nil && rootCtx.Err() == nil {
+		log.Error("bus exited with error", "err", busErr)
 	}
+
+	// NEX-105: final exit-reason print. By the time we reach here the
+	// TUI has cleared the screen; the operator sees this on stderr as
+	// the last word from agora. Reason depends on what woke us up:
+	// signal-triggered shutdowns take precedence over generic "clean."
+	if signalReceived != "" {
+		emitExit(log, exitSignal, signalReceived, 0)
+	}
+	if busErr != nil {
+		emitExit(log, "bus-disconnect", busErr.Error(), 0)
+	}
+	emitExit(log, exitClean, "", 0)
 }
 
 // openLogger opens the log file (append, mode 0600 — secrets-aware)
@@ -285,4 +304,31 @@ func openLogger(path string) (func(), *slog.Logger, error) {
 	}
 	log := slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	return func() { _ = f.Close() }, log, nil
+}
+
+// Exit-reason constants used by emitExit. The operator sees the tag on
+// stderr as agora exits; useful when the TUI screen clears and the
+// only signal left is the supervisor log. NEX-105.
+const (
+	exitClean          = "clean"           // operator quit (Ctrl-C, :q, /exit, normal flow)
+	exitBadFlags       = "bad-flags"       // missing -keyfile, bad -log-file, etc.
+	exitBusConnect     = "bus-connect"     // bus.Connect failed at startup (keyfile invalid, broker unreachable)
+	exitBubbleteaError = "bubbletea-error" // tea.Program.Run returned an error
+	exitSignal         = "signal"          // SIGTERM/SIGHUP from supervisor
+	exitPanic          = "panic"           // top-level panic recovery
+)
+
+// emitExit prints the structured exit-reason line to stderr (so the
+// operator sees it even after the TUI cleared the screen), logs it,
+// and exits with the given code. NEX-105.
+func emitExit(log *slog.Logger, reason, detail string, code int) {
+	line := fmt.Sprintf("agora: exit reason=%s code=%d", reason, code)
+	if detail != "" {
+		line += " · " + detail
+	}
+	fmt.Fprintln(os.Stderr, line)
+	if log != nil {
+		log.Info("agora exit", "reason", reason, "detail", detail, "code", code)
+	}
+	os.Exit(code)
 }
