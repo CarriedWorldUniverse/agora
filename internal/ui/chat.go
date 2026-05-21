@@ -171,17 +171,27 @@ func renderChatContent(lines []chatLine, width int, filterChatter bool) string {
 
 // markOperatorRelevant computes whether a chatLine touches the operator.
 // Used at line-creation sites so each line carries the boolean without
-// the renderer needing to know the operator's name. NEX-118.
+// the renderer needing to know the operator's name. NEX-118/NEX-248.
+//
+// Operator-facing surface = panel-route only by default. Network chat
+// (classChatIn, classChatOut) stays hidden unless it directly mentions
+// the operator handle. Reasoning: with native broker delivery, peer
+// chat fires as turns into the aspect's context, and the operator
+// sees the whole back-and-forth interleaved with their conversation.
+// Default-hiding network chat keeps the panel = "me and you" until
+// the operator pulls network state in on demand.
 func markOperatorRelevant(class chatClass, from, body, operatorName string) bool {
 	switch class {
-	case classTTYIn, classChatOut, classNotify, classSystem, classModel:
-		// Operator-authored, operator-routed, or system-banner lines
-		// always surface — the operator drove or needs to see them.
+	case classTTYIn, classNotify, classSystem, classModel:
+		// Operator-authored input, panel-route reply, notify-operator,
+		// and system banners always surface — the operator drove or
+		// needs to see them.
 		return true
 	}
-	// classChatIn: incoming from the bus. Relevant if operator is in
-	// the From (rare; mostly bus relay of operator's own outgoing) or
-	// the body explicitly @-mentions the operator handle.
+	// classChatIn / classChatOut: incoming or outgoing bus traffic.
+	// Relevant only if operator is in the From or the body @-mentions
+	// the operator handle. Otherwise the line stays hidden behind the
+	// filter; aspect-to-aspect coordination doesn't paint by default.
 	if from == operatorName {
 		return true
 	}

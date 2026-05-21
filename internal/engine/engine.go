@@ -19,11 +19,23 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
+	"time"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 )
+
+// ttyDedupeWindow is how long an identical SourceTTY submission must
+// wait before it's accepted again. NEX-250: agora was observed delivering
+// the same panel-route content as multiple consecutive turns; this drop
+// gate keeps the funnel from acting on duplicate keystrokes regardless
+// of upstream cause (history re-submission, key-repeat, UI confusion).
+// Five seconds is long enough to catch any visible double-press / quick
+// up-arrow re-submit, short enough that an operator who truly wants to
+// re-send the same text just waits a beat.
+const ttyDedupeWindow = 5 * time.Second
 
 // Config bundles the engine's dependencies. All fields are required.
 type Config struct {
@@ -37,6 +49,12 @@ type Config struct {
 type Engine struct {
 	cfg  Config
 	wake chan struct{}
+
+	// ttyMu guards lastTTY* — Receive may be called from the UI
+	// goroutine (onSubmit) while drain runs the engine's goroutine.
+	ttyMu          sync.Mutex
+	lastTTYContent string
+	lastTTYAt      time.Time
 }
 
 // New constructs an Engine. The funnel must already be wired with
@@ -54,7 +72,46 @@ func New(cfg Config) *Engine {
 // Callers set item.Source ("chat" or "tty") to drive the
 // ReturnHandler's routing decision. Empty Source defaults to "chat"
 // downstream.
+//
+// NEX-250: SourceTTY submissions are deduplicated against the previous
+// SourceTTY content within ttyDedupeWindow. Identical content arriving
+// inside the window is dropped (logged at Debug) so the funnel doesn't
+// see the same operator input as multiple consecutive turns. Chat-route
+// items are passed through unchanged — peers re-asserting the same text
+// usually signals genuine retry / clarification and shouldn't be eaten.
 func (e *Engine) Receive(item bridle.InboxItem) {
+	// NEX-250 investigation trace: log every Receive with source +
+	// msgID + content excerpt so we can see whether a single operator
+	// input arrives via more than one path (e.g. TTY direct AND a
+	// broker echo). Excerpt clipped to keep activity log readable.
+	if e.cfg.Logger != nil {
+		excerpt := item.Content
+		if len(excerpt) > 80 {
+			excerpt = excerpt[:80] + "…"
+		}
+		e.cfg.Logger.Info("engine.Receive",
+			"source", item.Source,
+			"msg_id", item.MsgID,
+			"from", item.From,
+			"thread_root", item.ThreadRoot,
+			"excerpt", excerpt)
+	}
+	if item.Source == SourceTTY {
+		e.ttyMu.Lock()
+		now := time.Now()
+		if item.Content == e.lastTTYContent && now.Sub(e.lastTTYAt) < ttyDedupeWindow {
+			e.ttyMu.Unlock()
+			if e.cfg.Logger != nil {
+				e.cfg.Logger.Info("engine: dropping duplicate tty submission",
+					"window", ttyDedupeWindow,
+					"since_last", now.Sub(e.lastTTYAt))
+			}
+			return
+		}
+		e.lastTTYContent = item.Content
+		e.lastTTYAt = now
+		e.ttyMu.Unlock()
+	}
 	e.cfg.Funnel.Receive(item)
 	e.signal()
 }
