@@ -219,6 +219,7 @@ func main() {
 		Return:            returnHandler,
 		ObservabilityHook: hook,
 		Runner:            funnel.NullRunner{},
+		StreamTextToChat:  true, // NEX-240: emit each assistant text block as it streams
 		Logger:            log,
 	})
 	if err != nil {
