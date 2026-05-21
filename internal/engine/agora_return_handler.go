@@ -45,7 +45,9 @@ type AgoraReturnHandler struct {
 // in the TUI.
 func (h *AgoraReturnHandler) OnTurnStart(ctx context.Context, t funnel.TurnTrigger) error {
 	if h.Logger != nil {
-		h.Logger.Debug("return handler: turn start",
+		// NEX-250 dup investigation: Info-level so we can correlate
+		// engine.Receive → OnTurnStart → Handle for each submission.
+		h.Logger.Info("return handler: turn start",
 			"source", t.Source,
 			"msg_id", t.MsgID,
 			"from", t.From)
@@ -59,6 +61,21 @@ func (h *AgoraReturnHandler) OnTurnStart(ctx context.Context, t funnel.TurnTrigg
 // trigger's Source.
 func (h *AgoraReturnHandler) Handle(ctx context.Context, res funnel.DeliberateResult, t funnel.TurnTrigger) error {
 	reply := res.TurnResult.FinalText
+	if h.Logger != nil {
+		// NEX-250 dup investigation: count how many times the funnel
+		// dispatches a result for the same trigger. Pairs with
+		// OnTurnStart + engine.Receive traces.
+		excerpt := reply
+		if len(excerpt) > 80 {
+			excerpt = excerpt[:80] + "…"
+		}
+		h.Logger.Info("return handler: handle",
+			"source", t.Source,
+			"msg_id", t.MsgID,
+			"from", t.From,
+			"reply_len", len(reply),
+			"excerpt", excerpt)
+	}
 	if reply == "" {
 		// Empty FinalText is legitimate (filter suppressed, model
 		// declined, tool-only turn). Nothing to surface either way.

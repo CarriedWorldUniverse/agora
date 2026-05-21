@@ -17,6 +17,8 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"sync"
@@ -28,14 +30,23 @@ import (
 )
 
 // ttyDedupeWindow is how long an identical SourceTTY submission must
-// wait before it's accepted again. NEX-250: agora was observed delivering
-// the same panel-route content as multiple consecutive turns; this drop
-// gate keeps the funnel from acting on duplicate keystrokes regardless
-// of upstream cause (history re-submission, key-repeat, UI confusion).
-// Five seconds is long enough to catch any visible double-press / quick
-// up-arrow re-submit, short enough that an operator who truly wants to
-// re-send the same text just waits a beat.
-const ttyDedupeWindow = 5 * time.Second
+// wait before it's accepted again. NEX-250/NEX-252: agora is observed
+// firing engine.Receive for identical TTY content multiple times,
+// sometimes minutes apart, when the operator typed the message once
+// (root cause unknown — bubbletea / terminal-driver / late-delivery
+// suspected). Window must be long enough to absorb those late re-fires
+// but short enough that a genuine "I want to resend this exact line"
+// retry isn't eaten silently. 15 minutes is the empirical upper bound
+// of NEX-252's observed re-fire spacing (9-minute gap seen 2026-05-22)
+// with margin; an operator who really wants to resend the same text
+// within that window can append a space or wait it out.
+const ttyDedupeWindow = 15 * time.Minute
+
+// ttyDedupeCap bounds the content-hash cache. Each entry costs ~64
+// bytes; 64 entries handles realistic operator pacing while keeping
+// the memory footprint trivial. Older entries evict by insertion order
+// (FIFO) — a true LRU is overkill for this surface.
+const ttyDedupeCap = 64
 
 // Config bundles the engine's dependencies. All fields are required.
 type Config struct {
@@ -50,19 +61,20 @@ type Engine struct {
 	cfg  Config
 	wake chan struct{}
 
-	// ttyMu guards lastTTY* — Receive may be called from the UI
+	// ttyMu guards ttyHashes — Receive may be called from the UI
 	// goroutine (onSubmit) while drain runs the engine's goroutine.
-	ttyMu          sync.Mutex
-	lastTTYContent string
-	lastTTYAt      time.Time
+	ttyMu     sync.Mutex
+	ttyHashes map[string]time.Time // sha256(content) → first-seen timestamp
+	ttyOrder  []string             // insertion order, for FIFO eviction at ttyDedupeCap
 }
 
 // New constructs an Engine. The funnel must already be wired with
 // its ReturnHandler + ObservabilityHook before construction.
 func New(cfg Config) *Engine {
 	return &Engine{
-		cfg:  cfg,
-		wake: make(chan struct{}, 1),
+		cfg:       cfg,
+		wake:      make(chan struct{}, 1),
+		ttyHashes: make(map[string]time.Time, ttyDedupeCap),
 	}
 }
 
@@ -73,47 +85,68 @@ func New(cfg Config) *Engine {
 // ReturnHandler's routing decision. Empty Source defaults to "chat"
 // downstream.
 //
-// NEX-250: SourceTTY submissions are deduplicated against the previous
-// SourceTTY content within ttyDedupeWindow. Identical content arriving
-// inside the window is dropped (logged at Debug) so the funnel doesn't
-// see the same operator input as multiple consecutive turns. Chat-route
-// items are passed through unchanged — peers re-asserting the same text
-// usually signals genuine retry / clarification and shouldn't be eaten.
+// NEX-250/NEX-252: SourceTTY submissions are deduplicated by content
+// hash within ttyDedupeWindow. Identical content arriving inside the
+// window is dropped (logged at Info with hash + age) so the funnel
+// doesn't see the same operator input as multiple consecutive turns.
+// Chat-route items are passed through unchanged — peers re-asserting
+// the same text usually signals genuine retry / clarification and
+// shouldn't be eaten.
 func (e *Engine) Receive(item bridle.InboxItem) {
-	// NEX-250 investigation trace: log every Receive with source +
-	// msgID + content excerpt so we can see whether a single operator
-	// input arrives via more than one path (e.g. TTY direct AND a
-	// broker echo). Excerpt clipped to keep activity log readable.
+	contentHash := hashContent(item.Content)
+
+	// NEX-250/NEX-252 investigation trace: log every Receive with
+	// source + msgID + content hash + length so duplicates are
+	// unambiguous in the activity log (vs the previous 80-char
+	// excerpt which collapsed to the same prefix for every
+	// panel-route message).
 	if e.cfg.Logger != nil {
-		excerpt := item.Content
-		if len(excerpt) > 80 {
-			excerpt = excerpt[:80] + "…"
-		}
 		e.cfg.Logger.Info("engine.Receive",
 			"source", item.Source,
 			"msg_id", item.MsgID,
 			"from", item.From,
 			"thread_root", item.ThreadRoot,
-			"excerpt", excerpt)
+			"content_sha", contentHash[:12],
+			"content_len", len(item.Content))
 	}
 	if item.Source == SourceTTY {
 		e.ttyMu.Lock()
 		now := time.Now()
-		if item.Content == e.lastTTYContent && now.Sub(e.lastTTYAt) < ttyDedupeWindow {
+		if firstSeen, hit := e.ttyHashes[contentHash]; hit && now.Sub(firstSeen) < ttyDedupeWindow {
 			e.ttyMu.Unlock()
 			if e.cfg.Logger != nil {
 				e.cfg.Logger.Info("engine: dropping duplicate tty submission",
 					"window", ttyDedupeWindow,
-					"since_last", now.Sub(e.lastTTYAt))
+					"since_first", now.Sub(firstSeen),
+					"content_sha", contentHash[:12])
 			}
 			return
 		}
-		e.lastTTYContent = item.Content
-		e.lastTTYAt = now
+		// Record this hash. Bounded FIFO — at cap, evict the oldest
+		// entry. This is a tiny cache; the bound is defensive, not a
+		// performance concern.
+		if _, present := e.ttyHashes[contentHash]; !present {
+			if len(e.ttyOrder) >= ttyDedupeCap {
+				oldest := e.ttyOrder[0]
+				e.ttyOrder = e.ttyOrder[1:]
+				delete(e.ttyHashes, oldest)
+			}
+			e.ttyOrder = append(e.ttyOrder, contentHash)
+		}
+		e.ttyHashes[contentHash] = now
 		e.ttyMu.Unlock()
 	}
 	e.cfg.Funnel.Receive(item)
 	e.signal()
+}
+
+// hashContent returns the hex-encoded SHA-256 of the inbox content.
+// Stable across runs, cheap (~µs for the panel-route prefix + body),
+// and short enough that the truncated form ([:12]) is unique in any
+// realistic engine.Receive trace volume.
+func hashContent(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }
 
 // signal coalesces wake-ups: multiple Receive calls between
