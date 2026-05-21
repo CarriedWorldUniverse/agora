@@ -242,15 +242,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// textarea width = total width minus the prompt ("› ").
 		m.input.SetWidth(max(0, msg.Width-3))
 		chatHeight := m.chatHeight()
-		if !m.vpReady {
+		firstSize := !m.vpReady
+		if firstSize {
 			m.vp = viewport.New(msg.Width, chatHeight)
 			m.vpReady = true
 		} else {
 			m.vp.Width = msg.Width
 			m.vp.Height = chatHeight
 		}
-		// Reflow content at the new width.
-		m.refreshChatContent(true)
+		// Reflow content at the new width. Snap to bottom only on the
+		// first sizing (NEX-248 F6) — subsequent resizes preserve the
+		// operator's manual scroll position via refreshChatContent's
+		// atBottom check.
+		m.refreshChatContent(firstSize)
 		return m, nil
 
 	case tea.KeyMsg:

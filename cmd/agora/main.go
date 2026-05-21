@@ -197,7 +197,7 @@ func main() {
 
 	// onSubmit + inboxLen wired below once engine exists.
 	model := ui.NewModel(cfg)
-	p = tea.NewProgram(model, tea.WithAltScreen())
+	p = tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	// Funnel construction. AgoraReturnHandler routes by Source tag;
 	// UIHook pipes bridle ModelChunks to the live-line.
