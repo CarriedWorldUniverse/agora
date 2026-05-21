@@ -80,13 +80,29 @@ func New(cfg Config) *Engine {
 // items are passed through unchanged — peers re-asserting the same text
 // usually signals genuine retry / clarification and shouldn't be eaten.
 func (e *Engine) Receive(item bridle.InboxItem) {
+	// NEX-250 investigation trace: log every Receive with source +
+	// msgID + content excerpt so we can see whether a single operator
+	// input arrives via more than one path (e.g. TTY direct AND a
+	// broker echo). Excerpt clipped to keep activity log readable.
+	if e.cfg.Logger != nil {
+		excerpt := item.Content
+		if len(excerpt) > 80 {
+			excerpt = excerpt[:80] + "…"
+		}
+		e.cfg.Logger.Info("engine.Receive",
+			"source", item.Source,
+			"msg_id", item.MsgID,
+			"from", item.From,
+			"thread_root", item.ThreadRoot,
+			"excerpt", excerpt)
+	}
 	if item.Source == SourceTTY {
 		e.ttyMu.Lock()
 		now := time.Now()
 		if item.Content == e.lastTTYContent && now.Sub(e.lastTTYAt) < ttyDedupeWindow {
 			e.ttyMu.Unlock()
 			if e.cfg.Logger != nil {
-				e.cfg.Logger.Debug("engine: dropping duplicate tty submission",
+				e.cfg.Logger.Info("engine: dropping duplicate tty submission",
 					"window", ttyDedupeWindow,
 					"since_last", now.Sub(e.lastTTYAt))
 			}
