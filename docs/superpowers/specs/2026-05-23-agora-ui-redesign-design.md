@@ -307,19 +307,58 @@ No new packages. File-level changes within `internal/{bus,engine,ui}`:
 - Drop: `chatClass`, `renderChatLine`, `stylePrefixBody`, `markOperatorRelevant`.
 - `renderStreamingLine`'s code-fence buffering survives — called from inside the active block's body render when `class == blockAspectThinking`.
 
-### 9.2 `internal/ui/model.go` — state + behaviour adjustments
+### 9.2 `internal/ui/` Model split
+
+Today's `model.go` is 666 lines and mixes struct/lifecycle, keystroke handling, scroll behaviour, block management, and message-type declarations. The rewrite splits it into four files at responsibility boundaries:
+
+#### 9.2.1 `internal/ui/model.go` — core Model + bubbletea lifecycle (~150 lines)
+
+- `Model` struct (all fields).
+- `Config` struct.
+- `NewModel(cfg) Model` constructor.
+- `Init() tea.Cmd` — starts `textarea.Blink`, `wsTick`, `idleTick`.
+- `Update(msg) (Model, Cmd)` — top-level dispatcher only; delegates per-message to handlers in sibling files.
+- `View() string` — renders status + chat region + divider + input.
+- `renderStatus()`, `chatHeight()`, helper `max(int,int)`.
+
+#### 9.2.2 `internal/ui/messages.go` — tea.Msg type declarations (~50 lines)
+
+All `tea.Msg` types currently scattered through `model.go`:
+
+- Surviving: `InboxUpdated`, `RegisterSubmit`, `NotifyOperator`, `ReadyToQuit`, `wsTick`.
+- Renamed: `ModelChunk` → `TurnChunk`, `ModelTurnEnd` → `TurnDone`.
+- New: `SubmissionDropped{Reason, FirstSeen}`, `TurnStarted{Source, MsgID}`, `TurnFailed{Reason}`, `idleTick`.
+- Dropped: `ChatPanelReply`, `ChatSent`, `EngineError`, `ChatDelivered`.
+
+Pure type declarations, no behaviour. Keeps the message contract scannable in one file.
+
+#### 9.2.3 `internal/ui/input.go` — keystroke handling (~180 lines)
+
+- `handleKey(msg tea.KeyMsg) (Model, Cmd)` — the big switch from today's `Update`.
+- `historyBack()`, `historyForward()`, new `historyPrefixMatch(prefix string)`.
+- `resizeInputForContent()`.
+- Slash-command dispatch path (calls into `commands.go`).
+- Tab-completion handler.
+- Updates `lastInteractionAt` and drops re-entry divider when `awaitingReentry`.
+
+#### 9.2.4 `internal/ui/blocks.go` — block lifecycle (~140 lines)
+
+- Block-level mutators: `appendBlock(b chatBlock)`, `appendToActiveBlock(text string)`, `markActiveBlockFailed(reason string)`, `finishActiveBlock()`.
+- Tea-msg handlers that mutate blocks: `handleTurnStarted`, `handleTurnChunk`, `handleTurnDone`, `handleTurnFailed`, `handleNotifyOperator`, `handleSubmissionDropped`, `handleIdleTick`.
+- `refreshChatContent(forceBottom bool)` — calls `renderChatContent` from `chat.go`.
+- Idle-tracking helpers: `markInteraction()`, `checkIdle()`.
+
+This split keeps each file under ~200 lines, each with one clear responsibility. The Model struct itself stays in `model.go` so all sibling files can access fields via method receivers.
+
+**Fields summary (lives on `Model` in `model.go`):**
 
 - Replace `chat []chatLine` → `blocks []chatBlock`.
-- Replace `streamBuffer` / `liveLine` fields with `activeBlockIdx int` (-1 when idle).
-- Add `lastInteractionAt`, `idleSince`, `awaitingReentry`.
-- New `idleTick` message + 60s ticker (alongside existing `wsTick`).
+- Replace `streamBuffer` / `liveLine` → `activeBlockIdx int` (-1 when idle).
+- Add `lastInteractionAt`, `idleSince`, `awaitingReentry bool`, `blocksDuringIdle int`.
+- Add `showTimestamps bool` (toggled by Ctrl-G).
+- Add `wheelObserved bool` (for `wheel:off` hint).
+- Add `textareaEnabled bool` (for startup-race fix).
 - Drop `filterChatter` field + all references; keep `unreadBelow`.
-- New keystroke bindings (Section 8.2): `Ctrl-K`/`Ctrl-J`, `Alt-Up`/`Alt-Down`, `Ctrl-G`, `Ctrl-Enter`.
-- Updated history recall (Section 8.3): prefix-match.
-- Disabled-textarea-until-`RegisterSubmit` flow.
-- Renamed messages: `ModelChunk` → `TurnChunk`, `ModelTurnEnd` → `TurnDone`.
-- New messages: `SubmissionDropped{Reason, FirstSeen}`, `TurnStarted{Source, MsgID}`, `TurnFailed{Reason}`.
-- Drop messages no longer used: `ChatPanelReply`, `ChatSent`, `EngineError` (replaced by `TurnFailed`), `ChatDelivered` (per §4.5 — bus traffic doesn't paint).
 
 ### 9.3 `internal/ui/commands.go` — small additions
 
@@ -368,11 +407,16 @@ No new packages. File-level changes within `internal/{bus,engine,ui}`:
 | File | Before | After |
 |---|---|---|
 | `chat.go` | 202 | ~180 |
-| `model.go` | 666 | ~520 |
-| `styles.go` | — | ~35 (new) |
+| `model.go` | 666 | ~150 (core + lifecycle only) |
+| `messages.go` | — | ~50 (new — tea.Msg types) |
+| `input.go` | — | ~180 (new — keystroke + history) |
+| `blocks.go` | — | ~140 (new — block lifecycle) |
+| `styles.go` | — | ~35 (new — lipgloss styles) |
 | `commands.go` | 124 | ~140 |
 | `engine.go` | 205 | ~220 |
 | `agora_return_handler.go` | 143 | ~120 |
+
+`model.go` shrinks from 666 to ~150 by extracting input, blocks, messages, and styles into siblings. Each new file has a single responsibility and stays under 200 lines.
 
 Nothing crosses a structural boundary; the Model/View/Update pattern is unchanged; bridle/funnel/bus integration untouched.
 
