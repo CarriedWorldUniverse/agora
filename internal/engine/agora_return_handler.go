@@ -12,7 +12,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -137,7 +136,3 @@ func (h *AgoraReturnHandler) Handle(ctx context.Context, res funnel.DeliberateRe
 
 // Compile-time check.
 var _ funnel.ReturnHandler = (*AgoraReturnHandler)(nil)
-
-// Force "time" to stay imported for future TurnTrigger-based
-// timestamp work; otherwise vet flags it.
-var _ = time.Now

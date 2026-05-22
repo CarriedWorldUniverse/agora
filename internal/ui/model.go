@@ -282,8 +282,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// entry (so holding-tap on Enter doesn't bloat the ring).
 			if n := len(m.inputHistory); n == 0 || m.inputHistory[n-1] != text {
 				m.inputHistory = append(m.inputHistory, text)
-				if cap := m.cfg.InputHistory; cap > 0 && len(m.inputHistory) > cap {
-					m.inputHistory = m.inputHistory[len(m.inputHistory)-cap:]
+				if limit := m.cfg.InputHistory; limit > 0 && len(m.inputHistory) > limit {
+					m.inputHistory = m.inputHistory[len(m.inputHistory)-limit:]
 				}
 			}
 			m.historyIdx = -1
