@@ -63,11 +63,13 @@ func dispatchCommand(m *Model, line string) (tea.Cmd, bool) {
 	args = strings.TrimSpace(args)
 	if name == "" {
 		// Lone "/" — treat as input mistake, surface help hint.
-		m.appendChat(chatLine{
-			class: classSystem,
-			when:  time.Now(),
-			body:  "type /help for available commands",
+		m.appendBlock(chatBlock{
+			class:     blockSystem,
+			speaker:   "system",
+			createdAt: time.Now(),
 		})
+		m.blocks[len(m.blocks)-1].body.WriteString("type /help for available commands")
+		m.refreshChatContent(false)
 		return nil, true
 	}
 	for _, def := range commands() {
@@ -75,26 +77,30 @@ func dispatchCommand(m *Model, line string) (tea.Cmd, bool) {
 			return def.handler(m, args), true
 		}
 	}
-	m.appendChat(chatLine{
-		class: classSystem,
-		when:  time.Now(),
-		body:  fmt.Sprintf("unknown command: /%s (try /help)", name),
+	m.appendBlock(chatBlock{
+		class:     blockSystem,
+		speaker:   "system",
+		createdAt: time.Now(),
 	})
+	m.blocks[len(m.blocks)-1].body.WriteString(fmt.Sprintf("unknown command: /%s (try /help)", name))
+	m.refreshChatContent(false)
 	return nil, true
 }
 
 // cmdExit emits QuitGraceful — main.go's listener performs the
 // deregister + engine drain before calling tea.Quit.
 func cmdExit(m *Model, _ string) tea.Cmd {
-	m.appendChat(chatLine{
-		class: classSystem,
-		when:  time.Now(),
-		body:  "exiting — deregistering from nexus...",
+	m.appendBlock(chatBlock{
+		class:     blockSystem,
+		speaker:   "system",
+		createdAt: time.Now(),
 	})
+	m.blocks[len(m.blocks)-1].body.WriteString("exiting — deregistering from nexus...")
+	m.refreshChatContent(false)
 	return func() tea.Msg { return QuitGraceful{} }
 }
 
-// cmdHelp renders the registry into a system-class line.
+// cmdHelp renders the registry into a system-class block.
 func cmdHelp(m *Model, _ string) tea.Cmd {
 	names := make([]string, 0, len(commands()))
 	maxLen := 0
@@ -115,10 +121,12 @@ func cmdHelp(m *Model, _ string) tea.Cmd {
 			}
 		}
 	}
-	m.appendChat(chatLine{
-		class: classSystem,
-		when:  time.Now(),
-		body:  b.String(),
+	m.appendBlock(chatBlock{
+		class:     blockSystem,
+		speaker:   "system",
+		createdAt: time.Now(),
 	})
+	m.blocks[len(m.blocks)-1].body.WriteString(b.String())
+	m.refreshChatContent(false)
 	return nil
 }

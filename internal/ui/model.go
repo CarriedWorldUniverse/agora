@@ -36,15 +36,13 @@ type Model struct {
 	width  int
 	height int
 
-	chat        []chatLine
+	blocks      []chatBlock
 	input       textarea.Model
 	vp          viewport.Model
 	vpReady     bool
 	inboxDepth  int
 	wsConnected bool
 	unreadBelow int
-
-	filterChatter bool
 
 	onSubmit func(text string)
 	inboxLen func() int
@@ -53,8 +51,10 @@ type Model struct {
 	historyIdx    int
 	draftSnapshot string
 
-	liveLine     string
-	streamBuffer string
+	// activeBlockIdx points at the currently-streaming block in m.blocks;
+	// -1 when idle. Set on TurnStarted, mutated by TurnChunk, cleared by
+	// TurnDone.
+	activeBlockIdx int
 
 	quitting bool
 
@@ -87,7 +87,7 @@ func NewModel(cfg Config) Model {
 	ta.SetHeight(1)
 	ta.Focus()
 
-	return Model{cfg: cfg, input: ta, historyIdx: -1, filterChatter: true}
+	return Model{cfg: cfg, input: ta, historyIdx: -1, activeBlockIdx: -1}
 }
 
 func (m Model) Init() tea.Cmd {
@@ -145,27 +145,54 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.lastRenderedMsgID = msg.MsgID
-		m.appendChat(chatLine{class: classChatIn, when: msg.ReceivedAt, from: msg.From, body: msg.Content})
+		m.appendBlock(chatBlock{
+			class:     blockAspect,
+			speaker:   msg.From,
+			createdAt: msg.ReceivedAt,
+		})
+		m.blocks[len(m.blocks)-1].body.WriteString(msg.Content)
+		m.refreshChatContent(false)
 		return m, nil
 	case ChatSent:
-		m.appendChat(chatLine{class: classChatOut, when: time.Now(), from: msg.To, body: msg.Body})
+		m.appendBlock(chatBlock{
+			class:     blockAspect,
+			speaker:   m.cfg.AspectID,
+			createdAt: time.Now(),
+		})
+		m.blocks[len(m.blocks)-1].body.WriteString(msg.Body)
+		m.refreshChatContent(false)
 		return m, nil
 	case ChatPanelReply:
-		m.appendChat(chatLine{class: classModel, when: time.Now(), from: m.cfg.AspectID, body: msg.Body})
+		m.appendBlock(chatBlock{
+			class:     blockAspect,
+			speaker:   m.cfg.AspectID,
+			createdAt: time.Now(),
+		})
+		m.blocks[len(m.blocks)-1].body.WriteString(msg.Body)
+		m.refreshChatContent(false)
 		return m, nil
 	case EngineError:
-		m.appendChat(chatLine{class: classSystem, when: time.Now(), body: fmt.Sprintf("engine error (%s): %s", msg.Source, msg.Error)})
+		m.appendBlock(chatBlock{
+			class:     blockSystem,
+			speaker:   "system",
+			createdAt: time.Now(),
+		})
+		m.blocks[len(m.blocks)-1].body.WriteString(fmt.Sprintf("engine error (%s): %s", msg.Source, msg.Error))
+		m.refreshChatContent(false)
 		return m, nil
 	case NotifyOperator:
-		m.appendChat(chatLine{class: classNotify, when: time.Now(), body: msg.Body})
+		m.appendBlock(chatBlock{
+			class:     blockNotify,
+			speaker:   m.cfg.AspectID,
+			createdAt: time.Now(),
+		})
+		m.blocks[len(m.blocks)-1].body.WriteString(msg.Body)
+		m.refreshChatContent(false)
 		return m, nil
 	case ModelChunk:
-		m.streamBuffer += msg.Text
-		m.liveLine = renderStreamingLine(m.streamBuffer)
+		// legacy streaming; Task 5 replaces this with TurnChunk/active-block path.
 		return m, nil
 	case ModelTurnEnd:
-		m.streamBuffer = ""
-		m.liveLine = ""
 		return m, nil
 	}
 	var cmd tea.Cmd
@@ -185,21 +212,10 @@ func (m Model) View() string {
 	status := m.renderStatus()
 	divider := dividerStyle.Render(strings.Repeat("─", m.width))
 
-	liveRow := ""
-	if m.liveLine != "" {
-		liveRow = modelStyle.Render(m.cfg.AspectID+":") + " " + m.liveLine
-		liveRow = wrapLines(liveRow, m.width)
-	}
-
 	m.vp.Height = m.chatHeight()
 	chatBody := m.vp.View()
 	inputRow := m.input.View()
 
-	rows := []string{status, divider, chatBody}
-	if liveRow != "" {
-		rows = append(rows, liveRow)
-	}
-	rows = append(rows, divider, inputRow)
-
+	rows := []string{status, divider, chatBody, divider, inputRow}
 	return strings.Join(rows, "\n")
 }

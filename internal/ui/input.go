@@ -17,11 +17,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		if m.quitting {
 			return m, tea.Quit
 		}
-		m.appendChat(chatLine{
-			class: classSystem,
-			when:  time.Now(),
-			body:  "ctrl-c — deregistering... (press again to force exit)",
+		m.appendBlock(chatBlock{
+			class:     blockSystem,
+			speaker:   "system",
+			createdAt: time.Now(),
 		})
+		m.blocks[len(m.blocks)-1].body.WriteString("ctrl-c — deregistering... (press again to force exit)")
+		m.refreshChatContent(false)
 		return m, func() tea.Msg { return QuitGraceful{} }
 	case "enter":
 		text := strings.TrimRight(m.input.Value(), " \t\n")
@@ -41,12 +43,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		if cmd, handled := dispatchCommand(&m, text); handled {
 			return m, cmd
 		}
-		m.appendChat(chatLine{
-			class: classTTYIn,
-			when:  time.Now(),
-			from:  m.cfg.OperatorName,
-			body:  text,
+		m.appendBlock(chatBlock{
+			class:     blockYou,
+			speaker:   m.cfg.OperatorName,
+			createdAt: time.Now(),
 		})
+		m.blocks[len(m.blocks)-1].body.WriteString(text)
+		m.refreshChatContent(false)
 		if m.onSubmit != nil {
 			m.onSubmit(text)
 		}
@@ -63,10 +66,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			m.vp.GotoBottom()
 			m.unreadBelow = 0
 		}
-		return m, nil
-	case "ctrl+t":
-		m.filterChatter = !m.filterChatter
-		m.refreshChatContent(false)
 		return m, nil
 	case "ctrl+a", "home":
 		if m.vpReady {
