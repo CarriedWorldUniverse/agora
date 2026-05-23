@@ -57,6 +57,11 @@ func commands() []commandDef {
 			help:    "toggle inline timestamps",
 			handler: cmdTS,
 		},
+		{
+			name:    "bus",
+			help:    "(not yet implemented) view bus traffic scrollback",
+			handler: cmdBus,
+		},
 	}
 }
 
@@ -140,6 +145,30 @@ func cmdRetry(m *Model, _ string) tea.Cmd {
 		m.onSubmit(m.lastSubmitted)
 	}
 	return nil
+}
+
+// cmdBus is a placeholder for bus traffic scrollback (spec §12).
+func cmdBus(m *Model, _ string) tea.Cmd {
+	m.appendBlock(chatBlock{
+		class:     blockSystem,
+		speaker:   "system",
+		createdAt: time.Now(),
+	})
+	m.blocks[len(m.blocks)-1].body.WriteString("/bus — not yet implemented (see spec §12)")
+	m.refreshChatContent(false)
+	return nil
+}
+
+// commandNames returns the registered command names, alphabetised,
+// used by the slash hint renderer and tab completion.
+func commandNames() []string {
+	defs := commands()
+	out := make([]string, 0, len(defs))
+	for _, d := range defs {
+		out = append(out, d.name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // cmdHelp renders the registry into a system-class block.

@@ -11,6 +11,29 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+func (m *Model) updateSlashHint() {
+	v := m.input.Value()
+	if !strings.HasPrefix(v, "/") {
+		m.slashHint = ""
+		return
+	}
+	prefix := strings.TrimPrefix(v, "/")
+	if i := strings.Index(prefix, " "); i >= 0 {
+		prefix = prefix[:i]
+	}
+	matches := []string{}
+	for _, name := range commandNames() {
+		if strings.HasPrefix(name, prefix) {
+			matches = append(matches, "/"+name)
+		}
+	}
+	if len(matches) == 0 {
+		m.slashHint = ""
+		return
+	}
+	m.slashHint = "commands: " + strings.Join(matches, " ")
+}
+
 func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	if !m.textareaEnabled {
 		if msg.String() == "ctrl+c" {
@@ -19,6 +42,24 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 	m.markInteraction()
+	if msg.Type == tea.KeyTab && strings.HasPrefix(m.input.Value(), "/") {
+		prefix := strings.TrimPrefix(m.input.Value(), "/")
+		if i := strings.Index(prefix, " "); i >= 0 {
+			prefix = prefix[:i]
+		}
+		matches := []string{}
+		for _, name := range commandNames() {
+			if strings.HasPrefix(name, prefix) {
+				matches = append(matches, name)
+			}
+		}
+		if len(matches) == 1 {
+			m.input.SetValue("/" + matches[0])
+			m.input.CursorEnd()
+			m.updateSlashHint()
+		}
+		return m, nil
+	}
 	switch msg.String() {
 	case "ctrl+c":
 		if m.quitting {
@@ -150,6 +191,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	m.resizeInputForContent()
+	m.updateSlashHint()
 	return m, cmd
 }
 

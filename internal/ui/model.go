@@ -65,6 +65,8 @@ type Model struct {
 
 	showTimestamps bool
 
+	slashHint string
+
 	// Idle / re-entry tracking.
 	lastInteractionAt time.Time
 	idleSince         time.Time
@@ -249,5 +251,8 @@ func (m Model) View() string {
 	inputRow := m.input.View()
 
 	rows := []string{status, divider, chatBody, divider, inputRow}
+	if m.slashHint != "" {
+		rows = append(rows, systemStyle.Render(m.slashHint))
+	}
 	return strings.Join(rows, "\n")
 }
