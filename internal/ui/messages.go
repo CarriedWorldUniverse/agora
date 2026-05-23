@@ -70,3 +70,8 @@ type RegisterSubmit struct {
 type wsTick struct{}
 
 const wsTickInterval = 1500 * time.Millisecond
+
+type idleTick struct{}
+
+const idleTickInterval = 60 * time.Second
+const idleThreshold = 5 * time.Minute

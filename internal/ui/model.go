@@ -59,6 +59,12 @@ type Model struct {
 	quitting bool
 
 	lastRenderedMsgID int64
+
+	// Idle / re-entry tracking.
+	lastInteractionAt time.Time
+	idleSince         time.Time
+	awaitingReentry   bool
+	blocksDuringIdle  int
 }
 
 func NewModel(cfg Config) Model {
@@ -87,7 +93,7 @@ func NewModel(cfg Config) Model {
 	ta.SetHeight(1)
 	ta.Focus()
 
-	return Model{cfg: cfg, input: ta, historyIdx: -1, activeBlockIdx: -1}
+	return Model{cfg: cfg, input: ta, historyIdx: -1, activeBlockIdx: -1, lastInteractionAt: time.Now()}
 }
 
 func (m Model) Init() tea.Cmd {
@@ -99,6 +105,7 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		textarea.Blink,
 		tea.Tick(wsTickInterval, func(time.Time) tea.Msg { return wsTick{} }),
+		tea.Tick(idleTickInterval, func(time.Time) tea.Msg { return idleTick{} }),
 	)
 }
 
@@ -140,6 +147,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.wsConnected = m.cfg.WSConnected()
 		}
 		return m, tea.Tick(wsTickInterval, func(time.Time) tea.Msg { return wsTick{} })
+	case idleTick:
+		if !m.awaitingReentry && time.Since(m.lastInteractionAt) >= idleThreshold {
+			m.idleSince = m.lastInteractionAt
+			m.awaitingReentry = true
+			m.blocksDuringIdle = 0
+		}
+		return m, tea.Tick(idleTickInterval, func(time.Time) tea.Msg { return idleTick{} })
 	case ChatDelivered:
 		if msg.MsgID <= m.lastRenderedMsgID {
 			return m, nil

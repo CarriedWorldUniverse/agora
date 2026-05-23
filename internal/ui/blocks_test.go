@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -85,5 +86,71 @@ func TestActiveBlockIdx_ClearsWhenEvictedPastZero(t *testing.T) {
 	// Two evictions; active was at index 0; should now be -1.
 	if m.activeBlockIdx != -1 {
 		t.Fatalf("activeBlockIdx after evicting past zero: want -1, got %d", m.activeBlockIdx)
+	}
+}
+
+func TestReentry_DividerDropsOnNextKeystroke(t *testing.T) {
+	m := NewModel(Config{AspectID: "shadow"})
+	// Simulate idle threshold crossed
+	m.lastInteractionAt = time.Now().Add(-10 * time.Minute)
+	m.awaitingReentry = true
+	m.idleSince = m.lastInteractionAt
+	// Block lands during idle
+	m.appendBlock(chatBlock{class: blockNotify, speaker: "shadow", createdAt: time.Now()})
+	if m.blocksDuringIdle != 1 {
+		t.Fatalf("blocksDuringIdle after notify: want 1 got %d", m.blocksDuringIdle)
+	}
+	// Operator keystroke
+	m.markInteraction()
+	// Find a divider block in m.blocks
+	foundDivider := false
+	for _, b := range m.blocks {
+		if b.class == blockDivider {
+			foundDivider = true
+			body := b.body.String()
+			if !strings.Contains(body, "since you left") {
+				t.Fatalf("divider body: want 'since you left' got %q", body)
+			}
+			break
+		}
+	}
+	if !foundDivider {
+		t.Fatalf("divider not appended after keystroke")
+	}
+	if m.awaitingReentry {
+		t.Fatalf("awaitingReentry should be cleared after divider drop")
+	}
+}
+
+func TestReentry_NoDividerWhenIdleWasSilent(t *testing.T) {
+	m := NewModel(Config{AspectID: "shadow"})
+	m.lastInteractionAt = time.Now().Add(-10 * time.Minute)
+	m.awaitingReentry = true
+	m.idleSince = m.lastInteractionAt
+	// No blocks during idle
+	m.markInteraction()
+	for _, b := range m.blocks {
+		if b.class == blockDivider {
+			t.Fatalf("divider dropped despite silent idle: %v", b)
+		}
+	}
+	if m.awaitingReentry {
+		t.Fatalf("awaitingReentry should still clear after keystroke")
+	}
+}
+
+func TestFormatIdleDuration(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{6 * time.Minute, "6m"},
+		{2*time.Hour + 14*time.Minute, "2h 14m"},
+		{45 * time.Second, "0m"},
+	}
+	for _, c := range cases {
+		if got := formatIdleDuration(c.d); got != c.want {
+			t.Fatalf("formatIdleDuration(%v): want %q got %q", c.d, c.want, got)
+		}
 	}
 }

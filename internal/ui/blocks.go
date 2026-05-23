@@ -6,12 +6,16 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 )
 
 func (m *Model) appendBlock(b chatBlock) {
 	m.blocks = append(m.blocks, b)
+	if m.awaitingReentry && b.class != blockDivider {
+		m.blocksDuringIdle++
+	}
 	if cap := m.cfg.HistoryDepth; cap > 0 && len(m.blocks) > cap {
 		evicted := len(m.blocks) - cap
 		m.blocks = m.blocks[evicted:]
@@ -22,6 +26,40 @@ func (m *Model) appendBlock(b chatBlock) {
 			}
 		}
 	}
+}
+
+func (m *Model) markInteraction() {
+	now := time.Now()
+	if m.awaitingReentry && m.blocksDuringIdle > 0 {
+		dur := now.Sub(m.idleSince)
+		divider := chatBlock{
+			class:     blockDivider,
+			createdAt: now,
+		}
+		divider.body.WriteString("since you left (" + formatIdleDuration(dur) + ")")
+		// Insert divider BEFORE the new content. The keystroke that
+		// triggered this hasn't appended yet; the divider lands at
+		// the tail of existing content.
+		m.blocks = append(m.blocks, divider)
+		if cap := m.cfg.HistoryDepth; cap > 0 && len(m.blocks) > cap {
+			m.blocks = m.blocks[len(m.blocks)-cap:]
+		}
+		m.refreshChatContent(false)
+	}
+	if m.awaitingReentry {
+		m.awaitingReentry = false
+		m.blocksDuringIdle = 0
+	}
+	m.lastInteractionAt = now
+}
+
+func formatIdleDuration(d time.Duration) string {
+	h := int(d.Hours())
+	mins := int(d.Minutes()) % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm", h, mins)
+	}
+	return fmt.Sprintf("%dm", mins)
 }
 
 func (m *Model) refreshChatContent(forceBottom bool) {

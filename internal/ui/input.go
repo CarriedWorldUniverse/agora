@@ -12,6 +12,7 @@ import (
 )
 
 func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	m.markInteraction()
 	switch msg.String() {
 	case "ctrl+c":
 		if m.quitting {
