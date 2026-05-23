@@ -51,6 +51,9 @@ func (h *AgoraReturnHandler) OnTurnStart(ctx context.Context, t funnel.TurnTrigg
 			"msg_id", t.MsgID,
 			"from", t.From)
 	}
+	if h.Program != nil {
+		h.Program.Send(ui.TurnStarted{Source: t.Source, MsgID: t.MsgID})
+	}
 	return nil
 }
 

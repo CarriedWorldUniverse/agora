@@ -189,10 +189,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.blocks[len(m.blocks)-1].body.WriteString(msg.Body)
 		m.refreshChatContent(false)
 		return m, nil
-	case ModelChunk:
-		// legacy streaming; Task 5 replaces this with TurnChunk/active-block path.
+	case TurnStarted:
+		m.appendBlock(chatBlock{
+			class:     blockAspectThinking,
+			speaker:   m.cfg.AspectID,
+			createdAt: time.Now(),
+		})
+		m.activeBlockIdx = len(m.blocks) - 1
+		m.refreshChatContent(false)
 		return m, nil
-	case ModelTurnEnd:
+	case TurnChunk:
+		m.appendToActiveBlock(msg.Text)
+		m.refreshChatContent(false)
+		return m, nil
+	case TurnDone:
+		m.finishActiveBlock()
+		m.refreshChatContent(false)
+		return m, nil
+	case TurnFailed:
+		m.markActiveBlockFailed(msg.Reason)
+		m.refreshChatContent(false)
 		return m, nil
 	}
 	var cmd tea.Cmd

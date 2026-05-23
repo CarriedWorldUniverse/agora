@@ -38,6 +38,28 @@ type ModelChunk struct {
 
 type ModelTurnEnd struct{}
 
+// TurnStarted opens a new streaming block for the next turn.
+// Emitted by AgoraReturnHandler.OnTurnStart.
+type TurnStarted struct {
+	Source string
+	MsgID  int64
+}
+
+// TurnChunk appends one streamed token's worth of text to the active
+// block. Replaces ModelChunk.
+type TurnChunk struct {
+	Text string
+}
+
+// TurnDone finalises the active streaming block. Replaces ModelTurnEnd.
+type TurnDone struct{}
+
+// TurnFailed marks the active block as failed; body content stays
+// visible, header re-renders with a failure reason.
+type TurnFailed struct {
+	Reason string
+}
+
 type ReadyToQuit struct{}
 
 type RegisterSubmit struct {

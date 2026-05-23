@@ -76,3 +76,32 @@ func maxInt(a, b int) int {
 	}
 	return b
 }
+
+func (m *Model) appendToActiveBlock(text string) {
+	if m.activeBlockIdx < 0 || m.activeBlockIdx >= len(m.blocks) {
+		return
+	}
+	m.blocks[m.activeBlockIdx].body.WriteString(text)
+}
+
+func (m *Model) finishActiveBlock() {
+	if m.activeBlockIdx < 0 || m.activeBlockIdx >= len(m.blocks) {
+		return
+	}
+	if m.blocks[m.activeBlockIdx].class == blockAspectThinking {
+		m.blocks[m.activeBlockIdx].class = blockAspect
+	}
+	m.activeBlockIdx = -1
+}
+
+func (m *Model) markActiveBlockFailed(reason string) {
+	if m.activeBlockIdx < 0 || m.activeBlockIdx >= len(m.blocks) {
+		return
+	}
+	m.blocks[m.activeBlockIdx].failed = true
+	m.blocks[m.activeBlockIdx].failedMsg = reason
+	if m.blocks[m.activeBlockIdx].class == blockAspectThinking {
+		m.blocks[m.activeBlockIdx].class = blockAspect
+	}
+	m.activeBlockIdx = -1
+}
