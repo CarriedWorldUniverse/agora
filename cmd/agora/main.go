@@ -90,9 +90,24 @@ func main() {
 		go func() {
 			s := <-sigCh
 			signalReceived = s.String()
-			if p != nil {
-				p.Send(ui.QuitGraceful{})
+			if p == nil {
+				return
 			}
+			// Graceful path first: send QuitGraceful so the UI runs
+			// its own deregister + exit sequence. If the UI is wedged
+			// (Update goroutine blocked, render thread stuck), the
+			// message never gets processed and the terminal stays in
+			// mouse-tracking mode after SIGKILL. Hard backstop: if
+			// p.Wait() hasn't returned within signalKillGrace, call
+			// p.Kill() — that runs bubbletea's shutdown path which
+			// restores the terminal even if Update is wedged.
+			p.Send(ui.QuitGraceful{})
+			go func() {
+				time.Sleep(signalKillGrace)
+				log.Warn("agora: graceful shutdown didn't complete; force-killing program (terminal will still restore)",
+					"signal", s.String(), "grace", signalKillGrace)
+				p.Kill()
+			}()
 		}()
 	}
 
@@ -306,6 +321,18 @@ func openLogger(path string) (func(), *slog.Logger, error) {
 	log := slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	return func() { _ = f.Close() }, log, nil
 }
+
+// signalKillGrace is how long the signal handler waits after sending
+// QuitGraceful before force-killing the bubbletea program. If the UI
+// is wedged (Update goroutine blocked, render thread stuck), the
+// graceful Quit message never gets processed and a plain SIGKILL
+// would leave the terminal in mouse-tracking mode (every motion
+// gets parsed as a shell command — "command not found: 17M35 79").
+// p.Kill() runs bubbletea's shutdown path even when Update is wedged,
+// so the terminal restore still happens. 2s is generous for the
+// normal QuitGraceful sequence (deregister + emoji-toggle); past
+// that the UI is genuinely stuck.
+const signalKillGrace = 2 * time.Second
 
 // Exit-reason constants used by emitExit. The operator sees the tag on
 // stderr as agora exits; useful when the TUI screen clears and the
