@@ -80,6 +80,38 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			m.vp.GotoTop()
 		}
 		return m, nil
+	case "ctrl+k":
+		if m.input.Value() == "" && m.vpReady {
+			m.vp.LineUp(1)
+			if m.vp.AtBottom() {
+				m.unreadBelow = 0
+			}
+		}
+		return m, nil
+	case "ctrl+j":
+		if m.input.Value() == "" && m.vpReady {
+			m.vp.LineDown(1)
+			if m.vp.AtBottom() {
+				m.unreadBelow = 0
+			}
+		}
+		return m, nil
+	case "alt+up":
+		if m.vpReady {
+			m.vp.LineUp(1)
+			if m.vp.AtBottom() {
+				m.unreadBelow = 0
+			}
+		}
+		return m, nil
+	case "alt+down":
+		if m.vpReady {
+			m.vp.LineDown(1)
+			if m.vp.AtBottom() {
+				m.unreadBelow = 0
+			}
+		}
+		return m, nil
 	}
 	switch msg.String() {
 	case "up":
