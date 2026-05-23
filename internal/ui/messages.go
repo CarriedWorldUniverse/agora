@@ -39,6 +39,15 @@ type TurnFailed struct {
 	Reason string
 }
 
+// SubmissionDropped is sent by the engine OnDrop callback when a TTY
+// submission is silently dropped by the 15-min content-hash dedupe.
+// The UI renders it as a system block so the operator knows their
+// input was received but suppressed rather than ignored.
+type SubmissionDropped struct {
+	Reason    string
+	FirstSeen time.Time
+}
+
 type ReadyToQuit struct{}
 
 type RegisterSubmit struct {

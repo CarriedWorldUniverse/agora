@@ -181,6 +181,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.markActiveBlockFailed(msg.Reason)
 		m.refreshChatContent(false)
 		return m, nil
+	case SubmissionDropped:
+		m.appendBlock(chatBlock{
+			class:     blockSystem,
+			speaker:   "system",
+			createdAt: time.Now(),
+		})
+		body := "dropped duplicate — same line submitted " + formatAgo(time.Since(msg.FirstSeen)) + " ago"
+		if rem := time.Until(msg.FirstSeen.Add(15 * time.Minute)); rem > 0 {
+			body += ". Modify the message or wait " + formatAgo(rem) + " more to resend."
+		}
+		m.blocks[len(m.blocks)-1].body.WriteString(body)
+		m.refreshChatContent(false)
+		return m, nil
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)

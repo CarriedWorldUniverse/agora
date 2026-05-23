@@ -224,6 +224,11 @@ func main() {
 	eng = engine.New(engine.Config{
 		Funnel: f,
 		Logger: log,
+		OnDrop: func(reason string, firstSeen time.Time) {
+			if p != nil {
+				p.Send(ui.SubmissionDropped{Reason: reason, FirstSeen: firstSeen})
+			}
+		},
 	})
 	go eng.Run(rootCtx)
 

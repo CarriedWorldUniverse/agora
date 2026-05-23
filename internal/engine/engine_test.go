@@ -111,6 +111,55 @@ func TestReceive_ChatSourceNotDeduped(t *testing.T) {
 	}
 }
 
+func TestReceive_TTYDedupeHitFiresOnDrop(t *testing.T) {
+	var (
+		gotReason    string
+		gotFirstSeen time.Time
+		gotCalls     int
+	)
+	cb := func(reason string, firstSeen time.Time) {
+		gotCalls++
+		gotReason = reason
+		gotFirstSeen = firstSeen
+	}
+	f, err := funnel.New(funnel.Config{
+		AspectID:     "test",
+		AspectHome:   t.TempDir(),
+		SystemPrompt: "test",
+		Harness:      bridle.NewHarness(stubProvider{}),
+		Provider:     "stub",
+		Model:        "stub",
+		ContextMode:  funnel.ContextStateless,
+		Return:       funnel.NoopReturnHandler{},
+		Runner:       funnel.NullRunner{},
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("funnel.New: %v", err)
+	}
+	e := New(Config{
+		Funnel: f,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		OnDrop: cb,
+	})
+
+	item := bridle.InboxItem{From: "operator", Content: "dup-test", Source: SourceTTY}
+	e.Receive(item) // first — accepted
+	if gotCalls != 0 {
+		t.Fatalf("OnDrop fired on first Receive: %d calls", gotCalls)
+	}
+	e.Receive(item) // duplicate — dropped, OnDrop fires
+	if gotCalls != 1 {
+		t.Fatalf("OnDrop calls: want 1 got %d", gotCalls)
+	}
+	if gotReason != "tty-duplicate" {
+		t.Fatalf("OnDrop reason: want tty-duplicate got %q", gotReason)
+	}
+	if gotFirstSeen.IsZero() {
+		t.Fatalf("OnDrop firstSeen was zero")
+	}
+}
+
 func distinctContent(i int) string {
 	return "msg-" + string(rune('a'+i%26)) + "-" + string(rune('0'+i/26%10))
 }

@@ -53,6 +53,18 @@ func (m *Model) markInteraction() {
 	m.lastInteractionAt = now
 }
 
+// formatAgo returns a short human-readable duration string for use in
+// "submitted N ago" / "wait N more" messages. Durations under one
+// minute are shown as seconds ("Ns"); one minute or more as minutes ("Nm").
+func formatAgo(d time.Duration) string {
+	m := int(d.Minutes())
+	if m < 1 {
+		s := int(d.Seconds())
+		return fmt.Sprintf("%ds", s)
+	}
+	return fmt.Sprintf("%dm", m)
+}
+
 func formatIdleDuration(d time.Duration) string {
 	h := int(d.Hours())
 	mins := int(d.Minutes()) % 60
