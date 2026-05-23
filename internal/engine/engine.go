@@ -52,6 +52,13 @@ const ttyDedupeCap = 64
 type Config struct {
 	Funnel *funnel.Funnel
 	Logger *slog.Logger
+
+	// OnDrop, if set, is invoked when a TTY submission is dropped by
+	// the 15-min content-hash dedupe. Lets the UI surface a visible
+	// system block explaining the drop. Reason is a short tag for
+	// future expansion ("tty-duplicate"); firstSeen is the timestamp
+	// of the original submission of the identical content.
+	OnDrop func(reason string, firstSeen time.Time)
 }
 
 // Engine wraps a funnel.Funnel with a wake-up signal channel so
@@ -119,6 +126,9 @@ func (e *Engine) Receive(item bridle.InboxItem) {
 					"window", ttyDedupeWindow,
 					"since_first", now.Sub(firstSeen),
 					"content_sha", contentHash[:12])
+			}
+			if e.cfg.OnDrop != nil {
+				e.cfg.OnDrop("tty-duplicate", firstSeen)
 			}
 			return
 		}

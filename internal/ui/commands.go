@@ -47,6 +47,21 @@ func commands() []commandDef {
 			help:    "list available commands",
 			handler: cmdHelp,
 		},
+		{
+			name:    "retry",
+			help:    "re-run the last submitted message",
+			handler: cmdRetry,
+		},
+		{
+			name:    "ts",
+			help:    "toggle inline timestamps",
+			handler: cmdTS,
+		},
+		{
+			name:    "bus",
+			help:    "(not yet implemented) view bus traffic scrollback",
+			handler: cmdBus,
+		},
 	}
 }
 
@@ -63,11 +78,13 @@ func dispatchCommand(m *Model, line string) (tea.Cmd, bool) {
 	args = strings.TrimSpace(args)
 	if name == "" {
 		// Lone "/" — treat as input mistake, surface help hint.
-		m.appendChat(chatLine{
-			class: classSystem,
-			when:  time.Now(),
-			body:  "type /help for available commands",
+		m.appendBlock(chatBlock{
+			class:     blockSystem,
+			speaker:   "system",
+			createdAt: time.Now(),
 		})
+		m.blocks[len(m.blocks)-1].body.WriteString("type /help for available commands")
+		m.refreshChatContent(false)
 		return nil, true
 	}
 	for _, def := range commands() {
@@ -75,26 +92,86 @@ func dispatchCommand(m *Model, line string) (tea.Cmd, bool) {
 			return def.handler(m, args), true
 		}
 	}
-	m.appendChat(chatLine{
-		class: classSystem,
-		when:  time.Now(),
-		body:  fmt.Sprintf("unknown command: /%s (try /help)", name),
+	m.appendBlock(chatBlock{
+		class:     blockSystem,
+		speaker:   "system",
+		createdAt: time.Now(),
 	})
+	m.blocks[len(m.blocks)-1].body.WriteString(fmt.Sprintf("unknown command: /%s (try /help)", name))
+	m.refreshChatContent(false)
 	return nil, true
 }
 
 // cmdExit emits QuitGraceful — main.go's listener performs the
 // deregister + engine drain before calling tea.Quit.
 func cmdExit(m *Model, _ string) tea.Cmd {
-	m.appendChat(chatLine{
-		class: classSystem,
-		when:  time.Now(),
-		body:  "exiting — deregistering from nexus...",
+	m.appendBlock(chatBlock{
+		class:     blockSystem,
+		speaker:   "system",
+		createdAt: time.Now(),
 	})
+	m.blocks[len(m.blocks)-1].body.WriteString("exiting — deregistering from nexus...")
+	m.refreshChatContent(false)
 	return func() tea.Msg { return QuitGraceful{} }
 }
 
-// cmdHelp renders the registry into a system-class line.
+// cmdTS toggles inline timestamps in the chat view.
+func cmdTS(m *Model, _ string) tea.Cmd {
+	m.showTimestamps = !m.showTimestamps
+	m.refreshChatContent(false)
+	return nil
+}
+
+// cmdRetry re-submits the last message the operator sent.
+func cmdRetry(m *Model, _ string) tea.Cmd {
+	if m.lastSubmitted == "" {
+		m.appendBlock(chatBlock{
+			class:     blockSystem,
+			speaker:   "system",
+			createdAt: time.Now(),
+		})
+		m.blocks[len(m.blocks)-1].body.WriteString("nothing to retry — submit a message first")
+		m.refreshChatContent(false)
+		return nil
+	}
+	m.appendBlock(chatBlock{
+		class:     blockYou,
+		speaker:   m.cfg.OperatorName,
+		createdAt: time.Now(),
+	})
+	m.blocks[len(m.blocks)-1].body.WriteString(m.lastSubmitted)
+	m.refreshChatContent(false)
+	if m.onSubmit != nil {
+		m.onSubmit(m.lastSubmitted)
+	}
+	return nil
+}
+
+// cmdBus is a placeholder for bus traffic scrollback (spec §12).
+func cmdBus(m *Model, _ string) tea.Cmd {
+	m.appendBlock(chatBlock{
+		class:     blockSystem,
+		speaker:   "system",
+		createdAt: time.Now(),
+	})
+	m.blocks[len(m.blocks)-1].body.WriteString("/bus — not yet implemented (see spec §12)")
+	m.refreshChatContent(false)
+	return nil
+}
+
+// commandNames returns the registered command names, alphabetised,
+// used by the slash hint renderer and tab completion.
+func commandNames() []string {
+	defs := commands()
+	out := make([]string, 0, len(defs))
+	for _, d := range defs {
+		out = append(out, d.name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// cmdHelp renders the registry into a system-class block.
 func cmdHelp(m *Model, _ string) tea.Cmd {
 	names := make([]string, 0, len(commands()))
 	maxLen := 0
@@ -115,10 +192,12 @@ func cmdHelp(m *Model, _ string) tea.Cmd {
 			}
 		}
 	}
-	m.appendChat(chatLine{
-		class: classSystem,
-		when:  time.Now(),
-		body:  b.String(),
+	m.appendBlock(chatBlock{
+		class:     blockSystem,
+		speaker:   "system",
+		createdAt: time.Now(),
 	})
+	m.blocks[len(m.blocks)-1].body.WriteString(b.String())
+	m.refreshChatContent(false)
 	return nil
 }

@@ -101,14 +101,9 @@ func main() {
 	var eng *engine.Engine
 
 	onChat := func(it bus.ChatItem) {
-		if p != nil {
-			p.Send(ui.ChatDelivered{
-				From:       it.From,
-				Content:    it.Content,
-				MsgID:      it.MsgID,
-				ReceivedAt: it.ReceivedAt,
-			})
-		}
+		// Bus chat.deliver flows to the engine inbox only — UI does not
+		// render bus traffic (per spec §4.5). Shadow surfaces what the
+		// operator should see via notify_operator.
 		if eng != nil {
 			eng.Receive(bridle.InboxItem{
 				From:       it.From,
@@ -197,10 +192,10 @@ func main() {
 
 	// onSubmit + inboxLen wired below once engine exists.
 	model := ui.NewModel(cfg)
-	p = tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p = tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
 
 	// Funnel construction. AgoraReturnHandler routes by Source tag;
-	// UIHook pipes bridle ModelChunks to the live-line.
+	// UIHook pipes bridle ModelChunks to the streaming block via ui.TurnChunk.
 	returnHandler := &engine.AgoraReturnHandler{
 		Bus:     b,
 		Program: p,
@@ -229,6 +224,11 @@ func main() {
 	eng = engine.New(engine.Config{
 		Funnel: f,
 		Logger: log,
+		OnDrop: func(reason string, firstSeen time.Time) {
+			if p != nil {
+				p.Send(ui.SubmissionDropped{Reason: reason, FirstSeen: firstSeen})
+			}
+		},
 	})
 	go eng.Run(rootCtx)
 

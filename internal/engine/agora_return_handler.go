@@ -17,9 +17,15 @@ import (
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 
-	"github.com/CarriedWorldUniverse/agora/internal/bus"
 	"github.com/CarriedWorldUniverse/agora/internal/ui"
 )
+
+// busSender is the subset of bus.Bus that AgoraReturnHandler uses.
+// Keeping the dependency interface-typed lets tests inject a fake
+// without standing up a websocket.
+type busSender interface {
+	SendChat(ctx context.Context, content string, replyTo int64, topic string) (int64, error)
+}
 
 // SourceChat and SourceTTY are the two trigger sources agora knows
 // about. They match what we set on bridle.InboxItem.Source when
@@ -33,23 +39,25 @@ const (
 // AgoraReturnHandler routes Deliberate results by trigger source.
 // Constructed once per agora process; passed as funnel.Config.Return.
 type AgoraReturnHandler struct {
-	Bus     *bus.Bus
+	Bus     busSender
 	Program *tea.Program
 	Logger  *slog.Logger
 }
 
 // OnTurnStart fires when the funnel pops an inbox item and is about
-// to invoke the provider. Currently a no-op; future enhancement
-// could surface a per-source "agent is responding..." spinner state
-// in the TUI.
+// to invoke the provider. Sends ui.TurnStarted to open the streaming
+// block in the TUI panel before the first model chunk arrives.
 func (h *AgoraReturnHandler) OnTurnStart(ctx context.Context, t funnel.TurnTrigger) error {
 	if h.Logger != nil {
-		// NEX-250 dup investigation: Info-level so we can correlate
-		// engine.Receive → OnTurnStart → Handle for each submission.
+		// Info-level so we can correlate engine.Receive → OnTurnStart →
+		// Handle for each submission in the log.
 		h.Logger.Info("return handler: turn start",
 			"source", t.Source,
 			"msg_id", t.MsgID,
 			"from", t.From)
+	}
+	if h.Program != nil {
+		h.Program.Send(ui.TurnStarted{Source: t.Source, MsgID: t.MsgID})
 	}
 	return nil
 }
@@ -61,9 +69,6 @@ func (h *AgoraReturnHandler) OnTurnStart(ctx context.Context, t funnel.TurnTrigg
 func (h *AgoraReturnHandler) Handle(ctx context.Context, res funnel.DeliberateResult, t funnel.TurnTrigger) error {
 	reply := res.TurnResult.FinalText
 	if h.Logger != nil {
-		// NEX-250 dup investigation: count how many times the funnel
-		// dispatches a result for the same trigger. Pairs with
-		// OnTurnStart + engine.Receive traces.
 		excerpt := reply
 		if len(excerpt) > 80 {
 			excerpt = excerpt[:80] + "…"
@@ -75,63 +80,53 @@ func (h *AgoraReturnHandler) Handle(ctx context.Context, res funnel.DeliberateRe
 			"reply_len", len(reply),
 			"excerpt", excerpt)
 	}
-	if reply == "" {
-		// Empty FinalText is legitimate (filter suppressed, model
-		// declined, tool-only turn). Nothing to surface either way.
-		return nil
-	}
 
-	// Strip + route notify-operator fenced blocks before dispatching
-	// the rest. Same post-hoc parse path that lived in the previous
-	// engine.handle (NEX-63).
+	// Strip notify-operator blocks and surface them; the cleaned reply
+	// (if any) is what would have routed. Notifications still fire as
+	// distinct blockNotify entries.
 	notifications, cleaned := extractNotifyBlocks(reply)
 	for _, n := range notifications {
-		h.Program.Send(ui.NotifyOperator{Body: n})
+		if h.Program != nil {
+			h.Program.Send(ui.NotifyOperator{Body: n})
+		}
 	}
 	reply = cleaned
+
 	if reply == "" {
-		// Reply was entirely notify-operator content; nothing left
-		// to route after stripping. Common for status-update turns.
+		// Nothing to route. Active streaming block (if any) was already
+		// finalised by TurnDone. Nothing to do here.
 		return nil
 	}
 
 	switch t.Source {
 	case SourceTTY:
-		// tty-source: operator typed it, reply stays in panel only.
-		// Never goes to the bus.
-		h.Program.Send(ui.ChatPanelReply{Body: reply})
+		// Active streaming block carries the panel reply. Nothing
+		// additional to send to UI.
+		return nil
 
 	case SourceChat, "":
-		// chat-source (or legacy empty default): reply to nexus chat,
-		// threaded on the triggering message.
+		// Wire emission to nexus chat. UI render already happened via
+		// the streaming block; no ChatSent mirror needed.
 		if _, err := h.Bus.SendChat(ctx, reply, t.MsgID, ""); err != nil {
 			if h.Logger != nil {
 				h.Logger.Error("return handler: send chat reply failed",
 					"reply_to", t.MsgID,
 					"err", err)
 			}
-			h.Program.Send(ui.EngineError{
-				Source: SourceChat,
-				Error:  fmt.Sprintf("send to nexus: %v", err),
-			})
+			if h.Program != nil {
+				h.Program.Send(ui.TurnFailed{Reason: fmt.Sprintf("send to nexus: %v", err)})
+			}
 			return err
 		}
-		// Mirror the outgoing chat into the panel so the operator
-		// can see what we replied with without reading it back from
-		// the bus.
-		h.Program.Send(ui.ChatSent{To: t.From, Body: reply})
+		return nil
 
 	default:
-		// Unknown source — treat as chat-only-panel to be safe
-		// (don't accidentally surface to bus on misconfiguration).
 		if h.Logger != nil {
-			h.Logger.Warn("return handler: unknown trigger source — routing to panel",
+			h.Logger.Warn("return handler: unknown trigger source — treating as panel-only",
 				"source", t.Source)
 		}
-		h.Program.Send(ui.ChatPanelReply{Body: reply})
+		return nil
 	}
-
-	return nil
 }
 
 // Compile-time check.
