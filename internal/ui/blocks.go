@@ -93,7 +93,11 @@ func (m Model) chatHeight() int {
 	if h := m.input.Height(); h > 0 {
 		inputLines = h
 	}
+	// chrome = status(1) + blank(1) + bottomDivider(1) + input(N)
 	chrome := 3 + inputLines
+	if m.slashHint != "" {
+		chrome++
+	}
 	h := m.height - chrome
 	if h < 1 {
 		h = 1
@@ -103,22 +107,24 @@ func (m Model) chatHeight() int {
 
 func (m Model) renderStatus() string {
 	left := headerStyle.Render(fmt.Sprintf("agora · %s", m.cfg.AspectID))
-	wsState := "offline"
+	rightParts := []string{}
 	if m.wsConnected {
-		wsState = "online"
+		rightParts = append(rightParts, "online")
+	} else {
+		rightParts = append(rightParts, "offline")
 	}
-	rightParts := []string{fmt.Sprintf("ws:%s · inbox:%d", wsState, m.inboxDepth)}
+	rightParts = append(rightParts, "since "+m.sessionStart.Format("15:04"))
+	tsState := "off"
+	if m.showTimestamps {
+		tsState = "on"
+	}
+	rightParts = append(rightParts, "ts:"+tsState)
 	if m.vpReady && !m.vp.AtBottom() && m.unreadBelow > 0 {
 		rightParts = append(rightParts, fmt.Sprintf("↓ %d below (Ctrl-E)", m.unreadBelow))
 	}
 	if !m.wheelObserved && time.Now().After(m.wheelCheckExpiry) {
 		rightParts = append(rightParts, "wheel:off")
 	}
-	tsState := "off"
-	if m.showTimestamps {
-		tsState = "on"
-	}
-	rightParts = append(rightParts, "ts:"+tsState)
 	right := dimStyle.Render(strings.Join(rightParts, " · "))
 
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)

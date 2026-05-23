@@ -65,7 +65,8 @@ type Model struct {
 
 	showTimestamps bool
 
-	slashHint string
+	slashHint    string
+	sessionStart time.Time
 
 	// Idle / re-entry tracking.
 	lastInteractionAt time.Time
@@ -103,6 +104,7 @@ func NewModel(cfg Config) Model {
 	return Model{
 		cfg: cfg, input: ta, historyIdx: -1, activeBlockIdx: -1,
 		lastInteractionAt: time.Now(),
+		sessionStart:      time.Now(),
 		textareaEnabled:   false,
 		wheelCheckExpiry:  time.Now().Add(30 * time.Second),
 	}
@@ -244,13 +246,13 @@ func (m Model) View() string {
 	}
 
 	status := m.renderStatus()
-	divider := dividerStyle.Render(strings.Repeat("─", m.width))
+	bottomDivider := dividerStyle.Render(strings.Repeat("─", m.width))
 
 	m.vp.Height = m.chatHeight()
 	chatBody := m.vp.View()
 	inputRow := m.input.View()
 
-	rows := []string{status, divider, chatBody, divider, inputRow}
+	rows := []string{status, "", chatBody, bottomDivider, inputRow}
 	if m.slashHint != "" {
 		rows = append(rows, systemStyle.Render(m.slashHint))
 	}
