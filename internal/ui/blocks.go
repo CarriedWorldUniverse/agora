@@ -111,6 +111,9 @@ func (m Model) renderStatus() string {
 	if m.vpReady && !m.vp.AtBottom() && m.unreadBelow > 0 {
 		rightParts = append(rightParts, fmt.Sprintf("↓ %d below (Ctrl-E)", m.unreadBelow))
 	}
+	if !m.wheelObserved && time.Now().After(m.wheelCheckExpiry) {
+		rightParts = append(rightParts, "wheel:off")
+	}
 	right := dimStyle.Render(strings.Join(rightParts, " · "))
 
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)

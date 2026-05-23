@@ -60,6 +60,9 @@ type Model struct {
 	textareaEnabled bool
 	lastSubmitted   string // captured on Enter; used by /retry
 
+	wheelObserved    bool
+	wheelCheckExpiry time.Time
+
 	// Idle / re-entry tracking.
 	lastInteractionAt time.Time
 	idleSince         time.Time
@@ -97,6 +100,7 @@ func NewModel(cfg Config) Model {
 		cfg: cfg, input: ta, historyIdx: -1, activeBlockIdx: -1,
 		lastInteractionAt: time.Now(),
 		textareaEnabled:   false,
+		wheelCheckExpiry:  time.Now().Add(30 * time.Second),
 	}
 }
 
@@ -210,6 +214,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.blocks[len(m.blocks)-1].body.WriteString(body)
 		m.refreshChatContent(false)
 		return m, nil
+	case tea.MouseMsg:
+		if msg.Type == tea.MouseWheelUp || msg.Type == tea.MouseWheelDown {
+			m.wheelObserved = true
+		}
+		var vpCmd tea.Cmd
+		m.vp, vpCmd = m.vp.Update(msg)
+		if m.vp.AtBottom() {
+			m.unreadBelow = 0
+		}
+		return m, vpCmd
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
