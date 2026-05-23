@@ -57,6 +57,8 @@ type Model struct {
 
 	quitting bool
 
+	textareaEnabled bool
+
 	// Idle / re-entry tracking.
 	lastInteractionAt time.Time
 	idleSince         time.Time
@@ -80,7 +82,7 @@ func NewModel(cfg Config) Model {
 
 	ta := textarea.New()
 	ta.Prompt = "› "
-	ta.Placeholder = "type to " + cfg.AspectID + "; shift+enter for newline; /exit to quit"
+	ta.Placeholder = "agora starting…"
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
 	ta.KeyMap.InsertNewline = key.NewBinding(
@@ -88,9 +90,13 @@ func NewModel(cfg Config) Model {
 		key.WithHelp("shift+enter", "insert newline"),
 	)
 	ta.SetHeight(1)
-	ta.Focus()
+	ta.Blur() // disabled until RegisterSubmit
 
-	return Model{cfg: cfg, input: ta, historyIdx: -1, activeBlockIdx: -1, lastInteractionAt: time.Now()}
+	return Model{
+		cfg: cfg, input: ta, historyIdx: -1, activeBlockIdx: -1,
+		lastInteractionAt: time.Now(),
+		textareaEnabled:   false,
+	}
 }
 
 func (m Model) Init() tea.Cmd {
@@ -138,6 +144,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case RegisterSubmit:
 		m.onSubmit = msg.OnSubmit
 		m.inboxLen = msg.InboxLen
+		m.textareaEnabled = true
+		m.input.Placeholder = "type to " + m.cfg.AspectID + "; shift+enter for newline; /exit to quit"
+		m.input.Focus()
 		return m, nil
 	case wsTick:
 		if m.cfg.WSConnected != nil {

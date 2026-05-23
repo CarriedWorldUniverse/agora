@@ -12,6 +12,12 @@ import (
 )
 
 func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	if !m.textareaEnabled {
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m, nil
+	}
 	m.markInteraction()
 	switch msg.String() {
 	case "ctrl+c":
