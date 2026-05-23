@@ -122,11 +122,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		if m.input.Line() > 0 {
 			break
 		}
-		if len(m.inputHistory) > 0 {
-			m.historyBack()
+		cur := m.input.Value()
+		matches := m.historyPrefixMatch(cur)
+		if len(matches) > 0 {
+			m.historyBackPrefix(cur, matches)
 			return m, nil
 		}
-		if m.input.Value() == "" {
+		if cur == "" {
 			var vpCmd tea.Cmd
 			m.vp, vpCmd = m.vp.Update(msg)
 			return m, vpCmd
@@ -136,7 +138,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			break
 		}
 		if m.historyIdx != -1 {
-			m.historyForward()
+			m.historyForwardPrefix(m.draftSnapshot)
 			return m, nil
 		}
 		if m.input.Value() == "" {
@@ -151,35 +153,57 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m *Model) historyBack() {
-	if len(m.inputHistory) == 0 {
-		return
+// historyPrefixMatch returns history entries (newest first) whose
+// first line starts with the given prefix. Empty prefix returns all
+// entries newest first.
+func (m *Model) historyPrefixMatch(prefix string) []string {
+	var out []string
+	for i := len(m.inputHistory) - 1; i >= 0; i-- {
+		entry := m.inputHistory[i]
+		firstLine := entry
+		if nl := strings.Index(entry, "\n"); nl >= 0 {
+			firstLine = entry[:nl]
+		}
+		if prefix == "" || strings.HasPrefix(firstLine, prefix) {
+			out = append(out, entry)
+		}
 	}
-	if m.historyIdx == -1 {
-		m.draftSnapshot = m.input.Value()
-		m.historyIdx = len(m.inputHistory) - 1
-	} else if m.historyIdx > 0 {
-		m.historyIdx--
-	} else {
-		return
-	}
-	m.input.SetValue(m.inputHistory[m.historyIdx])
-	m.input.CursorEnd()
+	return out
 }
 
-func (m *Model) historyForward() {
+func (m *Model) historyBackPrefix(prefix string, matches []string) {
+	// matches is newest-first; advance through them
+	if m.historyIdx == -1 {
+		m.draftSnapshot = prefix
+		m.historyIdx = 0
+	} else if m.historyIdx+1 < len(matches) {
+		m.historyIdx++
+	} else {
+		return // at oldest
+	}
+	if m.historyIdx < len(matches) {
+		m.input.SetValue(matches[m.historyIdx])
+		m.input.CursorEnd()
+	}
+}
+
+func (m *Model) historyForwardPrefix(draft string) {
 	if m.historyIdx == -1 {
 		return
 	}
-	if m.historyIdx+1 >= len(m.inputHistory) {
-		m.historyIdx = -1
-		m.input.SetValue(m.draftSnapshot)
-		m.draftSnapshot = ""
-		m.input.CursorEnd()
+	if m.historyIdx > 0 {
+		m.historyIdx--
+		matches := m.historyPrefixMatch(draft)
+		if m.historyIdx < len(matches) {
+			m.input.SetValue(matches[m.historyIdx])
+			m.input.CursorEnd()
+		}
 		return
 	}
-	m.historyIdx++
-	m.input.SetValue(m.inputHistory[m.historyIdx])
+	// past newest match: restore draft
+	m.historyIdx = -1
+	m.input.SetValue(m.draftSnapshot)
+	m.draftSnapshot = ""
 	m.input.CursorEnd()
 }
 
