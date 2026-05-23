@@ -45,13 +45,12 @@ type AgoraReturnHandler struct {
 }
 
 // OnTurnStart fires when the funnel pops an inbox item and is about
-// to invoke the provider. Currently a no-op; future enhancement
-// could surface a per-source "agent is responding..." spinner state
-// in the TUI.
+// to invoke the provider. Sends ui.TurnStarted to open the streaming
+// block in the TUI panel before the first model chunk arrives.
 func (h *AgoraReturnHandler) OnTurnStart(ctx context.Context, t funnel.TurnTrigger) error {
 	if h.Logger != nil {
-		// NEX-250 dup investigation: Info-level so we can correlate
-		// engine.Receive → OnTurnStart → Handle for each submission.
+		// Info-level so we can correlate engine.Receive → OnTurnStart →
+		// Handle for each submission in the log.
 		h.Logger.Info("return handler: turn start",
 			"source", t.Source,
 			"msg_id", t.MsgID,

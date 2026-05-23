@@ -198,7 +198,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshChatContent(false)
 		return m, nil
 	case TurnFailed:
-		m.markActiveBlockFailed(msg.Reason)
+		if m.activeBlockIdx >= 0 {
+			m.markActiveBlockFailed(msg.Reason)
+		} else {
+			// EndTurn already cleared the active block (funnel's
+			// ObservabilityHook fires before Return.Handle), so the failure
+			// reason can't decorate it. Surface as a standalone system block.
+			m.appendBlock(chatBlock{
+				class:     blockSystem,
+				speaker:   "system",
+				createdAt: time.Now(),
+			})
+			m.blocks[len(m.blocks)-1].body.WriteString("turn failed: " + msg.Reason)
+		}
 		m.appendBlock(chatBlock{
 			class:     blockSystem,
 			speaker:   "system",

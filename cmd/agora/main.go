@@ -195,7 +195,7 @@ func main() {
 	p = tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
 
 	// Funnel construction. AgoraReturnHandler routes by Source tag;
-	// UIHook pipes bridle ModelChunks to the live-line.
+	// UIHook pipes bridle ModelChunks to the streaming block via ui.TurnChunk.
 	returnHandler := &engine.AgoraReturnHandler{
 		Bus:     b,
 		Program: p,

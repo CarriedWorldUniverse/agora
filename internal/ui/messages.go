@@ -11,12 +11,6 @@ type NotifyOperator struct {
 	Body string
 }
 
-type ModelChunk struct {
-	Text string
-}
-
-type ModelTurnEnd struct{}
-
 // TurnStarted opens a new streaming block for the next turn.
 // Emitted by AgoraReturnHandler.OnTurnStart.
 type TurnStarted struct {
