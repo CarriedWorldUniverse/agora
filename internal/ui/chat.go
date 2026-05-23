@@ -26,7 +26,7 @@ func wrapLines(s string, width int) string {
 // `\`\`\`go` + half-rendered lines don't flicker into view before
 // the whole block is available.
 //
-// Algorithm: walk the buffer counting `\`\`\`` toggles. If the count
+// Algorithm: walk the buffer counting `\`\`\“ toggles. If the count
 // is even (zero or all-paired), the whole buffer is visible. If odd
 // (an open fence is in progress), show everything UP TO the open
 // fence + a small placeholder.
