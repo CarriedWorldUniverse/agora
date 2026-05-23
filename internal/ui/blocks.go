@@ -79,7 +79,7 @@ func (m *Model) refreshChatContent(forceBottom bool) {
 		return
 	}
 	atBottom := m.vp.AtBottom()
-	m.vp.SetContent(renderBlockContent(m.blocks, m.vp.Width, false))
+	m.vp.SetContent(renderBlockContent(m.blocks, m.vp.Width, m.showTimestamps))
 	if forceBottom || atBottom {
 		m.vp.GotoBottom()
 		m.unreadBelow = 0
@@ -114,6 +114,11 @@ func (m Model) renderStatus() string {
 	if !m.wheelObserved && time.Now().After(m.wheelCheckExpiry) {
 		rightParts = append(rightParts, "wheel:off")
 	}
+	tsState := "off"
+	if m.showTimestamps {
+		tsState = "on"
+	}
+	rightParts = append(rightParts, "ts:"+tsState)
 	right := dimStyle.Render(strings.Join(rightParts, " · "))
 
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)

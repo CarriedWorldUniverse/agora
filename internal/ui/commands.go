@@ -52,6 +52,11 @@ func commands() []commandDef {
 			help:    "re-run the last submitted message",
 			handler: cmdRetry,
 		},
+		{
+			name:    "ts",
+			help:    "toggle inline timestamps",
+			handler: cmdTS,
+		},
 	}
 }
 
@@ -103,6 +108,13 @@ func cmdExit(m *Model, _ string) tea.Cmd {
 	m.blocks[len(m.blocks)-1].body.WriteString("exiting — deregistering from nexus...")
 	m.refreshChatContent(false)
 	return func() tea.Msg { return QuitGraceful{} }
+}
+
+// cmdTS toggles inline timestamps in the chat view.
+func cmdTS(m *Model, _ string) tea.Cmd {
+	m.showTimestamps = !m.showTimestamps
+	m.refreshChatContent(false)
+	return nil
 }
 
 // cmdRetry re-submits the last message the operator sent.

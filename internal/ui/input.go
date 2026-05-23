@@ -80,6 +80,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			m.vp.GotoTop()
 		}
 		return m, nil
+	case "ctrl+g":
+		m.showTimestamps = !m.showTimestamps
+		m.refreshChatContent(false)
+		return m, nil
 	case "ctrl+k":
 		if m.input.Value() == "" && m.vpReady {
 			m.vp.LineUp(1)

@@ -63,6 +63,8 @@ type Model struct {
 	wheelObserved    bool
 	wheelCheckExpiry time.Time
 
+	showTimestamps bool
+
 	// Idle / re-entry tracking.
 	lastInteractionAt time.Time
 	idleSince         time.Time
