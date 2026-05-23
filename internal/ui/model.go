@@ -10,7 +10,6 @@
 package ui
 
 import (
-	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -57,8 +56,6 @@ type Model struct {
 	activeBlockIdx int
 
 	quitting bool
-
-	lastRenderedMsgID int64
 
 	// Idle / re-entry tracking.
 	lastInteractionAt time.Time
@@ -154,46 +151,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.blocksDuringIdle = 0
 		}
 		return m, tea.Tick(idleTickInterval, func(time.Time) tea.Msg { return idleTick{} })
-	case ChatDelivered:
-		if msg.MsgID <= m.lastRenderedMsgID {
-			return m, nil
-		}
-		m.lastRenderedMsgID = msg.MsgID
-		m.appendBlock(chatBlock{
-			class:     blockAspect,
-			speaker:   msg.From,
-			createdAt: msg.ReceivedAt,
-		})
-		m.blocks[len(m.blocks)-1].body.WriteString(msg.Content)
-		m.refreshChatContent(false)
-		return m, nil
-	case ChatSent:
-		m.appendBlock(chatBlock{
-			class:     blockAspect,
-			speaker:   m.cfg.AspectID,
-			createdAt: time.Now(),
-		})
-		m.blocks[len(m.blocks)-1].body.WriteString(msg.Body)
-		m.refreshChatContent(false)
-		return m, nil
-	case ChatPanelReply:
-		m.appendBlock(chatBlock{
-			class:     blockAspect,
-			speaker:   m.cfg.AspectID,
-			createdAt: time.Now(),
-		})
-		m.blocks[len(m.blocks)-1].body.WriteString(msg.Body)
-		m.refreshChatContent(false)
-		return m, nil
-	case EngineError:
-		m.appendBlock(chatBlock{
-			class:     blockSystem,
-			speaker:   "system",
-			createdAt: time.Now(),
-		})
-		m.blocks[len(m.blocks)-1].body.WriteString(fmt.Sprintf("engine error (%s): %s", msg.Source, msg.Error))
-		m.refreshChatContent(false)
-		return m, nil
 	case NotifyOperator:
 		m.appendBlock(chatBlock{
 			class:     blockNotify,

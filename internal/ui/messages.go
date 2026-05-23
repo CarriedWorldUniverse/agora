@@ -7,27 +7,6 @@ import "time"
 
 type InboxUpdated struct{}
 
-type ChatDelivered struct {
-	From       string
-	Content    string
-	MsgID      int64
-	ReceivedAt time.Time
-}
-
-type ChatSent struct {
-	To   string
-	Body string
-}
-
-type ChatPanelReply struct {
-	Body string
-}
-
-type EngineError struct {
-	Source string
-	Error  string
-}
-
 type NotifyOperator struct {
 	Body string
 }

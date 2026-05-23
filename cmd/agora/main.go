@@ -101,14 +101,9 @@ func main() {
 	var eng *engine.Engine
 
 	onChat := func(it bus.ChatItem) {
-		if p != nil {
-			p.Send(ui.ChatDelivered{
-				From:       it.From,
-				Content:    it.Content,
-				MsgID:      it.MsgID,
-				ReceivedAt: it.ReceivedAt,
-			})
-		}
+		// Bus chat.deliver flows to the engine inbox only — UI does not
+		// render bus traffic (per spec §4.5). Shadow surfaces what the
+		// operator should see via notify_operator.
 		if eng != nil {
 			eng.Receive(bridle.InboxItem{
 				From:       it.From,
