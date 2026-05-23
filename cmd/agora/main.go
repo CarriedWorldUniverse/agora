@@ -236,7 +236,7 @@ func main() {
 		emitExit(log, exitBusConnect, fmt.Sprintf("funnel build: %v", err), 1)
 	}
 
-	eng = engine.New(engine.Config{
+	eng, err = engine.New(engine.Config{
 		Funnel: f,
 		Logger: log,
 		OnDrop: func(reason string, firstSeen time.Time) {
@@ -245,6 +245,9 @@ func main() {
 			}
 		},
 	})
+	if err != nil {
+		emitExit(log, exitBusConnect, fmt.Sprintf("engine build: %v", err), 1)
+	}
 	go eng.Run(rootCtx)
 
 	// Wire the UI → engine paths now that engine exists. p.Send
