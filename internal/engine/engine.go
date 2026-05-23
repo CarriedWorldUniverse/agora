@@ -75,14 +75,21 @@ type Engine struct {
 	ttyOrder  []string             // insertion order, for FIFO eviction at ttyDedupeCap
 }
 
-// New constructs an Engine. The funnel must already be wired with
-// its ReturnHandler + ObservabilityHook before construction.
-func New(cfg Config) *Engine {
+// New constructs an Engine. Validates required Config fields per the
+// Config docstring; returns an error rather than NPE'ing later from
+// inside Run/drain/Receive on a missing Funnel or Logger.
+func New(cfg Config) (*Engine, error) {
+	if cfg.Funnel == nil {
+		return nil, errors.New("engine: Config.Funnel required")
+	}
+	if cfg.Logger == nil {
+		return nil, errors.New("engine: Config.Logger required (Run/drain log unconditionally)")
+	}
 	return &Engine{
 		cfg:       cfg,
 		wake:      make(chan struct{}, 1),
 		ttyHashes: make(map[string]time.Time, ttyDedupeCap),
-	}
+	}, nil
 }
 
 // Receive pushes an inbox item into the funnel + wakes the deliberate

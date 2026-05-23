@@ -29,10 +29,53 @@ func newTestEngine(t *testing.T) *Engine {
 	if err != nil {
 		t.Fatalf("funnel.New: %v", err)
 	}
-	return New(Config{
+	e, err := New(Config{
 		Funnel: f,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	return e
+}
+
+// TestNew_RequiresFunnelAndLogger verifies the Config validation
+// added with the engine NPE-guard. Pre-fix, constructing an Engine
+// with nil Funnel or nil Logger would NPE on first Run/drain/Receive
+// (Run + drain log unconditionally; the docstring said "all fields
+// required" but New() didn't enforce).
+func TestNew_RequiresFunnelAndLogger(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	f, err := funnel.New(funnel.Config{
+		AspectID: "test",
+		Harness:  bridle.NewHarness(stubProvider{}),
+		Provider: "stub",
+		Model:    "m",
+		Runner:   funnel.NullRunner{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		cfg  Config
+	}{
+		{"no Funnel", Config{Logger: logger}},
+		{"no Logger", Config{Funnel: f}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := New(tc.cfg); err == nil {
+				t.Errorf("expected error for %s; got nil", tc.name)
+			}
+		})
+	}
+
+	// Sanity: both fields set → no error.
+	if _, err := New(Config{Funnel: f, Logger: logger}); err != nil {
+		t.Errorf("valid config rejected: %v", err)
+	}
 }
 
 func TestReceive_TTYDedupeBlocksRepeatedContent(t *testing.T) {
@@ -137,11 +180,14 @@ func TestReceive_TTYDedupeHitFiresOnDrop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("funnel.New: %v", err)
 	}
-	e := New(Config{
+	e, err := New(Config{
 		Funnel: f,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		OnDrop: cb,
 	})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
 
 	item := bridle.InboxItem{From: "operator", Content: "dup-test", Source: SourceTTY}
 	e.Receive(item) // first — accepted
