@@ -58,6 +58,7 @@ type Model struct {
 	quitting bool
 
 	textareaEnabled bool
+	lastSubmitted   string // captured on Enter; used by /retry
 
 	// Idle / re-entry tracking.
 	lastInteractionAt time.Time
@@ -188,6 +189,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case TurnFailed:
 		m.markActiveBlockFailed(msg.Reason)
+		m.appendBlock(chatBlock{
+			class:     blockSystem,
+			speaker:   "system",
+			createdAt: time.Now(),
+		})
+		m.blocks[len(m.blocks)-1].body.WriteString("/retry to re-run this turn")
 		m.refreshChatContent(false)
 		return m, nil
 	case SubmissionDropped:

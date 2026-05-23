@@ -39,6 +39,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 		m.input.SetValue("")
 		m.input.SetHeight(1)
+		m.lastSubmitted = text
 		if n := len(m.inputHistory); n == 0 || m.inputHistory[n-1] != text {
 			m.inputHistory = append(m.inputHistory, text)
 			if limit := m.cfg.InputHistory; limit > 0 && len(m.inputHistory) > limit {

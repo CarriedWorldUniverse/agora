@@ -47,6 +47,11 @@ func commands() []commandDef {
 			help:    "list available commands",
 			handler: cmdHelp,
 		},
+		{
+			name:    "retry",
+			help:    "re-run the last submitted message",
+			handler: cmdRetry,
+		},
 	}
 }
 
@@ -98,6 +103,31 @@ func cmdExit(m *Model, _ string) tea.Cmd {
 	m.blocks[len(m.blocks)-1].body.WriteString("exiting — deregistering from nexus...")
 	m.refreshChatContent(false)
 	return func() tea.Msg { return QuitGraceful{} }
+}
+
+// cmdRetry re-submits the last message the operator sent.
+func cmdRetry(m *Model, _ string) tea.Cmd {
+	if m.lastSubmitted == "" {
+		m.appendBlock(chatBlock{
+			class:     blockSystem,
+			speaker:   "system",
+			createdAt: time.Now(),
+		})
+		m.blocks[len(m.blocks)-1].body.WriteString("nothing to retry — submit a message first")
+		m.refreshChatContent(false)
+		return nil
+	}
+	m.appendBlock(chatBlock{
+		class:     blockYou,
+		speaker:   m.cfg.OperatorName,
+		createdAt: time.Now(),
+	})
+	m.blocks[len(m.blocks)-1].body.WriteString(m.lastSubmitted)
+	m.refreshChatContent(false)
+	if m.onSubmit != nil {
+		m.onSubmit(m.lastSubmitted)
+	}
+	return nil
 }
 
 // cmdHelp renders the registry into a system-class block.
