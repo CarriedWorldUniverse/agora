@@ -57,7 +57,7 @@ func main() {
 	if logPath == "" {
 		logPath = "/tmp/agora.log"
 	}
-	logCloser, log, err := openLogger(logPath)
+	logCloser, log, logHandle, err := openLogger(logPath)
 	if err != nil {
 		emitExit(nil, exitBadFlags, fmt.Sprintf("open log: %v", err), 2)
 	}
@@ -88,6 +88,11 @@ func main() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGHUP)
 		go func() {
+			// Non-load-bearing: a panic here shouldn't tear down the
+			// program. Just log + continue. The signal handler runs
+			// once per delivered signal anyway.
+			defer recoverGoroutine("signal-handler", log, nil)
+
 			s := <-sigCh
 			signalReceived = s.String()
 			if p == nil {
@@ -103,6 +108,7 @@ func main() {
 			// restores the terminal even if Update is wedged.
 			p.Send(ui.QuitGraceful{})
 			go func() {
+				defer recoverGoroutine("signal-kill-backstop", log, nil)
 				time.Sleep(signalKillGrace)
 				log.Warn("agora: graceful shutdown didn't complete; force-killing program (terminal will still restore)",
 					"signal", s.String(), "grace", signalKillGrace)
@@ -170,7 +176,13 @@ func main() {
 	// goroutine for stdin. When the TUI exits, cancel propagates and
 	// wsasp.Run returns.
 	busDone := make(chan error, 1)
-	go func() { busDone <- b.Run(rootCtx) }()
+	go func() {
+		// Load-bearing: if bus.Run panics, the aspect has no broker
+		// connection — cancel rootCtx so the TUI sees the dropped
+		// link and initiates graceful shutdown instead of orphan-running.
+		defer recoverGoroutine("bus.Run", log, cancel)
+		busDone <- b.Run(rootCtx)
+	}()
 
 	// Provider + system prompt construction
 	provider := claudecode.New()
@@ -248,7 +260,13 @@ func main() {
 	if err != nil {
 		emitExit(log, exitBusConnect, fmt.Sprintf("engine build: %v", err), 1)
 	}
-	go eng.Run(rootCtx)
+	go func() {
+		// Load-bearing: engine.Run drives the deliberation pump. A
+		// panic here means the user is typing into a frozen UI.
+		// Cancel propagates and the TUI exits cleanly.
+		defer recoverGoroutine("engine.Run", log, cancel)
+		eng.Run(rootCtx)
+	}()
 
 	// Wire the UI → engine paths now that engine exists. p.Send
 	// blocks before p.Run starts the runtime, so do this in a
@@ -256,6 +274,10 @@ func main() {
 	// races user input: if they hit Enter before this lands, onSubmit
 	// is nil and the keystroke is dropped. Acceptable (<1ms window).
 	go func() {
+		// Non-load-bearing: this goroutine just sends ONE registration
+		// message and exits. Panic here is benign for shutdown shape.
+		defer recoverGoroutine("register-submit", log, nil)
+
 		p.Send(ui.RegisterSubmit{
 			OnSubmit: func(text string) {
 				// NEX-129: prefix tty-source content with an in-band hint
@@ -278,10 +300,26 @@ func main() {
 		})
 	}()
 
+	// Redirect stderr to the log file for the duration of bubbletea's
+	// TUI mode. Without this, any side-goroutine panic stack (Go
+	// runtime writes those to FD 2) lands on the same terminal
+	// bubbletea owns the alt-screen on — visibly corrupts the UI and
+	// confuses the still-active mouse-tracking byte stream. Restored
+	// after p.Run returns so the post-TUI emitExit line goes to the
+	// operator's terminal as before. Unix-only (Windows is a no-op
+	// stub today). Operator-reported 2026-05-27 symptom.
+	restoreStderr, redirErr := redirectStderr(logHandle)
+	if redirErr != nil {
+		log.Warn("agora: stderr redirect failed; panic stacks may still corrupt screen",
+			"err", redirErr)
+	}
+
 	if _, err := p.Run(); err != nil {
+		restoreStderr()
 		cancel()
 		emitExit(log, exitBubbleteaError, fmt.Sprintf("%v", err), 1)
 	}
+	restoreStderr()
 
 	// Graceful-shutdown tail: UI has exited (either /exit, first
 	// Ctrl-C, second Ctrl-C, or SIGTERM). Send the deregister frame
@@ -315,14 +353,17 @@ func main() {
 }
 
 // openLogger opens the log file (append, mode 0600 — secrets-aware)
-// and wraps it in a slog.Logger. Returns a closer the caller defers.
-func openLogger(path string) (func(), *slog.Logger, error) {
+// and wraps it in a slog.Logger. Returns the underlying *os.File
+// alongside the slog.Logger so callers can also redirect stderr to
+// the same file during TUI mode (see redirectStderr). The closer
+// the caller defers closes the file.
+func openLogger(path string) (func(), *slog.Logger, *os.File, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return func() {}, nil, err
+		return func() {}, nil, nil, err
 	}
 	log := slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	return func() { _ = f.Close() }, log, nil
+	return func() { _ = f.Close() }, log, f, nil
 }
 
 // signalKillGrace is how long the signal handler waits after sending
