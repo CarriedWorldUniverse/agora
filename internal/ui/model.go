@@ -35,7 +35,14 @@ type Model struct {
 	width  int
 	height int
 
-	blocks      []chatBlock
+	// blocks is a slice of *chatBlock (not value) so the strings.Builder
+	// inside each block is never copied by slice reallocations. A slice
+	// of values would copy on append-grow, tripping Builder.copyCheck at
+	// the next appendToActiveBlock and killing bubbletea (NEX-bound
+	// follow-up to PRs #14 + #16). Append helpers (appendBlock,
+	// markInteraction) clone Builder contents into a fresh *chatBlock
+	// rather than copying the caller's value verbatim.
+	blocks      []*chatBlock
 	input       textarea.Model
 	vp          viewport.Model
 	vpReady     bool
