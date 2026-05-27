@@ -11,8 +11,25 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// appendBlock takes a value chatBlock but stores it as *chatBlock
+// after deep-cloning the Builder contents. Caller can keep using
+// literal {field: value} syntax at call sites without worrying about
+// the Builder-copy hazard: this single boundary owns the conversion.
 func (m *Model) appendBlock(b chatBlock) {
-	m.blocks = append(m.blocks, b)
+	cloned := &chatBlock{
+		class:     b.class,
+		speaker:   b.speaker,
+		createdAt: b.createdAt,
+		failed:    b.failed,
+		failedMsg: b.failedMsg,
+	}
+	// Builder content survives the value→pointer transition. Empty
+	// Builders skip the write (avoids unnecessarily binding the new
+	// Builder's self-addr before any real use).
+	if s := b.body.String(); s != "" {
+		cloned.body.WriteString(s)
+	}
+	m.blocks = append(m.blocks, cloned)
 	if m.awaitingReentry && b.class != blockDivider {
 		m.blocksDuringIdle++
 	}
@@ -32,7 +49,7 @@ func (m *Model) markInteraction() {
 	now := time.Now()
 	if m.awaitingReentry && m.blocksDuringIdle > 0 {
 		dur := now.Sub(m.idleSince)
-		divider := chatBlock{
+		divider := &chatBlock{
 			class:     blockDivider,
 			createdAt: now,
 		}

@@ -154,3 +154,50 @@ func TestFormatIdleDuration(t *testing.T) {
 		}
 	}
 }
+
+// Regression for the 2026-05-28 panic ("strings.Builder must not be
+// copied after first use") that crashed agora mid-streaming. The
+// trigger pattern: m.blocks held chatBlock by value, append-grow
+// copied each chatBlock (including its strings.Builder), then the
+// next appendToActiveBlock write tripped Builder.copyCheck.
+//
+// Fix: m.blocks is now []*chatBlock; appendBlock clones the Builder
+// contents into a fresh pointer. This test forces a slice-cap grow
+// while the active block is mid-write and confirms no panic.
+func TestAppendBlock_NoPanicWhenAppendGrowsWithActiveStreamingBlock(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("panic during stream-while-grow: %v", r)
+		}
+	}()
+	m := NewModel(Config{AspectID: "shadow"})
+	// Empty HistoryDepth so we don't evict — let the slice grow naturally.
+	m.appendBlock(chatBlock{class: blockAspectThinking, speaker: "shadow", createdAt: time.Now()})
+	m.activeBlockIdx = len(m.blocks) - 1
+	// First write binds the Builder's self-addr. After this, the Builder
+	// must NEVER be copied or it'll panic on the next write.
+	m.appendToActiveBlock("seed")
+	// Force many subsequent appends — at least one cap-grow happens
+	// well before iteration 64 (Go's growth pattern doubles capacity).
+	for i := 0; i < 128; i++ {
+		m.appendBlock(chatBlock{class: blockYou, speaker: "you", createdAt: time.Now()})
+		// Interleave streaming writes to the still-active block. Pre-fix,
+		// the cap-grow inside appendBlock copied the active block's
+		// Builder; this write would then panic.
+		m.appendToActiveBlock("chunk")
+	}
+	body := m.blocks[m.activeBlockIdx].body.String()
+	if !strings.HasPrefix(body, "seed") {
+		t.Fatalf("active block body lost prefix: %q", body[:min(40, len(body))])
+	}
+	if !strings.Contains(body, "chunk") {
+		t.Fatalf("active block body missing streamed chunks: %q", body[:min(40, len(body))])
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

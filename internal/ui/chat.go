@@ -193,41 +193,44 @@ func appendClonedBlock(out []*chatBlock, src chatBlock) []*chatBlock {
 // runs at render time. Divider blocks are never coalesced. Blocks
 // with createdAt deltas > 60s also stay separate so distinct events
 // remain visible.
-func coalesceBlocks(blocks []chatBlock) []chatBlock {
+// coalesceBlocks merges consecutive same-speaker / same-class blocks
+// into a single rendered block. Returns a fresh []*chatBlock so the
+// caller can range over pointers without risk of Builder copies
+// re-tripping the copyCheck.
+func coalesceBlocks(blocks []*chatBlock) []*chatBlock {
 	if len(blocks) == 0 {
-		return blocks
+		return nil
 	}
 	ptrs := make([]*chatBlock, 0, len(blocks))
-	ptrs = appendClonedBlock(ptrs, blocks[0])
+	ptrs = appendClonedBlock(ptrs, *blocks[0])
 	for i := 1; i < len(blocks); i++ {
 		cur := blocks[i]
 		last := ptrs[len(ptrs)-1]
 		if last.class != cur.class || last.class == blockDivider || last.speaker != cur.speaker {
-			ptrs = appendClonedBlock(ptrs, cur)
+			ptrs = appendClonedBlock(ptrs, *cur)
 			continue
 		}
 		if cur.createdAt.Sub(last.createdAt) > 60*time.Second {
-			ptrs = appendClonedBlock(ptrs, cur)
+			ptrs = appendClonedBlock(ptrs, *cur)
 			continue
 		}
 		last.body.WriteString("\n\n")
 		last.body.WriteString(cur.body.String())
 	}
-	out := make([]chatBlock, len(ptrs))
-	for i, p := range ptrs {
-		out[i] = *p
-	}
-	return out
+	return ptrs
 }
 
 // renderBlockContent renders a slice of blocks at the given width,
 // returns one string suitable for viewport.SetContent. Mirrors
 // renderChatContent's signature but for blocks.
-func renderBlockContent(blocks []chatBlock, width int, showTS bool) string {
+func renderBlockContent(blocks []*chatBlock, width int, showTS bool) string {
 	coalesced := coalesceBlocks(blocks)
 	parts := make([]string, 0, len(coalesced))
 	for _, b := range coalesced {
-		parts = append(parts, renderChatBlock(b, width, showTS))
+		// Dereference for the value-param renderer. Render path is
+		// read-only — calls b.body.String(), never Write — so the
+		// implicit Builder copy in the call is safe.
+		parts = append(parts, renderChatBlock(*b, width, showTS))
 	}
 	return strings.Join(parts, "\n\n")
 }

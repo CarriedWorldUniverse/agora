@@ -12,6 +12,14 @@ func mkBlock(class blockClass, speaker, body string, ts time.Time) chatBlock {
 	return b
 }
 
+// mkBlockP is the pointer variant for tests that exercise coalesceBlocks
+// (now operating on []*chatBlock so m.blocks' Builder fields don't get
+// copied on slice reallocations — see model.go blocks field comment).
+func mkBlockP(class blockClass, speaker, body string, ts time.Time) *chatBlock {
+	b := mkBlock(class, speaker, body, ts)
+	return &b
+}
+
 func TestRenderChatBlock_YouHeaderAndBody(t *testing.T) {
 	now := time.Date(2026, 5, 23, 14, 32, 0, 0, time.UTC)
 	b := mkBlock(blockYou, "you", "ship NEX-92 when keel's done", now)
@@ -72,9 +80,9 @@ func TestRenderChatBlock_DividerInline(t *testing.T) {
 
 func TestCoalesceBlocks_SameSpeakerAdjacentFolds(t *testing.T) {
 	now := time.Date(2026, 5, 23, 14, 0, 0, 0, time.UTC)
-	blocks := []chatBlock{
-		mkBlock(blockAspect, "shadow", "first", now),
-		mkBlock(blockAspect, "shadow", "second", now.Add(5*time.Second)),
+	blocks := []*chatBlock{
+		mkBlockP(blockAspect, "shadow", "first", now),
+		mkBlockP(blockAspect, "shadow", "second", now.Add(5*time.Second)),
 	}
 	out := coalesceBlocks(blocks)
 	if len(out) != 1 {
@@ -91,9 +99,9 @@ func TestCoalesceBlocks_SameSpeakerAdjacentFolds(t *testing.T) {
 
 func TestCoalesceBlocks_DifferentSpeakerStaysSeparate(t *testing.T) {
 	now := time.Now()
-	blocks := []chatBlock{
-		mkBlock(blockAspect, "shadow", "a", now),
-		mkBlock(blockYou, "you", "b", now),
+	blocks := []*chatBlock{
+		mkBlockP(blockAspect, "shadow", "a", now),
+		mkBlockP(blockYou, "you", "b", now),
 	}
 	out := coalesceBlocks(blocks)
 	if len(out) != 2 {
@@ -103,9 +111,9 @@ func TestCoalesceBlocks_DifferentSpeakerStaysSeparate(t *testing.T) {
 
 func TestCoalesceBlocks_OverGapStaysSeparate(t *testing.T) {
 	now := time.Now()
-	blocks := []chatBlock{
-		mkBlock(blockAspect, "shadow", "old", now),
-		mkBlock(blockAspect, "shadow", "new", now.Add(2*time.Minute)),
+	blocks := []*chatBlock{
+		mkBlockP(blockAspect, "shadow", "old", now),
+		mkBlockP(blockAspect, "shadow", "new", now.Add(2*time.Minute)),
 	}
 	out := coalesceBlocks(blocks)
 	if len(out) != 2 {
@@ -115,9 +123,9 @@ func TestCoalesceBlocks_OverGapStaysSeparate(t *testing.T) {
 
 func TestCoalesceBlocks_DividerNeverFolds(t *testing.T) {
 	now := time.Now()
-	blocks := []chatBlock{
-		mkBlock(blockDivider, "", "first divider", now),
-		mkBlock(blockDivider, "", "second divider", now.Add(time.Second)),
+	blocks := []*chatBlock{
+		mkBlockP(blockDivider, "", "first divider", now),
+		mkBlockP(blockDivider, "", "second divider", now.Add(time.Second)),
 	}
 	out := coalesceBlocks(blocks)
 	if len(out) != 2 {
