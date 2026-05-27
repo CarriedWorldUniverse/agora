@@ -63,6 +63,21 @@ func main() {
 	}
 	defer logCloser()
 
+	// Hard terminal-restore guard. Operator-reported 2026-05-27: when
+	// a panic killed agora through a path that skipped bubbletea's
+	// cleanup, the terminal stayed in mouse-tracking mode and spammed
+	// hex bytes. This defer fires whenever main returns through the
+	// normal stack-unwind path (including via the recover below).
+	// Idempotent — safe even when bubbletea did clean up already.
+	defer restoreTerminalEscapes()
+
+	// Route Go-runtime crash output (unrecovered panic stacks from any
+	// goroutine, INCLUDING bubbletea's internal render/input loops) to
+	// the log file via runtime/debug.SetCrashOutput. Means future
+	// crashes leave a post-mortem artifact even when the operator
+	// can't read the screen because mouse-tracking is spamming it.
+	installCrashCapture(logHandle, log)
+
 	// Top-level panic recovery so the operator sees a reason rather than
 	// the runtime's default stack dump alone. NEX-105.
 	defer func() {
@@ -393,7 +408,16 @@ const (
 // emitExit prints the structured exit-reason line to stderr (so the
 // operator sees it even after the TUI cleared the screen), logs it,
 // and exits with the given code. NEX-105.
+//
+// Always writes the terminal-restore escape sequence before os.Exit,
+// because os.Exit bypasses defers — including main's deferred
+// restoreTerminalEscapes. Without this, any panic-caught-by-recover
+// → emitExit(exitPanic) path leaves the terminal in mouse-tracking
+// mode (operator-reported 2026-05-27 symptom). Idempotent on
+// non-TUI exit paths (escapes against an unmodified terminal are
+// no-ops).
 func emitExit(log *slog.Logger, reason, detail string, code int) {
+	restoreTerminalEscapes()
 	line := fmt.Sprintf("agora: exit reason=%s code=%d", reason, code)
 	if detail != "" {
 		line += " · " + detail
