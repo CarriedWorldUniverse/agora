@@ -41,7 +41,19 @@ type TurnChunk struct {
 }
 
 // TurnDone finalises the active streaming block. Replaces ModelTurnEnd.
-type TurnDone struct{}
+//
+// FinalText is the model's final assistant text with any
+// notify-operator fences stripped (the cleaned reply). HadNotify is
+// true when at least one notify-operator block was extracted from the
+// raw reply. The engine populates both (it owns the stripping — the ui
+// package can't import engine). When HadNotify is true the Model
+// reconciles the inline streamed block to FinalText so the notify body
+// doesn't render twice (inline AND as the red blockNotify). When false
+// the streamed block is finalised as-is.
+type TurnDone struct {
+	FinalText string
+	HadNotify bool
+}
 
 // TurnFailed marks the active block as failed; body content stays
 // visible, header re-renders with a failure reason.

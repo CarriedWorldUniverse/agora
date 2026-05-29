@@ -21,7 +21,13 @@ func (h *UIHook) OnBridleEvent(ev bridle.Event) {
 	case bridle.ModelChunk:
 		h.Program.Send(ui.TurnChunk{Text: e.Text})
 	case bridle.TurnDone:
-		h.Program.Send(ui.TurnDone{})
+		// The raw stream that filled the inline UI block includes any
+		// notify-operator fence. Strip it engine-side (ui can't import
+		// engine) and hand the cleaned text + a notify flag to the UI so
+		// it can reconcile the inline block, avoiding a double render of
+		// the notify body (inline AND as the red blockNotify).
+		notifications, cleaned := extractNotifyBlocks(e.Result.FinalText)
+		h.Program.Send(ui.TurnDone{FinalText: cleaned, HadNotify: len(notifications) > 0})
 	}
 }
 

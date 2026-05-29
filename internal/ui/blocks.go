@@ -165,6 +165,25 @@ func (m *Model) appendToActiveBlock(text string) {
 	m.blocks[m.activeBlockIdx].body.WriteString(text)
 }
 
+// dropActiveBlock removes the active streaming block entirely and
+// clears activeBlockIdx. Used when a turn's only content was a
+// notify-operator fence (cleaned text is empty): the red blockNotify
+// already carries the body, so the now-empty inline block must go.
+// If the active block isn't the tail (unexpected — would mean another
+// block was appended after it), fall back to emptying its body instead
+// of slicing, so we never drop the wrong block.
+func (m *Model) dropActiveBlock() {
+	if m.activeBlockIdx < 0 || m.activeBlockIdx >= len(m.blocks) {
+		return
+	}
+	if m.activeBlockIdx == len(m.blocks)-1 {
+		m.blocks = m.blocks[:m.activeBlockIdx]
+	} else {
+		m.blocks[m.activeBlockIdx].body.Reset()
+	}
+	m.activeBlockIdx = -1
+}
+
 func (m *Model) finishActiveBlock() {
 	if m.activeBlockIdx < 0 || m.activeBlockIdx >= len(m.blocks) {
 		return
