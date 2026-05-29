@@ -13,6 +13,7 @@ package bus
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -55,6 +56,26 @@ type Config struct {
 	// render in UI, etc.). Required for any caller that wants
 	// inbound chat (which is all of them in practice).
 	OnChat func(it ChatItem)
+
+	// OnEscalationRequest, if set, is invoked when the broker pushes an
+	// escalation.request frame (a native-API aspect's funnel asking a
+	// human to approve/deny a tool call). OPTIONAL: nil means the frame
+	// is ignored. agora wires this to surface an approval modal in the
+	// TUI. requestID is the request envelope's correlation id; the
+	// caller echoes it back via SendEscalationDecision so the blocked
+	// aspect's Request resolves against the right pending call.
+	OnEscalationRequest func(it EscalationItem)
+}
+
+// EscalationItem is the payload bus.Config.OnEscalationRequest receives
+// per escalation.request frame. Decoupled from the wire payload so the
+// UI layer doesn't import nexus frames directly.
+type EscalationItem struct {
+	RequestID string
+	Aspect    string
+	Tool      string
+	Args      json.RawMessage
+	Reason    string
 }
 
 // Bus is the agora-side handle to the WS transport. Constructed by
@@ -127,6 +148,10 @@ func Connect(ctx context.Context, cfg Config) (*Bus, error) {
 		AspectName: vr.AspectName,
 		CursorFile: cursorFile,
 		OnDeliver:  b.onDeliver,
+		// Only register the escalation callback when a consumer asked for
+		// it — nil here means wsasp ignores escalation.request frames
+		// (matches wsasp's documented "common case").
+		OnEscalationRequest: b.escalationRequestCallback(),
 		Register: schemas.RegisterRequest{
 			Name:        vr.AspectName,
 			ContextMode: schemas.ContextGlobal,
@@ -260,4 +285,75 @@ func (b *Bus) onDeliver(msg wsasp.DeliveredMessage) {
 		"msg_id", msg.ID,
 		"reason", msg.Reason,
 		"replay", msg.Replay)
+}
+
+// escalationRequestCallback returns the wsasp.Config.OnEscalationRequest
+// func, or nil when the consumer didn't wire one. Returning nil (rather
+// than a func that no-ops) keeps wsasp's "callback nil → ignore frame"
+// fast path intact.
+func (b *Bus) escalationRequestCallback() func(frames.EscalationRequestPayload, string) {
+	if b.cfg.OnEscalationRequest == nil {
+		return nil
+	}
+	return b.onEscalationRequest
+}
+
+// onEscalationRequest is the wsasp.Config.OnEscalationRequest callback.
+// Each broker-pushed escalation.request becomes one EscalationItem
+// surfaced via Config.OnEscalationRequest. requestID is the request
+// envelope's correlation id (env.ID); the caller must echo it back via
+// SendEscalationDecision so the blocked aspect's Request resolves.
+func (b *Bus) onEscalationRequest(payload frames.EscalationRequestPayload, requestID string) {
+	b.cfg.Logger.Info("escalation.request",
+		"aspect", payload.Aspect,
+		"tool", payload.Tool,
+		"request_id", requestID)
+	if b.cfg.OnEscalationRequest != nil {
+		b.cfg.OnEscalationRequest(EscalationItem{
+			RequestID: requestID,
+			Aspect:    payload.Aspect,
+			Tool:      payload.Tool,
+			Args:      payload.Args,
+			Reason:    payload.Reason,
+		})
+	}
+}
+
+// BuildEscalationDecision constructs the escalation.decision envelope
+// the operator sends back to the broker. Exported so the decision-frame
+// shape is unit-testable without a live websocket.
+//
+// CRITICAL wire contract (verified against nexus broker/escalation.go):
+// the correlation id goes in the PAYLOAD field RequestID and the
+// envelope InReplyTo MUST stay empty. The broker's read loop routes any
+// frame whose envelope InReplyTo is set through routeResponse (a
+// broker-side pending map) BEFORE the escalation handler runs — and
+// there is no broker-side pending entry, so such a frame is dropped.
+// handleEscalationDecisionFrame reads payload.RequestID and stamps
+// InReplyTo only on the frame it FORWARDS to the aspect. So we use
+// frames.New (not frames.NewResponse) and never touch env.InReplyTo.
+func BuildEscalationDecision(aspect, decision, operator, note, requestID string) (frames.Envelope, error) {
+	return frames.New(frames.KindEscalationDecision, frames.EscalationDecisionPayload{
+		Aspect:    aspect,
+		Decision:  decision,
+		Operator:  operator,
+		Note:      note,
+		RequestID: requestID,
+	})
+}
+
+// SendEscalationDecision sends the operator's answer to an
+// escalation.request back to the broker, which routes it to the blocked
+// aspect. decision must be frames.EscalationApprove or
+// frames.EscalationDeny; note is optional free text surfaced to the
+// model. Best-effort send (mirrors Deregister): the escalation is an
+// urgent low-volume signal and the aspect's own Request fails on
+// disconnect, so replaying a stale decision after reconnect would be
+// wrong.
+func (b *Bus) SendEscalationDecision(ctx context.Context, aspect, decision, operator, note, requestID string) error {
+	env, err := BuildEscalationDecision(aspect, decision, operator, note, requestID)
+	if err != nil {
+		return fmt.Errorf("build escalation.decision frame: %w", err)
+	}
+	return b.client.SendBestEffort(ctx, env)
 }
