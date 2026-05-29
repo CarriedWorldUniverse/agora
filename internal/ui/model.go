@@ -53,6 +53,16 @@ type Model struct {
 	onSubmit func(text string)
 	inboxLen func() int
 
+	// escalation holds the in-flight operator-approval modal, or nil
+	// when no escalation is pending. The first (and currently only)
+	// modal in agora's TUI; while non-nil it captures every keystroke.
+	escalation *escalationModal
+	// escalationSend dispatches the operator's decision to the bus.
+	// Injected via RegisterSubmit so tests can substitute a fake. Args
+	// mirror the bus call minus operator (the Model fills operator from
+	// cfg.OperatorName / AspectID). Returns the send error.
+	escalationSend func(aspect, decision, note, requestID string) error
+
 	inputHistory  []string
 	historyIdx    int
 	draftSnapshot string
@@ -148,7 +158,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshChatContent(firstSize)
 		return m, nil
 	case tea.KeyMsg:
+		// Modal capture: while an escalation is pending it owns every
+		// keystroke (it is modal). Routes BEFORE the chat input so the
+		// operator can't type into the chat behind it.
+		if m.escalation != nil {
+			nm, cmd, _ := m.handleEscalationKey(msg)
+			return nm, cmd
+		}
 		return m.handleKey(msg)
+	case EscalationRequestReceived:
+		m.escalation = newEscalationModal(msg)
+		// Force the viewport to the bottom so the modal (rendered below
+		// the chat body) sits in the operator's immediate view.
+		if m.vpReady {
+			m.vp.GotoBottom()
+			m.unreadBelow = 0
+		}
+		return m, textarea.Blink
+	case EscalationResolved:
+		// Decision dispatched (success or failure). Record an audit block
+		// then clear the modal so the chat input regains focus.
+		decided := "approved"
+		if msg.Decision == escalationDeny {
+			decided = "denied"
+		}
+		body := "escalation " + decided
+		if msg.Err != nil {
+			body += " — SEND FAILED: " + msg.Err.Error()
+		}
+		m.appendBlock(chatBlock{
+			class:     blockSystem,
+			speaker:   "system",
+			createdAt: time.Now(),
+		})
+		m.blocks[len(m.blocks)-1].body.WriteString(body)
+		m.escalation = nil
+		m.refreshChatContent(true)
+		return m, nil
 	case InboxUpdated:
 		if m.inboxLen != nil {
 			m.inboxDepth = m.inboxLen()
@@ -162,6 +208,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case RegisterSubmit:
 		m.onSubmit = msg.OnSubmit
 		m.inboxLen = msg.InboxLen
+		m.escalationSend = msg.OnEscalationDecision
 		m.textareaEnabled = true
 		m.input.Placeholder = "type to " + m.cfg.AspectID + "; shift+enter for newline; /exit to quit"
 		m.input.Focus()
@@ -274,6 +321,11 @@ func (m Model) View() string {
 	rows := []string{status, "", chatBody, bottomDivider, inputRow}
 	if m.slashHint != "" {
 		rows = append(rows, systemStyle.Render(m.slashHint))
+	}
+	// Escalation modal renders prominently below the chat region — a
+	// distinct bordered red panel the operator answers before resuming.
+	if m.escalation != nil {
+		rows = append(rows, m.renderEscalationModal())
 	}
 	return strings.Join(rows, "\n")
 }
