@@ -109,7 +109,18 @@ func Connect(ctx context.Context, cfg Config) (*Bus, error) {
 		return nil, fmt.Errorf("bus: load keyfile: %w", err)
 	}
 
-	kc := keyfile.NewClient()
+	// NEX-367: if the keyfile pins a self-signed broker cert, trust it for
+	// the validate handshake AND the WS dial — no system-wide trust step.
+	// Nil = default system trust store (CA-signed certs just work).
+	brokerTLS, err := kf.BrokerTLSConfig()
+	if err != nil {
+		return nil, fmt.Errorf("bus: broker TLS config: %w", err)
+	}
+	if brokerTLS != nil {
+		cfg.Logger.Info("trusting pinned broker cert from keyfile (self-signed-capable)")
+	}
+
+	kc := &keyfile.Client{HTTP: keyfile.HTTPClientWithTLS(brokerTLS)}
 	vr, err := kc.Validate(ctx, kf)
 	if err != nil {
 		return nil, fmt.Errorf("bus: validate keyfile: %w", err)
@@ -145,6 +156,7 @@ func Connect(ctx context.Context, cfg Config) (*Bus, error) {
 	wsCfg := wsasp.Config{
 		URL:        vr.NexusURL,
 		AuthToken:  vr.SessionJWT,
+		TLSConfig:  brokerTLS, // NEX-367: trust the pinned broker cert on the WS dial too
 		AspectName: vr.AspectName,
 		CursorFile: cursorFile,
 		OnDeliver:  b.onDeliver,

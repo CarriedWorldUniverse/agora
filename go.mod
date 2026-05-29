@@ -4,7 +4,7 @@ go 1.26.2
 
 require (
 	github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260529023501-39174f6a3471
-	github.com/CarriedWorldUniverse/nexus v0.2.1-0.20260529041514-224343fa49ae
+	github.com/CarriedWorldUniverse/nexus v0.2.1-0.20260529191407-d8a3450956ea
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
