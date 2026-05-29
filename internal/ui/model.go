@@ -248,6 +248,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshChatContent(false)
 		return m, nil
 	case TurnDone:
+		// Reconcile the inline streamed block only when the raw reply
+		// carried a notify-operator fence. The block was filled from the
+		// model's raw stream (fence included); the engine-stripped
+		// FinalText is the canonical inline text. Skipping this when
+		// !HadNotify leaves the common path byte-for-byte unchanged.
+		if msg.HadNotify && m.activeBlockIdx >= 0 && m.activeBlockIdx < len(m.blocks) {
+			if strings.TrimSpace(msg.FinalText) == "" {
+				// Reply was nothing but notify content; the red block
+				// already carries it. Drop the empty inline block.
+				m.dropActiveBlock()
+			} else {
+				m.blocks[m.activeBlockIdx].body.Reset()
+				m.blocks[m.activeBlockIdx].body.WriteString(msg.FinalText)
+			}
+		}
 		m.finishActiveBlock()
 		m.refreshChatContent(false)
 		return m, nil
