@@ -177,11 +177,33 @@ func main() {
 		}
 	}
 
+	// Escalation requests from native-API aspects → surface the approval
+	// modal in the TUI. The bus callback runs on the wsasp read loop; we
+	// only forward into the bubbletea program (p.Send is the async-event
+	// path, same pattern as UIHook / OnDrop). p is guaranteed non-nil by
+	// the time the WS is up — bus.Run starts in a goroutine well after p
+	// is assigned below — but guard anyway for the startup race.
+	onEscalation := func(it bus.EscalationItem) {
+		if p == nil {
+			log.Warn("escalation.request arrived before UI program ready; dropping",
+				"aspect", it.Aspect, "request_id", it.RequestID)
+			return
+		}
+		p.Send(ui.EscalationRequestReceived{
+			RequestID: it.RequestID,
+			Aspect:    it.Aspect,
+			Tool:      it.Tool,
+			Args:      it.Args,
+			Reason:    it.Reason,
+		})
+	}
+
 	b, err := bus.Connect(rootCtx, bus.Config{
-		KeyfilePath: *keyfilePath,
-		CursorDir:   resolvedCursorDir,
-		Logger:      log,
-		OnChat:      onChat,
+		KeyfilePath:         *keyfilePath,
+		CursorDir:           resolvedCursorDir,
+		Logger:              log,
+		OnChat:              onChat,
+		OnEscalationRequest: onEscalation,
 	})
 	if err != nil {
 		emitExit(log, exitBusConnect, fmt.Sprintf("%v", err), 1)
@@ -312,6 +334,13 @@ func main() {
 				})
 			},
 			InboxLen: eng.InboxLen,
+			// Operator escalation decision → bus. operator identity is the
+			// authenticated aspect name (bus.AspectName); the broker
+			// re-stamps payload.Operator from the connection's auth identity
+			// anyway, but sending it keeps the audit/local-render honest.
+			OnEscalationDecision: func(aspect, decision, note, requestID string) error {
+				return b.SendEscalationDecision(rootCtx, aspect, decision, b.AspectName(), note, requestID)
+			},
 		})
 	}()
 

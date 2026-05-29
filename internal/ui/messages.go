@@ -3,9 +3,25 @@
 // declarations, no behaviour.
 package ui
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type InboxUpdated struct{}
+
+// EscalationRequestReceived is sent into the program when the broker
+// pushes an escalation.request (a native-API aspect asking a human to
+// approve/deny a tool call). The Model opens a prominent approval modal
+// on receipt. RequestID is the correlation id the decision must echo
+// back so the blocked aspect's Request resolves.
+type EscalationRequestReceived struct {
+	RequestID string
+	Aspect    string
+	Tool      string
+	Args      json.RawMessage
+	Reason    string
+}
 
 type NotifyOperator struct {
 	Body string
@@ -47,6 +63,11 @@ type ReadyToQuit struct{}
 type RegisterSubmit struct {
 	OnSubmit func(text string)
 	InboxLen func() int
+	// OnEscalationDecision dispatches an operator escalation decision to
+	// the bus. Optional: nil leaves the modal able to render but its
+	// confirm becomes a no-op send (still clears the modal). Wired in
+	// main.go to bus.SendEscalationDecision.
+	OnEscalationDecision func(aspect, decision, note, requestID string) error
 }
 
 type wsTick struct{}
