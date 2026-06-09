@@ -25,7 +25,10 @@ conversation with any online agent, from anywhere the broker is reachable.
   operator WebSocket — the same protocol the dashboard speaks. No new
   protocol; the TUI, dashboard Converse, and vessel are windows onto the same
   threads.
-- Agent list with **online presence**; pick an agent → 1:1 DM thread.
+- **One agent, one conversation, full screen.** Agora binds to a single agent
+  for its lifetime (`agora -agent shadow`); the whole TUI is that thread. No
+  conversation list, no agent switching in-app — a different agent is a
+  different invocation. (Multi-thread browsing is the dashboard's job.)
 - DM threads use the dashboard's `dm:<agent>` topic convention, so a
   conversation started in the TUI continues seamlessly in the dashboard and
   vice versa.
@@ -43,8 +46,8 @@ conversation with any online agent, from anywhere the broker is reachable.
 ## Non-goals (v1)
 
 - Hosting an aspect (the entire point of the rework is removing this).
-- Team/topic channel browsing (the dashboard does this well; the TUI is the
-  1:1 surface — a later v-next can add channels if terminal life wants them).
+- Multi-agent chat / conversation browsing of any kind — agora is a
+  one-to-one terminal. Team/topic browsing is the dashboard's job.
 - Voice (vessel's job).
 - The orchestrator status page (separate workstream; the TUI will consume its
   stream later for richer presence).
@@ -95,8 +98,9 @@ The operator-WS client. Mirrors the dashboard's `comms.js`/`api.js` contract:
 
 ### `internal/ui` (kept, rewired)
 
-- Conversation list pane: online agents (presence dot), `★ shadow` pinned
-  first — the same ordering convention as the dashboard's mobile Converse.
+- Single full-screen thread for the bound agent; a status line carries the
+  agent's presence (online/offline dot from the roster call), the in-turn
+  state, and the connection state. No list pane.
 - Thread pane: existing message blocks/rendering (markdown fences already
   handled), `dm:<agent>` filtering identical to the dashboard's
   `messageBelongsToChannel` (topic `dm:<agent>`; with the reply-topic
@@ -104,8 +108,8 @@ The operator-WS client. Mirrors the dashboard's `comms.js`/`api.js` contract:
 - Composer: send → `chat.send {topic: "dm:<agent>", content: "@<agent> …"}`
   exactly as the dashboard's `sendDM` composes it (mention ensured in
   content); `reply_to` threading on selection.
-- In-turn indicator: agent's row + thread header show "working…" while a run
-  or turn for that aspect is active (from `runs.update`; coarse is fine).
+- In-turn indicator: the status line shows "working…" while a run or turn for
+  the bound aspect is active (from `runs.update`; coarse is fine).
 - Escalation modal: kept visually; rewired to the operator escalation frames.
 
 ### Escalations (the one broker-side verify/extend)
@@ -124,7 +128,7 @@ approve/deny → decision RPC.
 ```
 agora -broker https://nexus.tail41686e.ts.net:7888 \
       [-cred ~/.agora/operator.json]   # operator JWT/token + pinned cert
-      [-agent shadow]                  # open straight into a thread
+      -agent shadow                    # REQUIRED: the one agent this session talks to
 ```
 
 Gone: `-keyfile` (aspect), `-claude`, `-cwd`, funnel/provider config. The
@@ -141,7 +145,7 @@ in `-cred`/env so the swap is one loader.
 ## Data flow (happy path)
 
 1. `agora -agent maren` → opclient dials, authenticates, `subscribe.chat`,
-   roster fetch → UI shows maren online.
+   roster check → status line shows maren online.
 2. `chat.list after_id=cursor` → thread pane renders history (topic-filtered
    to `dm:maren`).
 3. Operator types → `chat.send {topic:"dm:maren", content:"@maren …"}`.
