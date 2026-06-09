@@ -89,16 +89,7 @@ type ChatListResult struct {
 	HasMore  bool          `json:"has_more"`
 }
 
-type RosterAspect struct {
-	Name         string   `json:"name"`
-	Status       string   `json:"status"`
-	LastSeen     string   `json:"last_seen,omitempty"`
-	Capabilities []string `json:"capabilities,omitempty"`
-	Model        string   `json:"model,omitempty"`
-	Provider     string   `json:"provider,omitempty"`
-	ContextMode  string   `json:"context_mode,omitempty"`
-	Role         string   `json:"role,omitempty"`
-}
+type RosterAspect = frames.RosterAspect
 
 type Run struct {
 	ID     string          `json:"id,omitempty"`
@@ -220,9 +211,7 @@ func (c *Client) ChatSend(ctx context.Context, content, topic string, replyTo in
 }
 
 func (c *Client) RosterList(ctx context.Context) ([]RosterAspect, error) {
-	var out struct {
-		Aspects []RosterAspect `json:"aspects"`
-	}
+	var out frames.RosterListResultPayload
 	if err := c.rpc(ctx, "roster.list", map[string]any{}, &out); err != nil {
 		return nil, err
 	}
