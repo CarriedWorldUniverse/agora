@@ -194,8 +194,8 @@ func TestStatusLineConnectionAndWorkingStates(t *testing.T) {
 		t.Fatalf("working status missing: %q", got)
 	}
 	m.applyOpEvent(opclient.ConnState{Connected: false})
-	if got := m.renderStatus(); !strings.Contains(got, "offline") {
-		t.Fatalf("offline status missing: %q", got)
+	if got := m.renderStatus(); !strings.Contains(got, "reconnecting…") {
+		t.Fatalf("reconnecting status missing: %q", got)
 	}
 }
 
