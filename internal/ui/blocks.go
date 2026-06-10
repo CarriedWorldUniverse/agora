@@ -146,8 +146,8 @@ func (m Model) renderStatus() string {
 	if m.vpReady && !m.vp.AtBottom() && m.unreadBelow > 0 {
 		rightParts = append(rightParts, fmt.Sprintf("↓ %d below (Ctrl-E)", m.unreadBelow))
 	}
-	if !m.wheelObserved && time.Now().After(m.wheelCheckExpiry) {
-		rightParts = append(rightParts, "wheel:off")
+	if m.statusNotice != "" {
+		rightParts = append(rightParts, m.statusNotice)
 	}
 	right := dimStyle.Render(strings.Join(rightParts, " · "))
 
