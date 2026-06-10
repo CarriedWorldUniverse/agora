@@ -75,7 +75,26 @@ type chatBlock struct {
 	failed    bool
 	failedMsg string // populated when failed=true; renders in header
 	msgID     int64
-	pending   bool
+	pending   bool // sent, awaiting broker echo — renders "…"
+	delivered bool // echo reconciled — renders "✓"
+}
+
+// sendStateMarker is the dim delivery-state suffix on operator blocks:
+// "…" while awaiting the broker echo, "✓" once the echo reconciles,
+// "✗ undelivered" on RPC failure or ack timeout.
+func sendStateMarker(b chatBlock) string {
+	if b.class != blockYou {
+		return ""
+	}
+	switch {
+	case b.pending:
+		return "…"
+	case b.failed:
+		return "✗ undelivered"
+	case b.delivered:
+		return "✓"
+	}
+	return ""
 }
 
 // renderChatBlock produces the styled header rule line + indented body.
@@ -90,13 +109,17 @@ func renderChatBlock(b chatBlock, width int, showTS bool) string {
 	}
 
 	// header: "<glyph?><speaker><state?> <rule fill> <ts?>"
-	leftWidth := lipgloss.Width(headerText)
+	left := headerStyleFn.Render(headerText)
+	if marker := sendStateMarker(b); marker != "" {
+		left += " " + dimStyle.Render(marker)
+	}
+	leftWidth := lipgloss.Width(left)
 	rightWidth := lipgloss.Width(tsSuffix)
 	ruleWidth := width - leftWidth - rightWidth - 1 // 1 for space between
 	if ruleWidth < 3 {
 		ruleWidth = 3
 	}
-	header := headerStyleFn.Render(headerText) + " " + dividerStyle.Render(strings.Repeat("─", ruleWidth)) + tsSuffix
+	header := left + " " + dividerStyle.Render(strings.Repeat("─", ruleWidth)) + tsSuffix
 
 	body := b.body.String()
 	if body == "" {
@@ -111,9 +134,8 @@ func renderChatBlock(b chatBlock, width int, showTS bool) string {
 func blockHeaderText(b chatBlock) string {
 	switch b.class {
 	case blockYou:
-		if b.pending {
-			return "you · sending"
-		}
+		// Delivery state renders as a dim marker suffix
+		// (sendStateMarker), not in the header text.
 		return "you"
 	case blockAspect:
 		s := b.speaker
@@ -182,6 +204,8 @@ func appendClonedBlock(out []*chatBlock, src chatBlock) []*chatBlock {
 		createdAt: src.createdAt,
 		failed:    src.failed,
 		failedMsg: src.failedMsg,
+		pending:   src.pending,
+		delivered: src.delivered,
 	}
 	b.body.WriteString(src.body.String())
 	return append(out, b)
@@ -206,6 +230,12 @@ func coalesceBlocks(blocks []*chatBlock) []*chatBlock {
 		cur := blocks[i]
 		last := ptrs[len(ptrs)-1]
 		if last.class != cur.class || last.class == blockDivider || last.speaker != cur.speaker {
+			ptrs = appendClonedBlock(ptrs, *cur)
+			continue
+		}
+		// Blocks in different delivery states keep their own markers —
+		// a pending send must not fold into a delivered/failed one.
+		if last.pending != cur.pending || last.delivered != cur.delivered || last.failed != cur.failed {
 			ptrs = appendClonedBlock(ptrs, *cur)
 			continue
 		}

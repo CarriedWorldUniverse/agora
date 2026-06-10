@@ -56,6 +56,23 @@ type Model struct {
 	working     bool
 	unreadBelow int
 
+	// now is the model's clock; injectable so tests can pin time.
+	now func() time.Time
+
+	// Local-echo bookkeeping: every chat.send appends a pending block
+	// AND queues a pendingSend; the broker's chat.deliver echo acks the
+	// queue FIFO (content equality as a guard). seenIDs dedupes broker
+	// message ids across the echo-reconcile and append paths.
+	pendingSends []*pendingSend
+	sendSeq      int64
+	seenIDs      map[int64]struct{}
+
+	// Observe-driven presence: latest snapshot state per TurnID for the
+	// configured agent (replace-by-TurnID). presenceTicking guards the
+	// 1s tick chain so only one runs at a time.
+	turns           map[string]*turnState
+	presenceTicking bool
+
 	// escalation holds the in-flight operator-approval modal, or nil
 	// when no escalation is pending. The first (and currently only)
 	// modal in agora's TUI; while non-nil it captures every keystroke.
@@ -133,6 +150,9 @@ func NewModel(cfg Config) Model {
 		sessionStart:      time.Now(),
 		textareaEnabled:   textareaEnabled,
 		writeClipboard:    clipboard.WriteAll,
+		now:               time.Now,
+		seenIDs:           make(map[int64]struct{}),
+		turns:             make(map[string]*turnState),
 	}
 	if cfg.Client != nil {
 		m.escalationSend = func(aspect, decision, note, requestID string) error {
@@ -237,14 +257,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshChatContent(true)
 		return m, nil
 	case OpEventReceived:
-		m.applyOpEvent(msg.Event)
-		return m, waitOpEventCmd(m.cfg.Client)
+		cmd := m.applyOpEvent(msg.Event)
+		return m, tea.Batch(cmd, waitOpEventCmd(m.cfg.Client))
 	case opEventPoll:
 		return m, waitOpEventCmd(m.cfg.Client)
 	case SendFailed:
 		m.markPendingFailed(msg.Text, msg.Err)
 		m.refreshChatContent(false)
 		return m, nil
+	case sendEchoTimeout:
+		if m.expirePendingSend(msg.seq) {
+			m.refreshChatContent(false)
+		}
+		return m, nil
+	case presenceTick:
+		m.pruneStaleTurns()
+		if !m.presenceActive() {
+			m.presenceTicking = false
+			return m, nil
+		}
+		return m, presenceTickCmd()
 	case ClearStatusNotice:
 		m.statusNotice = ""
 		return m, nil

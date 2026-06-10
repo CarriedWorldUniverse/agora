@@ -9,8 +9,33 @@ import (
 	"time"
 
 	"github.com/CarriedWorldUniverse/agora/internal/opclient"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// pendingSend is one unacked chat.send awaiting its broker echo.
+// Reconciliation is FIFO over this queue with content equality as a
+// guard; entries leave the queue on echo, RPC failure, or ack timeout.
+type pendingSend struct {
+	seq   int64
+	text  string
+	block *chatBlock
+}
+
+// turnState is the latest observe snapshot for one TurnID.
+type turnState struct {
+	label       string
+	status      string
+	started     time.Time
+	lastFrameAt time.Time
+}
+
+// lightsPresence reports whether this turn counts toward the
+// "<agent> is working…" presence line: only in-flight main turns do —
+// compact/filter-judge run after the reply and must not re-light it.
+func (t *turnState) lightsPresence() bool {
+	return t.status == "in_flight" && (t.label == "" || t.label == "main")
+}
 
 // appendBlock takes a value chatBlock but stores it as *chatBlock
 // after deep-cloning the Builder contents. Caller can keep using
@@ -25,6 +50,7 @@ func (m *Model) appendBlock(b chatBlock) {
 		failedMsg: b.failedMsg,
 		msgID:     b.msgID,
 		pending:   b.pending,
+		delivered: b.delivered,
 	}
 	// Builder content survives the value→pointer transition. Empty
 	// Builders skip the write (avoids unnecessarily binding the new
@@ -126,13 +152,12 @@ func (m Model) renderStatus() string {
 	if status == "" {
 		status = "connecting"
 	}
-	if m.working && status == "online" {
-		status = "working"
-	}
-	if status == "online" || status == "working" {
+	if status == "online" {
 		rightParts = append(rightParts, "online")
-		if status == "working" {
-			rightParts = append(rightParts, "working")
+		// Presence is observe-driven (in-flight main turns), never
+		// runs.* — dispatch Jobs are not DM turns.
+		if m.presenceActive() {
+			rightParts = append(rightParts, fmt.Sprintf("%s is working… %s", m.cfg.Agent, formatAgo(m.presenceElapsed())))
 		}
 	} else {
 		rightParts = append(rightParts, status)
@@ -166,7 +191,10 @@ func (m Model) belongs(msg opclient.ChatMessage) bool {
 	return msg.Topic == m.threadTopic()
 }
 
-func (m *Model) applyOpEvent(ev opclient.Event) {
+// applyOpEvent folds one opclient event into the model. The returned
+// tea.Cmd (usually nil) starts the presence tick chain when an observe
+// snapshot activates presence.
+func (m *Model) applyOpEvent(ev opclient.Event) tea.Cmd {
 	switch ev := ev.(type) {
 	case opclient.ConnState:
 		// Three states only: "connecting" (initial dial, set in
@@ -190,10 +218,19 @@ func (m *Model) applyOpEvent(ev opclient.Event) {
 		if m.appendChatMessage(ev.Message) {
 			m.refreshChatContent(false)
 		}
+		// The agent's reply ends the wait even if the turn's complete
+		// snapshot is delayed or lost.
+		if m.belongs(ev.Message) && ev.Message.From == m.cfg.Agent {
+			m.clearActivePresence()
+		}
 	case opclient.RunEvent:
+		// runs.* is dispatch Jobs, never DM turns; tracked but it does
+		// not feed the rendered presence state.
 		if ev.Run.Aspect == "" || ev.Run.Aspect == m.cfg.Agent {
 			m.working = runStatusWorking(ev.Run.Status)
 		}
+	case opclient.ObserveTurn:
+		return m.applyObserveTurn(ev)
 	case opclient.EscalationEvent:
 		m.escalation = newEscalationModal(EscalationRequestReceived{
 			RequestID: ev.RequestID,
@@ -207,6 +244,93 @@ func (m *Model) applyOpEvent(ev opclient.Event) {
 			m.unreadBelow = 0
 		}
 	}
+	return nil
+}
+
+// applyObserveTurn replaces the tracked snapshot for the turn's TurnID.
+// Complete/errored turns are dropped immediately; in-flight ones stamp
+// lastFrameAt for the staleness guard.
+func (m *Model) applyObserveTurn(ev opclient.ObserveTurn) tea.Cmd {
+	if ev.Aspect != "" && ev.Aspect != m.cfg.Agent {
+		return nil
+	}
+	if ev.Turn.TurnID == "" {
+		return nil
+	}
+	if ev.Turn.Status == "complete" || ev.Turn.Status == "errored" {
+		delete(m.turns, ev.Turn.TurnID)
+		return nil
+	}
+	m.turns[ev.Turn.TurnID] = &turnState{
+		label:       ev.Turn.Label,
+		status:      ev.Turn.Status,
+		started:     ev.Turn.Started,
+		lastFrameAt: m.now(),
+	}
+	return m.ensurePresenceTick()
+}
+
+func (m Model) presenceActive() bool {
+	for _, t := range m.turns {
+		if t.lightsPresence() {
+			return true
+		}
+	}
+	return false
+}
+
+// presenceElapsed is time since the earliest in-flight main turn started.
+func (m Model) presenceElapsed() time.Duration {
+	var started time.Time
+	for _, t := range m.turns {
+		if !t.lightsPresence() {
+			continue
+		}
+		if started.IsZero() || t.started.Before(started) {
+			started = t.started
+		}
+	}
+	if started.IsZero() {
+		return 0
+	}
+	if d := m.now().Sub(started); d > 0 {
+		return d
+	}
+	return 0
+}
+
+func (m *Model) clearActivePresence() {
+	for id, t := range m.turns {
+		if t.lightsPresence() {
+			delete(m.turns, id)
+		}
+	}
+}
+
+// pruneStaleTurns drops turns with no fresh snapshot for
+// presenceStaleAfter — the guard against a lost complete frame pinning
+// "is working…" forever.
+func (m *Model) pruneStaleTurns() {
+	now := m.now()
+	for id, t := range m.turns {
+		if now.Sub(t.lastFrameAt) > presenceStaleAfter {
+			delete(m.turns, id)
+		}
+	}
+}
+
+// ensurePresenceTick starts the 1s tick chain when presence just became
+// active; at most one chain runs (presenceTicking).
+func (m *Model) ensurePresenceTick() tea.Cmd {
+	if m.presenceTicking || !m.presenceActive() {
+		return nil
+	}
+	m.presenceTicking = true
+	return presenceTickCmd()
+}
+
+func presenceTickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg { return presenceTick{} })
 }
 
 func runStatusWorking(status string) bool {
@@ -222,9 +346,17 @@ func (m *Model) appendChatMessage(msg opclient.ChatMessage) bool {
 	if !m.belongs(msg) {
 		return false
 	}
+	if msg.ID > 0 {
+		if _, ok := m.seenIDs[msg.ID]; ok {
+			return false
+		}
+	}
 	body := displayChatContent(msg, m.cfg.Agent)
 	if m.reconcilePending(msg, body) {
 		return true
+	}
+	if msg.ID > 0 {
+		m.seenIDs[msg.ID] = struct{}{}
 	}
 	class := blockAspect
 	speaker := msg.From
@@ -246,56 +378,90 @@ func (m *Model) appendChatMessage(msg opclient.ChatMessage) bool {
 	return true
 }
 
-func (m *Model) appendOptimistic(text string) {
+// appendOptimistic locally echoes a just-sent message as a pending
+// block ("…"), queues it for echo reconciliation, and returns the
+// ack-timeout command the caller schedules alongside the send.
+func (m *Model) appendOptimistic(text string) tea.Cmd {
+	m.sendSeq++
+	seq := m.sendSeq
 	b := chatBlock{
 		class:     blockYou,
 		speaker:   m.cfg.OperatorName,
-		createdAt: time.Now(),
-		msgID:     -time.Now().UnixNano(),
+		createdAt: m.now(),
+		msgID:     -seq,
 		pending:   true,
 	}
 	b.body.WriteString(text)
 	m.appendBlock(b)
+	m.pendingSends = append(m.pendingSends, &pendingSend{
+		seq:   seq,
+		text:  text,
+		block: m.blocks[len(m.blocks)-1],
+	})
+	return tea.Tick(echoAckTimeout, func(time.Time) tea.Msg { return sendEchoTimeout{seq: seq} })
 }
 
+// reconcilePending matches a broker echo of the operator's own message
+// against the unacked-send queue — FIFO, with content equality as a
+// guard. On match the pending block flips to delivered ("✓") in place
+// and the server id is adopted into seenIDs so the echo never appends
+// a duplicate block.
 func (m *Model) reconcilePending(msg opclient.ChatMessage, body string) bool {
 	if msg.From != m.cfg.OperatorName && msg.From != "operator" {
 		return false
 	}
-	for _, b := range m.blocks {
-		if b.class != blockYou || !b.pending {
+	for i, ps := range m.pendingSends {
+		if strings.TrimSpace(ps.text) != strings.TrimSpace(body) {
 			continue
 		}
-		if strings.TrimSpace(b.body.String()) != strings.TrimSpace(body) {
-			continue
+		ps.block.pending = false
+		ps.block.delivered = true
+		ps.block.failed = false
+		ps.block.failedMsg = ""
+		ps.block.msgID = msg.ID
+		if msg.ID > 0 {
+			m.seenIDs[msg.ID] = struct{}{}
 		}
-		b.pending = false
-		b.failed = false
-		b.failedMsg = ""
-		b.msgID = msg.ID
+		m.pendingSends = append(m.pendingSends[:i], m.pendingSends[i+1:]...)
 		return true
-	}
-	for _, b := range m.blocks {
-		if msg.ID > 0 && b.msgID == msg.ID {
-			return true
-		}
 	}
 	return false
 }
 
+// markPendingFailed handles the SendFailed (RPC error) path: the
+// pending block itself flips to ✗ undelivered rather than only printing
+// a system error. Texts with no queued send fall back to a system block.
 func (m *Model) markPendingFailed(text string, err error) {
 	if err == nil {
 		return
 	}
-	for _, b := range m.blocks {
-		if b.class == blockYou && b.pending && strings.TrimSpace(b.body.String()) == strings.TrimSpace(text) {
-			b.pending = false
-			b.failed = true
-			b.failedMsg = err.Error()
-			return
+	for i, ps := range m.pendingSends {
+		if strings.TrimSpace(ps.text) != strings.TrimSpace(text) {
+			continue
 		}
+		ps.block.pending = false
+		ps.block.failed = true
+		ps.block.failedMsg = err.Error()
+		m.pendingSends = append(m.pendingSends[:i], m.pendingSends[i+1:]...)
+		return
 	}
 	m.appendSystem("send failed: " + err.Error())
+}
+
+// expirePendingSend marks one queued send undelivered after its ack
+// window lapses. No-op (false) if the echo already reconciled it.
+func (m *Model) expirePendingSend(seq int64) bool {
+	for i, ps := range m.pendingSends {
+		if ps.seq != seq {
+			continue
+		}
+		ps.block.pending = false
+		ps.block.failed = true
+		ps.block.failedMsg = "undelivered"
+		m.pendingSends = append(m.pendingSends[:i], m.pendingSends[i+1:]...)
+		return true
+	}
+	return false
 }
 
 func (m *Model) appendSystem(text string) {
