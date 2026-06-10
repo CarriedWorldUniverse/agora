@@ -85,6 +85,7 @@ func TestChatSendNoResult(t *testing.T) {
 	}
 	req := srv.expectFrame(t, "chat.send")
 	var payload struct {
+		From    string `json:"from"`
 		Content string `json:"content"`
 		Topic   string `json:"topic"`
 	}
@@ -93,6 +94,11 @@ func TestChatSendNoResult(t *testing.T) {
 	}
 	if payload.Content != "@maren hi" || payload.Topic != "dm:maren" {
 		t.Fatalf("chat.send payload = %+v", payload)
+	}
+	// The broker's HandleChatSend rejects from=="" — regression for the
+	// missing-from bug caught in the C2 live acceptance.
+	if payload.From != "operator" {
+		t.Fatalf("chat.send from = %q, want operator", payload.From)
 	}
 }
 
