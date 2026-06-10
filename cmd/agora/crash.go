@@ -8,10 +8,11 @@ import (
 )
 
 // terminalRestoreEscapes are the ANSI sequences that undo every TUI
-// mode agora's bubbletea program enables (alt-screen, mouse-tracking
-// in all flavours, hidden cursor). Idempotent — safe to write even
-// when bubbletea already cleaned up. Written raw to stdout so we
-// don't depend on any of the higher-level state still being intact.
+// mode agora's bubbletea program enables (alt-screen, legacy
+// mouse-tracking modes from older builds, hidden cursor). Idempotent —
+// safe to write even when bubbletea already cleaned up. Written raw to
+// stdout so we don't depend on any of the higher-level state still being
+// intact.
 //
 // Operator-reported 2026-05-27: when an unrecovered panic in a
 // bubbletea-internal goroutine killed agora, none of bubbletea's
@@ -23,7 +24,7 @@ import (
 //
 // Sequence breakdown:
 //
-//	\x1b[?1003l  disable mouse-all-motion (the mode WithMouseAllMotion enables)
+//	\x1b[?1003l  disable mouse-all-motion (leftover from older builds)
 //	\x1b[?1006l  disable SGR mouse encoding
 //	\x1b[?1000l  disable basic X10 mouse tracking
 //	\x1b[?1049l  exit alt-screen → main-screen restored

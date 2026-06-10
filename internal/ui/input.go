@@ -74,6 +74,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.blocks[len(m.blocks)-1].body.WriteString("ctrl-c — exiting... (press again to force exit)")
 		m.refreshChatContent(false)
 		return m, func() tea.Msg { return QuitGraceful{} }
+	case "y":
+		if m.input.Value() != "" {
+			break
+		}
+		return m.yankLastMessage()
 	case "enter":
 		text := strings.TrimRight(m.input.Value(), " \t\n")
 		if text == "" {
@@ -196,6 +201,45 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	m.resizeInputForContent()
 	m.updateSlashHint()
 	return m, cmd
+}
+
+func (m Model) yankLastMessage() (Model, tea.Cmd) {
+	text, ok := m.lastYankableMessage()
+	if !ok {
+		m.statusNotice = "copy: no message"
+		return m, clearStatusNoticeCmd()
+	}
+	if m.writeClipboard == nil {
+		m.writeClipboard = func(string) error { return nil }
+	}
+	if err := m.writeClipboard(text); err != nil {
+		m.statusNotice = "copy failed: " + err.Error()
+		return m, clearStatusNoticeCmd()
+	}
+	m.statusNotice = "copied message"
+	return m, clearStatusNoticeCmd()
+}
+
+func clearStatusNoticeCmd() tea.Cmd {
+	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return ClearStatusNotice{} })
+}
+
+func (m Model) lastYankableMessage() (string, bool) {
+	for i := len(m.blocks) - 1; i >= 0; i-- {
+		b := m.blocks[i]
+		if b == nil {
+			continue
+		}
+		switch b.class {
+		case blockYou, blockAspect, blockNotify:
+			text := b.body.String()
+			if strings.TrimSpace(text) == "" {
+				continue
+			}
+			return text, true
+		}
+	}
+	return "", false
 }
 
 // historyPrefixMatch returns history entries (newest first) whose

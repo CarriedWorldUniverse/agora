@@ -81,7 +81,7 @@ func main() {
 		OperatorName: "operator",
 		Client:       client,
 	})
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
+	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	signalReceived := ""
 	{

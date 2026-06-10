@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/CarriedWorldUniverse/agora/internal/opclient"
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -72,8 +73,8 @@ type Model struct {
 	textareaEnabled bool
 	lastSubmitted   string // captured on Enter; used by /retry
 
-	wheelObserved    bool
-	wheelCheckExpiry time.Time
+	writeClipboard func(string) error
+	statusNotice   string
 
 	showTimestamps bool
 
@@ -131,7 +132,7 @@ func NewModel(cfg Config) Model {
 		lastInteractionAt: time.Now(),
 		sessionStart:      time.Now(),
 		textareaEnabled:   textareaEnabled,
-		wheelCheckExpiry:  time.Now().Add(30 * time.Second),
+		writeClipboard:    clipboard.WriteAll,
 	}
 	if cfg.Client != nil {
 		m.escalationSend = func(aspect, decision, note, requestID string) error {
@@ -244,6 +245,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.markPendingFailed(msg.Text, msg.Err)
 		m.refreshChatContent(false)
 		return m, nil
+	case ClearStatusNotice:
+		m.statusNotice = ""
+		return m, nil
 	case idleTick:
 		if !m.awaitingReentry && time.Since(m.lastInteractionAt) >= idleThreshold {
 			m.idleSince = m.lastInteractionAt
@@ -252,9 +256,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Tick(idleTickInterval, func(time.Time) tea.Msg { return idleTick{} })
 	case tea.MouseMsg:
-		if msg.Type == tea.MouseWheelUp || msg.Type == tea.MouseWheelDown {
-			m.wheelObserved = true
-		}
 		var vpCmd tea.Cmd
 		m.vp, vpCmd = m.vp.Update(msg)
 		if m.vp.AtBottom() {

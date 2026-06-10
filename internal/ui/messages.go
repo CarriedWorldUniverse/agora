@@ -26,6 +26,8 @@ type SendFailed struct {
 	Err  error
 }
 
+type ClearStatusNotice struct{}
+
 type opEventPoll struct{}
 
 // EscalationRequestReceived is sent into the program when the broker
