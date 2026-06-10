@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/CarriedWorldUniverse/agora/internal/opclient"
 )
 
 func TestAppendBlock_EvictsOverHistoryDepth(t *testing.T) {
@@ -81,6 +83,56 @@ func TestFormatIdleDuration(t *testing.T) {
 		if got := formatIdleDuration(c.d); got != c.want {
 			t.Fatalf("formatIdleDuration(%v): want %q got %q", c.d, c.want, got)
 		}
+	}
+}
+
+func TestConnState_DisconnectShowsReconnectingStatus(t *testing.T) {
+	m := NewModel(Config{AspectID: "shadow"})
+	m.applyOpEvent(opclient.ConnState{Connected: true})
+	m.applyOpEvent(opclient.ConnState{Connected: false})
+	status := m.renderStatus()
+	if !strings.Contains(status, "reconnecting…") {
+		t.Fatalf("status after disconnect: want 'reconnecting…' got %q", status)
+	}
+}
+
+func TestConnState_CycleAppendsTranscriptMarkers(t *testing.T) {
+	m := NewModel(Config{AspectID: "shadow"})
+	m.applyOpEvent(opclient.ConnState{Connected: true})
+	m.applyOpEvent(opclient.ConnState{Connected: false})
+	m.applyOpEvent(opclient.ConnState{Connected: true})
+	rendered := renderBlockContent(m.blocks, 80, false)
+	if !strings.Contains(rendered, "connection lost") {
+		t.Fatalf("rendered chat content missing 'connection lost' marker:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "reconnected") {
+		t.Fatalf("rendered chat content missing 'reconnected' marker:\n%s", rendered)
+	}
+}
+
+func TestConnState_ReconnectRestoresOnlineStatus(t *testing.T) {
+	m := NewModel(Config{AspectID: "shadow"})
+	m.applyOpEvent(opclient.ConnState{Connected: true})
+	m.applyOpEvent(opclient.ConnState{Connected: false})
+	m.applyOpEvent(opclient.ConnState{Connected: true})
+	status := m.renderStatus()
+	if !strings.Contains(status, "online") {
+		t.Fatalf("status after reconnect: want 'online' got %q", status)
+	}
+	if strings.Contains(status, "reconnecting…") {
+		t.Fatalf("status after reconnect still shows reconnecting: %q", status)
+	}
+}
+
+func TestConnState_InitialConnectAddsNoMarker(t *testing.T) {
+	m := NewModel(Config{AspectID: "shadow"})
+	m.applyOpEvent(opclient.ConnState{Connected: true})
+	if len(m.blocks) != 0 {
+		rendered := renderBlockContent(m.blocks, 80, false)
+		t.Fatalf("clean startup connect appended %d block(s):\n%s", len(m.blocks), rendered)
+	}
+	if !strings.Contains(m.renderStatus(), "online") {
+		t.Fatalf("status after initial connect: want 'online' got %q", m.renderStatus())
 	}
 }
 

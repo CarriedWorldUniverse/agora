@@ -123,11 +123,11 @@ func (m Model) renderStatus() string {
 	left := headerStyle.Render(fmt.Sprintf("agora · %s", m.cfg.AspectID))
 	rightParts := []string{}
 	status := m.connStatus
+	if status == "" {
+		status = "connecting"
+	}
 	if m.working && status == "online" {
 		status = "working"
-	}
-	if status == "" {
-		status = "offline"
 	}
 	if status == "online" || status == "working" {
 		rightParts = append(rightParts, "online")
@@ -169,12 +169,22 @@ func (m Model) belongs(msg opclient.ChatMessage) bool {
 func (m *Model) applyOpEvent(ev opclient.Event) {
 	switch ev := ev.(type) {
 	case opclient.ConnState:
+		// Three states only: "connecting" (initial dial, set in
+		// NewModel), "online", "reconnecting…". The client always
+		// retries, so there is no terminal offline state. Transcript
+		// markers fire only on online→offline→online transitions —
+		// the first-ever connect stays silent.
 		if ev.Connected {
+			wasReconnecting := m.connStatus == "reconnecting…"
 			m.connStatus = "online"
-		} else if m.connStatus == "" || m.connStatus == "connecting" {
-			m.connStatus = "connecting"
-		} else {
-			m.connStatus = "offline"
+			if wasReconnecting {
+				m.appendSystem("— reconnected")
+				m.refreshChatContent(false)
+			}
+		} else if m.connStatus == "online" {
+			m.connStatus = "reconnecting…"
+			m.appendSystem("— connection lost; reconnecting…")
+			m.refreshChatContent(false)
 		}
 	case opclient.MsgEvent:
 		if m.appendChatMessage(ev.Message) {
