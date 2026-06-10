@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/CarriedWorldUniverse/agora/internal/opclient"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // traceTurnCap is how many distinct turns the trace log retains.
@@ -184,4 +185,89 @@ func truncateOneLine(s string, max int) string {
 		return string(r[:max-1]) + "…"
 	}
 	return s
+}
+
+// ── trace pane (Model seam) ─────────────────────────────────────────
+//
+// ctrl+t flips the shared viewport between the chat transcript and the
+// trace pane. The traceLog buffer fills from ObserveTurn regardless of
+// which view is up (applyOpEvent in blocks.go); the seam below only
+// decides what the viewport shows and which keys route.
+
+// toggleTraceView flips between chat and trace, rebuilding the viewport
+// content for whichever view becomes active.
+func (m *Model) toggleTraceView() {
+	if m.view == viewTrace {
+		m.view = viewChat
+		m.refreshChatContent(true)
+		return
+	}
+	m.view = viewTrace
+	m.refreshTraceContent(true)
+}
+
+// refreshTraceContent mirrors refreshChatContent: re-render the trace
+// lines into the viewport, keeping bottom-follow when the operator was
+// already at the bottom.
+func (m *Model) refreshTraceContent(forceBottom bool) {
+	if !m.vpReady || m.view != viewTrace {
+		return
+	}
+	atBottom := m.vp.AtBottom()
+	m.vp.SetContent(m.traceContent())
+	if forceBottom || atBottom {
+		m.vp.GotoBottom()
+	}
+}
+
+// traceContent renders the pane header + the buffered turn lines.
+func (m Model) traceContent() string {
+	header := dimStyle.Render(fmt.Sprintf("trace — %s  (ctrl+t to return)", m.cfg.Agent))
+	lines := m.trace.lines()
+	if len(lines) == 0 {
+		lines = []string{dimStyle.Render("(no turns observed yet)")}
+	}
+	return header + "\n" + strings.Join(lines, "\n")
+}
+
+// handleTraceKey routes keystrokes while the trace pane is up: viewport
+// scrolling, ctrl+t (back to chat), and ctrl+c (quit). Everything else
+// — chat typing included — is swallowed. The escalation modal, when
+// active, captures keys before this is ever reached (Update routing).
+func (m Model) handleTraceKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		if m.quitting {
+			return m, tea.Quit
+		}
+		return m, func() tea.Msg { return QuitGraceful{} }
+	case "ctrl+t":
+		m.toggleTraceView()
+		return m, nil
+	case "up", "down", "pgup", "pgdown", "ctrl+u", "ctrl+d":
+		var vpCmd tea.Cmd
+		m.vp, vpCmd = m.vp.Update(msg)
+		return m, vpCmd
+	case "ctrl+e", "end":
+		if m.vpReady {
+			m.vp.GotoBottom()
+		}
+		return m, nil
+	case "ctrl+a", "home":
+		if m.vpReady {
+			m.vp.GotoTop()
+		}
+		return m, nil
+	case "ctrl+k", "alt+up":
+		if m.vpReady {
+			m.vp.LineUp(1)
+		}
+		return m, nil
+	case "ctrl+j", "alt+down":
+		if m.vpReady {
+			m.vp.LineDown(1)
+		}
+		return m, nil
+	}
+	return m, nil
 }

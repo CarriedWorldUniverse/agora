@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/CarriedWorldUniverse/agora/internal/opclient"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 var traceBase = time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
@@ -223,5 +224,179 @@ func TestTraceLog_LinesChronologicalNewestLast(t *testing.T) {
 	}
 	if !strings.Contains(lines[0], "12:00:00") || !strings.Contains(lines[1], "12:01:00") {
 		t.Fatalf("turns not chronological oldest-first: %v", lines)
+	}
+}
+
+// ── trace pane (ctrl+t) ─────────────────────────────────────────────
+
+// sizedTraceModel builds a Model with a ready viewport (WindowSizeMsg
+// applied) for pane-level tests.
+func sizedTraceModel(t *testing.T) Model {
+	t.Helper()
+	m := NewModel(Config{Agent: "maren", OperatorName: "operator"})
+	m, _ = runUpdate(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	if !m.vpReady {
+		t.Fatalf("viewport not ready after WindowSizeMsg")
+	}
+	return m
+}
+
+func ctrlT() tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyCtrlT} }
+
+func TestTracePane_ToggleInAndOutRestoresChat(t *testing.T) {
+	m := sizedTraceModel(t)
+	m.applyOpEvent(opclient.MsgEvent{Message: opclient.ChatMessage{
+		ID: 1, From: "operator", Content: "@maren hello-chat-token", Topic: "dm:maren",
+	}})
+	if !strings.Contains(m.vp.View(), "hello-chat-token") {
+		t.Fatalf("precondition: chat content not in viewport")
+	}
+
+	m, _ = runUpdate(m, ctrlT())
+	if m.view != viewTrace {
+		t.Fatalf("ctrl+t did not enter trace view")
+	}
+	got := m.vp.View()
+	if !strings.Contains(got, "trace — maren") || !strings.Contains(got, "ctrl+t to return") {
+		t.Fatalf("trace header missing: %q", got)
+	}
+	if strings.Contains(got, "hello-chat-token") {
+		t.Fatalf("chat content leaked into trace view: %q", got)
+	}
+
+	m, _ = runUpdate(m, ctrlT())
+	if m.view != viewChat {
+		t.Fatalf("ctrl+t did not return to chat view")
+	}
+	if got := m.vp.View(); !strings.Contains(got, "hello-chat-token") {
+		t.Fatalf("chat content not restored after toggle out: %q", got)
+	}
+}
+
+func TestTracePane_BufferedTurnVisibleAfterToggle(t *testing.T) {
+	m := sizedTraceModel(t)
+	// ObserveTurn arrives while the trace pane is hidden (chat view).
+	m.applyOpEvent(opclient.ObserveTurn{Aspect: "maren", Turn: turnFrame(
+		"t1", "compact", "in_flight", traceBase,
+		opclient.TurnEvent{Kind: "text", Text: "summarising the thread"},
+	)})
+	if m.view != viewChat {
+		t.Fatalf("ObserveTurn must not switch views")
+	}
+
+	m, _ = runUpdate(m, ctrlT())
+	got := m.vp.View()
+	if !strings.Contains(got, "turn compact (in flight)") {
+		t.Fatalf("buffered turn header missing after toggle: %q", got)
+	}
+	if !strings.Contains(got, "summarising the thread") {
+		t.Fatalf("buffered turn event missing after toggle: %q", got)
+	}
+}
+
+func TestTracePane_ObserveTurnRefreshesWhileVisible(t *testing.T) {
+	m := sizedTraceModel(t)
+	m, _ = runUpdate(m, ctrlT())
+
+	m.applyOpEvent(opclient.ObserveTurn{Aspect: "maren", Turn: turnFrame(
+		"t-live", "", "in_flight", traceBase,
+		opclient.TurnEvent{Kind: "step", Step: 2},
+	)})
+
+	got := m.vp.View()
+	if !strings.Contains(got, "turn main (in flight)") || !strings.Contains(got, "step 2") {
+		t.Fatalf("live ObserveTurn did not refresh trace pane: %q", got)
+	}
+}
+
+func TestTracePane_OtherAspectTurnsIgnored(t *testing.T) {
+	m := sizedTraceModel(t)
+	m.applyOpEvent(opclient.ObserveTurn{Aspect: "harrow", Turn: turnFrame(
+		"t-x", "", "in_flight", traceBase,
+	)})
+	if len(m.trace.turns) != 0 {
+		t.Fatalf("other aspect's turn buffered: %+v", m.trace.turns)
+	}
+}
+
+func TestTracePane_ChatTypingDisabled(t *testing.T) {
+	m := sizedTraceModel(t)
+	m, _ = runUpdate(m, ctrlT())
+
+	m, _ = runUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if got := m.input.Value(); got != "" {
+		t.Fatalf("rune reached textarea in trace mode: %q", got)
+	}
+	// Enter must not submit/echo a chat block either.
+	m, _ = runUpdate(m, tea.KeyMsg{Type: tea.KeyEnter})
+	for _, b := range m.blocks {
+		if b.class == blockYou {
+			t.Fatalf("chat send fired from trace mode")
+		}
+	}
+}
+
+func TestTracePane_EscalationModalStillCapturesKeys(t *testing.T) {
+	m := sizedTraceModel(t)
+	m, _ = runUpdate(m, ctrlT())
+	m, _ = runUpdate(m, EscalationRequestReceived{RequestID: "r1", Aspect: "maren", Tool: "Bash"})
+	if m.escalation == nil {
+		t.Fatalf("escalation modal not opened in trace mode")
+	}
+
+	m, _ = runUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if got := m.escalation.note.Value(); got != "x" {
+		t.Fatalf("modal did not capture keystroke in trace mode: got %q", got)
+	}
+	if m.view != viewTrace {
+		t.Fatalf("modal keystroke flipped the view")
+	}
+}
+
+func TestTracePane_QuitWorks(t *testing.T) {
+	m := sizedTraceModel(t)
+	m, _ = runUpdate(m, ctrlT())
+
+	m, cmd := runUpdate(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatalf("ctrl+c in trace mode returned no command")
+	}
+	if _, ok := cmd().(QuitGraceful); !ok {
+		t.Fatalf("ctrl+c in trace mode: want QuitGraceful got %T", cmd())
+	}
+	_ = m
+}
+
+func TestTracePane_StatusLineStaysRendered(t *testing.T) {
+	m := sizedTraceModel(t)
+	m.applyOpEvent(opclient.ConnState{Connected: true})
+	m.applyOpEvent(opclient.ObserveTurn{Aspect: "maren", Turn: turnFrame(
+		"t1", "", "in_flight", time.Now(),
+	)})
+	m, _ = runUpdate(m, ctrlT())
+
+	view := m.View()
+	if !strings.Contains(view, "agora · maren") {
+		t.Fatalf("status line missing in trace mode:\n%s", view)
+	}
+	if !strings.Contains(view, "maren is working…") {
+		t.Fatalf("presence missing from status in trace mode:\n%s", view)
+	}
+}
+
+func TestTracePane_ChatBufferStillFillsWhileTraceVisible(t *testing.T) {
+	m := sizedTraceModel(t)
+	m, _ = runUpdate(m, ctrlT())
+
+	m.applyOpEvent(opclient.MsgEvent{Message: opclient.ChatMessage{
+		ID: 2, From: "maren", Content: "background-reply-token", Topic: "dm:maren",
+	}})
+	if strings.Contains(m.vp.View(), "background-reply-token") {
+		t.Fatalf("chat refresh clobbered the visible trace pane")
+	}
+
+	m, _ = runUpdate(m, ctrlT())
+	if got := m.vp.View(); !strings.Contains(got, "background-reply-token") {
+		t.Fatalf("chat message lost while trace pane was open: %q", got)
 	}
 }

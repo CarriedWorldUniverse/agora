@@ -134,6 +134,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.showTimestamps = !m.showTimestamps
 		m.refreshChatContent(false)
 		return m, nil
+	case "ctrl+t":
+		m.toggleTraceView()
+		return m, nil
 	case "ctrl+k":
 		if m.input.Value() == "" && m.vpReady {
 			m.vp.LineUp(1)

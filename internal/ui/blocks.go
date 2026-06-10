@@ -115,7 +115,10 @@ func formatIdleDuration(d time.Duration) string {
 }
 
 func (m *Model) refreshChatContent(forceBottom bool) {
-	if !m.vpReady {
+	// While the trace pane owns the viewport, chat refreshes are
+	// deferred: the block buffer keeps filling, and toggling back
+	// (toggleTraceView) rebuilds the chat content in one pass.
+	if !m.vpReady || m.view == viewTrace {
 		return
 	}
 	atBottom := m.vp.AtBottom()
@@ -224,6 +227,15 @@ func (m *Model) applyOpEvent(ev opclient.Event) tea.Cmd {
 			m.clearActivePresence()
 		}
 	case opclient.ObserveTurn:
+		// The trace log is a separate consumer of the same snapshot —
+		// it buffers ALL labels regardless of view (presence below only
+		// watches in-flight main turns; the two stay untangled).
+		if ev.Aspect == "" || ev.Aspect == m.cfg.Agent {
+			m.trace.apply(ev.Turn)
+			if m.view == viewTrace {
+				m.refreshTraceContent(false)
+			}
+		}
 		return m.applyObserveTurn(ev)
 	case opclient.EscalationEvent:
 		m.escalation = newEscalationModal(EscalationRequestReceived{
