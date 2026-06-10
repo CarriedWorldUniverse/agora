@@ -472,6 +472,22 @@ func (c *Client) demux(env frames.Envelope) {
 			ev.RequestID = env.ID
 			c.emit(ev)
 		}
+	case "observe.frame":
+		// Decode-or-drop, same as chat.deliver. Only turn snapshots are
+		// surfaced for now; other frame kinds are ignored.
+		var outer observeFramePayload
+		if err := frames.PayloadAs(env, &outer); err != nil {
+			return
+		}
+		var frame observeFrame
+		if err := json.Unmarshal(outer.Frame, &frame); err != nil || frame.Kind != "turn" {
+			return
+		}
+		var turn TurnFrame
+		if err := json.Unmarshal(frame.Payload, &turn); err != nil {
+			return
+		}
+		c.emit(ObserveTurn{Aspect: frame.Aspect, Seq: frame.Sequence, Turn: turn})
 	default:
 	}
 }

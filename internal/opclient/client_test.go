@@ -205,6 +205,109 @@ func TestReconnectCatchupFromCursor(t *testing.T) {
 	}
 }
 
+func TestObserveFrameTurnEmitsObserveTurn(t *testing.T) {
+	srv := newFakeBroker(t)
+	defer srv.Close()
+	c := dialTestClient(t, srv)
+	defer c.Close()
+
+	turn := map[string]any{
+		"turn_id": "t-1",
+		"status":  "in_flight",
+		"started": time.Now().UTC().Format(time.RFC3339Nano),
+		"events": []map[string]any{{
+			"kind": "tool_call",
+			"tool": map[string]any{
+				"name":   "Bash",
+				"input":  map[string]any{"command": "ls"},
+				"result": map[string]any{"preview": "ok", "is_error": false},
+			},
+		}},
+	}
+	frame := map[string]any{
+		"kind":    "turn",
+		"aspect":  "shadow",
+		"seq":     42,
+		"ts":      time.Now().UTC().Format(time.RFC3339Nano),
+		"payload": turn,
+	}
+	srv.sendFrame(t, frames.Envelope{
+		Kind: "observe.frame",
+		ID:   "push-obs-1",
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, map[string]any{
+			"aspect": "shadow",
+			"frame":  frame,
+		}),
+	})
+
+	ev := expectEvent[opclient.ObserveTurn](t, c.Events())
+	if ev.Aspect != "shadow" || ev.Seq != 42 {
+		t.Fatalf("ObserveTurn envelope = aspect=%q seq=%d, want shadow/42", ev.Aspect, ev.Seq)
+	}
+	if ev.Turn.TurnID != "t-1" || ev.Turn.Status != "in_flight" {
+		t.Fatalf("ObserveTurn turn = %+v, want turn_id=t-1 status=in_flight", ev.Turn)
+	}
+	if len(ev.Turn.Events) != 1 || ev.Turn.Events[0].Kind != "tool_call" {
+		t.Fatalf("ObserveTurn events = %+v, want one tool_call", ev.Turn.Events)
+	}
+	tool := ev.Turn.Events[0].Tool
+	if tool == nil || tool.Name != "Bash" || tool.Result == nil || tool.Result.Preview != "ok" || tool.Result.IsError {
+		t.Fatalf("ObserveTurn tool = %+v, want Bash with ok preview", tool)
+	}
+}
+
+func TestObserveFrameNonTurnKindEmitsNothing(t *testing.T) {
+	srv := newFakeBroker(t)
+	defer srv.Close()
+	c := dialTestClient(t, srv)
+	defer c.Close()
+
+	srv.sendFrame(t, frames.Envelope{
+		Kind: "observe.frame",
+		ID:   "push-obs-2",
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, map[string]any{
+			"aspect": "shadow",
+			"frame": map[string]any{
+				"kind":    "chat",
+				"aspect":  "shadow",
+				"seq":     43,
+				"ts":      time.Now().UTC().Format(time.RFC3339Nano),
+				"payload": map[string]any{"text": "hi"},
+			},
+		}),
+	})
+	// Follow with a chat push: if it arrives without any ObserveTurn before
+	// it, the non-turn frame was ignored.
+	srv.sendFrame(t, frames.Envelope{
+		Kind: "chat.update",
+		ID:   "push-obs-3",
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, map[string]any{
+			"id": 99, "from": "shadow", "content": "after", "topic": "dm:shadow",
+		}),
+	})
+
+	timeout := time.After(3 * time.Second)
+	for {
+		select {
+		case ev := <-c.Events():
+			switch got := ev.(type) {
+			case opclient.ObserveTurn:
+				t.Fatalf("non-turn observe.frame emitted ObserveTurn %+v", got)
+			case opclient.MsgEvent:
+				if got.Message.ID != 99 {
+					t.Fatalf("unexpected message %+v", got.Message)
+				}
+				return
+			}
+		case <-timeout:
+			t.Fatal("timed out waiting for sentinel chat.update")
+		}
+	}
+}
+
 func TestHeartbeatDetectsDeadConnAndReconnects(t *testing.T) {
 	srv := newFakeBroker(t)
 	defer srv.Close()
