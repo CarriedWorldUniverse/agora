@@ -126,6 +126,35 @@ func TestSubscribePushDeliversMsgEvent(t *testing.T) {
 	}
 }
 
+func TestSubscribeWithSendsPayloadAndReplaysOnReconnect(t *testing.T) {
+	srv := newFakeBroker(t)
+	defer srv.Close()
+	c := dialTestClient(t, srv)
+	defer c.Close()
+
+	if err := c.SubscribeWith(context.Background(), "subscribe.observe", map[string]any{"aspect": "shadow"}); err != nil {
+		t.Fatalf("SubscribeWith: %v", err)
+	}
+	assertObserveAspect := func(env frames.Envelope) {
+		t.Helper()
+		var payload struct {
+			Aspect string `json:"aspect"`
+		}
+		if err := frames.PayloadAs(env, &payload); err != nil {
+			t.Fatalf("subscribe.observe payload: %v", err)
+		}
+		if payload.Aspect != "shadow" {
+			t.Fatalf("subscribe.observe aspect = %q, want %q", payload.Aspect, "shadow")
+		}
+	}
+	assertObserveAspect(srv.expectFrame(t, "subscribe.observe"))
+
+	// The broker forgets subscriptions on disconnect: the same payload must
+	// be replayed verbatim on the new connection.
+	srv.dropConn()
+	assertObserveAspect(srv.expectFrame(t, "subscribe.observe"))
+}
+
 func TestReconnectCatchupFromCursor(t *testing.T) {
 	srv := newFakeBroker(t)
 	defer srv.Close()

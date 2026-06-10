@@ -262,6 +262,19 @@ func (c *Client) Subscribe(ctx context.Context, kinds ...string) error {
 	return nil
 }
 
+// SubscribeWith stores+sends one subscription with an explicit payload,
+// replayed verbatim on reconnect.
+func (c *Client) SubscribeWith(ctx context.Context, kind string, payload any) error {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	c.subMu.Lock()
+	c.subscriptions[kind] = raw
+	c.subMu.Unlock()
+	return c.sendRaw(ctx, kind, raw)
+}
+
 func (c *Client) rpc(ctx context.Context, kind string, payload any, dst any) error {
 	env, err := frames.NewRequest(frames.Kind(kind), payload)
 	if err != nil {

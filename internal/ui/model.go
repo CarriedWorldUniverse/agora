@@ -159,7 +159,7 @@ func (m Model) Init() tea.Cmd {
 		tea.Tick(idleTickInterval, func(time.Time) tea.Msg { return idleTick{} }),
 	}
 	if m.cfg.Client != nil {
-		cmds = append(cmds, loadHistoryCmd(m.cfg.Client), subscribeCmd(m.cfg.Client), waitOpEventCmd(m.cfg.Client))
+		cmds = append(cmds, loadHistoryCmd(m.cfg.Client), subscribeCmd(m.cfg.Client, m.cfg.Agent), waitOpEventCmd(m.cfg.Client))
 	}
 	return tea.Batch(cmds...)
 }
@@ -276,10 +276,15 @@ func loadHistoryCmd(c *opclient.Client) tea.Cmd {
 	}
 }
 
-func subscribeCmd(c *opclient.Client) tea.Cmd {
+func subscribeCmd(c *opclient.Client, agent string) tea.Cmd {
 	return func() tea.Msg {
-		err := c.Subscribe(context.Background(), "subscribe.chat", "subscribe.observe")
-		if err != nil {
+		ctx := context.Background()
+		if err := c.Subscribe(ctx, "subscribe.chat"); err != nil {
+			return SendFailed{Text: "subscribe", Err: err}
+		}
+		// subscribe.observe requires an aspect; the broker ignores the
+		// subscription when the payload is empty.
+		if err := c.SubscribeWith(ctx, "subscribe.observe", map[string]any{"aspect": agent}); err != nil {
 			return SendFailed{Text: "subscribe", Err: err}
 		}
 		return nil
