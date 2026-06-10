@@ -20,8 +20,7 @@ import (
 // rootCtx so the program initiates graceful shutdown when a
 // load-bearing goroutine dies.
 //
-// name identifies the goroutine in logs (e.g. "bus.Run", "engine.Run",
-// "signal-handler"). log is the file logger; nil is tolerated but
+// name identifies the goroutine in logs. log is the file logger; nil is tolerated but
 // loses the stack capture. cancel may be nil for non-load-bearing
 // goroutines (one-shot signal handlers, idempotent senders) where
 // panic shouldn't tear down the whole program.
@@ -29,8 +28,8 @@ import (
 // Usage:
 //
 //	go func() {
-//	    defer recoverGoroutine("bus.Run", log, cancel)
-//	    busDone <- b.Run(rootCtx)
+//	    defer recoverGoroutine("worker", log, cancel)
+//	    done <- run(rootCtx)
 //	}()
 func recoverGoroutine(name string, log *slog.Logger, cancel context.CancelFunc) {
 	r := recover()

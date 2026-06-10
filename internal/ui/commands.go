@@ -5,11 +5,11 @@
 // tea.Cmd. Registry is intentionally small + flat — growing it just
 // means adding a row.
 //
-// Today's commands: /exit. Reserved for follow-ups: /help, /clear,
-// /thread, /reload-keyfile, /status, /reconnect.
+// Today's commands: /exit, /help, /retry, and /ts.
 package ui
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -18,9 +18,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// QuitGraceful is the tea.Msg /exit emits. main.go listens for it
-// (via the bubbletea program send loop) to drive the deregister +
-// engine drain before tea.Quit.
+// QuitGraceful is the tea.Msg /exit emits.
 type QuitGraceful struct{}
 
 // commandHandler runs a parsed command. m is mutable (state may
@@ -39,7 +37,7 @@ func commands() []commandDef {
 	return []commandDef{
 		{
 			name:    "exit",
-			help:    "deregister from nexus and exit cleanly",
+			help:    "exit cleanly",
 			handler: cmdExit,
 		},
 		{
@@ -49,18 +47,13 @@ func commands() []commandDef {
 		},
 		{
 			name:    "retry",
-			help:    "re-run the last submitted message",
+			help:    "send the last submitted message again",
 			handler: cmdRetry,
 		},
 		{
 			name:    "ts",
 			help:    "toggle inline timestamps",
 			handler: cmdTS,
-		},
-		{
-			name:    "bus",
-			help:    "(not yet implemented) view bus traffic scrollback",
-			handler: cmdBus,
 		},
 	}
 }
@@ -102,15 +95,14 @@ func dispatchCommand(m *Model, line string) (tea.Cmd, bool) {
 	return nil, true
 }
 
-// cmdExit emits QuitGraceful — main.go's listener performs the
-// deregister + engine drain before calling tea.Quit.
+// cmdExit emits QuitGraceful.
 func cmdExit(m *Model, _ string) tea.Cmd {
 	m.appendBlock(chatBlock{
 		class:     blockSystem,
 		speaker:   "system",
 		createdAt: time.Now(),
 	})
-	m.blocks[len(m.blocks)-1].body.WriteString("exiting — deregistering from nexus...")
+	m.blocks[len(m.blocks)-1].body.WriteString("exiting...")
 	m.refreshChatContent(false)
 	return func() tea.Msg { return QuitGraceful{} }
 }
@@ -138,25 +130,21 @@ func cmdRetry(m *Model, _ string) tea.Cmd {
 		class:     blockYou,
 		speaker:   m.cfg.OperatorName,
 		createdAt: time.Now(),
+		msgID:     -time.Now().UnixNano(),
+		pending:   true,
 	})
 	m.blocks[len(m.blocks)-1].body.WriteString(m.lastSubmitted)
 	m.refreshChatContent(false)
-	if m.onSubmit != nil {
-		m.onSubmit(m.lastSubmitted)
+	if m.cfg.Client == nil {
+		return nil
 	}
-	return nil
-}
-
-// cmdBus is a placeholder for bus traffic scrollback (spec §12).
-func cmdBus(m *Model, _ string) tea.Cmd {
-	m.appendBlock(chatBlock{
-		class:     blockSystem,
-		speaker:   "system",
-		createdAt: time.Now(),
-	})
-	m.blocks[len(m.blocks)-1].body.WriteString("/bus — not yet implemented (see spec §12)")
-	m.refreshChatContent(false)
-	return nil
+	text := m.lastSubmitted
+	return func() tea.Msg {
+		if err := m.cfg.Client.ChatSend(context.Background(), "@"+m.cfg.Agent+" "+text, m.threadTopic(), 0); err != nil {
+			return SendFailed{Text: text, Err: err}
+		}
+		return nil
+	}
 }
 
 // commandNames returns the registered command names, alphabetised,

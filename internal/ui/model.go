@@ -10,10 +10,13 @@
 package ui
 
 import (
+	"context"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/CarriedWorldUniverse/agora/internal/opclient"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -22,11 +25,12 @@ import (
 
 type Config struct {
 	AspectID     string
+	Agent        string
 	OperatorName string
 	HistoryDepth int
 	InputHistory int
 	Logger       *slog.Logger
-	WSConnected  func() bool
+	Client       *opclient.Client
 }
 
 type Model struct {
@@ -47,30 +51,21 @@ type Model struct {
 	vp          viewport.Model
 	vpReady     bool
 	inboxDepth  int
-	wsConnected bool
+	connStatus  string
+	working     bool
 	unreadBelow int
-
-	onSubmit func(text string)
-	inboxLen func() int
 
 	// escalation holds the in-flight operator-approval modal, or nil
 	// when no escalation is pending. The first (and currently only)
 	// modal in agora's TUI; while non-nil it captures every keystroke.
 	escalation *escalationModal
-	// escalationSend dispatches the operator's decision to the bus.
-	// Injected via RegisterSubmit so tests can substitute a fake. Args
-	// mirror the bus call minus operator (the Model fills operator from
-	// cfg.OperatorName / AspectID). Returns the send error.
+	// escalationSend dispatches the operator's decision. It is injectable
+	// so tests can substitute a fake sender.
 	escalationSend func(aspect, decision, note, requestID string) error
 
 	inputHistory  []string
 	historyIdx    int
 	draftSnapshot string
-
-	// activeBlockIdx points at the currently-streaming block in m.blocks;
-	// -1 when idle. Set on TurnStarted, mutated by TurnChunk, cleared by
-	// TurnDone.
-	activeBlockIdx int
 
 	quitting bool
 
@@ -103,7 +98,13 @@ func NewModel(cfg Config) Model {
 		cfg.OperatorName = "operator"
 	}
 	if cfg.AspectID == "" {
+		cfg.AspectID = cfg.Agent
+	}
+	if cfg.AspectID == "" {
 		cfg.AspectID = "aspect"
+	}
+	if cfg.Agent == "" {
+		cfg.Agent = cfg.AspectID
 	}
 
 	ta := textarea.New()
@@ -116,13 +117,20 @@ func NewModel(cfg Config) Model {
 		key.WithHelp("shift+enter", "insert newline"),
 	)
 	ta.SetHeight(1)
-	ta.Blur() // disabled until RegisterSubmit
+	textareaEnabled := cfg.Client != nil
+	if textareaEnabled {
+		ta.Placeholder = "message " + cfg.Agent
+		ta.Focus()
+	} else {
+		ta.Blur()
+	}
 
 	return Model{
-		cfg: cfg, input: ta, historyIdx: -1, activeBlockIdx: -1,
+		cfg: cfg, input: ta, historyIdx: -1,
+		connStatus:        "connecting",
 		lastInteractionAt: time.Now(),
 		sessionStart:      time.Now(),
-		textareaEnabled:   false,
+		textareaEnabled:   textareaEnabled,
 		wheelCheckExpiry:  time.Now().Add(30 * time.Second),
 	}
 }
@@ -133,11 +141,14 @@ func (m Model) Init() tea.Cmd {
 			"aspect", m.cfg.AspectID,
 			"operator", m.cfg.OperatorName)
 	}
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		textarea.Blink,
-		tea.Tick(wsTickInterval, func(time.Time) tea.Msg { return wsTick{} }),
 		tea.Tick(idleTickInterval, func(time.Time) tea.Msg { return idleTick{} }),
-	)
+	}
+	if m.cfg.Client != nil {
+		cmds = append(cmds, loadHistoryCmd(m.cfg.Client), subscribeCmd(m.cfg.Client), waitOpEventCmd(m.cfg.Client))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -195,29 +206,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.escalation = nil
 		m.refreshChatContent(true)
 		return m, nil
-	case InboxUpdated:
-		if m.inboxLen != nil {
-			m.inboxDepth = m.inboxLen()
-		}
-		return m, nil
 	case QuitGraceful:
 		m.quitting = true
 		return m, tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return ReadyToQuit{} })
 	case ReadyToQuit:
 		return m, tea.Quit
-	case RegisterSubmit:
-		m.onSubmit = msg.OnSubmit
-		m.inboxLen = msg.InboxLen
-		m.escalationSend = msg.OnEscalationDecision
-		m.textareaEnabled = true
-		m.input.Placeholder = "type to " + m.cfg.AspectID + "; shift+enter for newline; /exit to quit"
-		m.input.Focus()
-		return m, nil
-	case wsTick:
-		if m.cfg.WSConnected != nil {
-			m.wsConnected = m.cfg.WSConnected()
+	case HistoryLoaded:
+		if msg.Err != nil {
+			m.appendSystem("history load failed: " + msg.Err.Error())
+			m.refreshChatContent(true)
+			return m, nil
 		}
-		return m, tea.Tick(wsTickInterval, func(time.Time) tea.Msg { return wsTick{} })
+		sort.SliceStable(msg.Messages, func(i, j int) bool { return msg.Messages[i].ID < msg.Messages[j].ID })
+		for _, cm := range msg.Messages {
+			m.appendChatMessage(cm)
+		}
+		m.refreshChatContent(true)
+		return m, nil
+	case OpEventReceived:
+		m.applyOpEvent(msg.Event)
+		return m, waitOpEventCmd(m.cfg.Client)
+	case opEventPoll:
+		return m, waitOpEventCmd(m.cfg.Client)
+	case SendFailed:
+		m.markPendingFailed(msg.Text, msg.Err)
+		m.refreshChatContent(false)
+		return m, nil
 	case idleTick:
 		if !m.awaitingReentry && time.Since(m.lastInteractionAt) >= idleThreshold {
 			m.idleSince = m.lastInteractionAt
@@ -225,82 +239,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.blocksDuringIdle = 0
 		}
 		return m, tea.Tick(idleTickInterval, func(time.Time) tea.Msg { return idleTick{} })
-	case NotifyOperator:
-		m.appendBlock(chatBlock{
-			class:     blockNotify,
-			speaker:   m.cfg.AspectID,
-			createdAt: time.Now(),
-		})
-		m.blocks[len(m.blocks)-1].body.WriteString(msg.Body)
-		m.refreshChatContent(false)
-		return m, nil
-	case TurnStarted:
-		m.appendBlock(chatBlock{
-			class:     blockAspectThinking,
-			speaker:   m.cfg.AspectID,
-			createdAt: time.Now(),
-		})
-		m.activeBlockIdx = len(m.blocks) - 1
-		m.refreshChatContent(false)
-		return m, nil
-	case TurnChunk:
-		m.appendToActiveBlock(msg.Text)
-		m.refreshChatContent(false)
-		return m, nil
-	case TurnDone:
-		// Reconcile the inline streamed block only when the raw reply
-		// carried a notify-operator fence. The block was filled from the
-		// model's raw stream (fence included); the engine-stripped
-		// FinalText is the canonical inline text. Skipping this when
-		// !HadNotify leaves the common path byte-for-byte unchanged.
-		if msg.HadNotify && m.activeBlockIdx >= 0 && m.activeBlockIdx < len(m.blocks) {
-			if strings.TrimSpace(msg.FinalText) == "" {
-				// Reply was nothing but notify content; the red block
-				// already carries it. Drop the empty inline block.
-				m.dropActiveBlock()
-			} else {
-				m.blocks[m.activeBlockIdx].body.Reset()
-				m.blocks[m.activeBlockIdx].body.WriteString(msg.FinalText)
-			}
-		}
-		m.finishActiveBlock()
-		m.refreshChatContent(false)
-		return m, nil
-	case TurnFailed:
-		if m.activeBlockIdx >= 0 {
-			m.markActiveBlockFailed(msg.Reason)
-		} else {
-			// EndTurn already cleared the active block (funnel's
-			// ObservabilityHook fires before Return.Handle), so the failure
-			// reason can't decorate it. Surface as a standalone system block.
-			m.appendBlock(chatBlock{
-				class:     blockSystem,
-				speaker:   "system",
-				createdAt: time.Now(),
-			})
-			m.blocks[len(m.blocks)-1].body.WriteString("turn failed: " + msg.Reason)
-		}
-		m.appendBlock(chatBlock{
-			class:     blockSystem,
-			speaker:   "system",
-			createdAt: time.Now(),
-		})
-		m.blocks[len(m.blocks)-1].body.WriteString("/retry to re-run this turn")
-		m.refreshChatContent(false)
-		return m, nil
-	case SubmissionDropped:
-		m.appendBlock(chatBlock{
-			class:     blockSystem,
-			speaker:   "system",
-			createdAt: time.Now(),
-		})
-		body := "dropped duplicate — same line submitted " + formatAgo(time.Since(msg.FirstSeen)) + " ago"
-		if rem := time.Until(msg.FirstSeen.Add(15 * time.Minute)); rem > 0 {
-			body += ". Modify the message or wait " + formatAgo(rem) + " more to resend."
-		}
-		m.blocks[len(m.blocks)-1].body.WriteString(body)
-		m.refreshChatContent(false)
-		return m, nil
 	case tea.MouseMsg:
 		if msg.Type == tea.MouseWheelUp || msg.Type == tea.MouseWheelDown {
 			m.wheelObserved = true
@@ -316,6 +254,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.input, cmd = m.input.Update(msg)
 	m.resizeInputForContent()
 	return m, cmd
+}
+
+func loadHistoryCmd(c *opclient.Client) tea.Cmd {
+	return func() tea.Msg {
+		msgs, _, err := c.ChatList(context.Background(), 0, 200)
+		return HistoryLoaded{Messages: msgs, Err: err}
+	}
+}
+
+func subscribeCmd(c *opclient.Client) tea.Cmd {
+	return func() tea.Msg {
+		err := c.Subscribe(context.Background(), "subscribe.chat", "subscribe.observe")
+		if err != nil {
+			return SendFailed{Text: "subscribe", Err: err}
+		}
+		return nil
+	}
+}
+
+func waitOpEventCmd(c *opclient.Client) tea.Cmd {
+	return func() tea.Msg {
+		if c == nil {
+			return nil
+		}
+		select {
+		case ev, ok := <-c.Events():
+			if !ok {
+				return OpEventReceived{Event: opclient.ConnState{Connected: false}}
+			}
+			return OpEventReceived{Event: ev}
+		case <-time.After(500 * time.Millisecond):
+			return opEventPoll{}
+		}
+	}
 }
 
 func (m Model) View() string {

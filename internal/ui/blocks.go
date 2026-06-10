@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CarriedWorldUniverse/agora/internal/opclient"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -22,6 +23,8 @@ func (m *Model) appendBlock(b chatBlock) {
 		createdAt: b.createdAt,
 		failed:    b.failed,
 		failedMsg: b.failedMsg,
+		msgID:     b.msgID,
+		pending:   b.pending,
 	}
 	// Builder content survives the value→pointer transition. Empty
 	// Builders skip the write (avoids unnecessarily binding the new
@@ -36,12 +39,6 @@ func (m *Model) appendBlock(b chatBlock) {
 	if cap := m.cfg.HistoryDepth; cap > 0 && len(m.blocks) > cap {
 		evicted := len(m.blocks) - cap
 		m.blocks = m.blocks[evicted:]
-		if m.activeBlockIdx >= 0 {
-			m.activeBlockIdx -= evicted
-			if m.activeBlockIdx < 0 {
-				m.activeBlockIdx = -1
-			}
-		}
 	}
 }
 
@@ -125,10 +122,20 @@ func (m Model) chatHeight() int {
 func (m Model) renderStatus() string {
 	left := headerStyle.Render(fmt.Sprintf("agora · %s", m.cfg.AspectID))
 	rightParts := []string{}
-	if m.wsConnected {
+	status := m.connStatus
+	if m.working && status == "online" {
+		status = "working"
+	}
+	if status == "" {
+		status = "offline"
+	}
+	if status == "online" || status == "working" {
 		rightParts = append(rightParts, "online")
+		if status == "working" {
+			rightParts = append(rightParts, "working")
+		}
 	} else {
-		rightParts = append(rightParts, "offline")
+		rightParts = append(rightParts, status)
 	}
 	rightParts = append(rightParts, "since "+m.sessionStart.Format("15:04"))
 	tsState := "off"
@@ -151,57 +158,167 @@ func (m Model) renderStatus() string {
 	return left + strings.Repeat(" ", gap) + right
 }
 
+func (m Model) threadTopic() string {
+	return "dm:" + m.cfg.Agent
+}
+
+func (m Model) belongs(msg opclient.ChatMessage) bool {
+	return msg.Topic == m.threadTopic()
+}
+
+func (m *Model) applyOpEvent(ev opclient.Event) {
+	switch ev := ev.(type) {
+	case opclient.ConnState:
+		if ev.Connected {
+			m.connStatus = "online"
+		} else if m.connStatus == "" || m.connStatus == "connecting" {
+			m.connStatus = "connecting"
+		} else {
+			m.connStatus = "offline"
+		}
+	case opclient.MsgEvent:
+		if m.appendChatMessage(ev.Message) {
+			m.refreshChatContent(false)
+		}
+	case opclient.RunEvent:
+		if ev.Run.Aspect == "" || ev.Run.Aspect == m.cfg.Agent {
+			m.working = runStatusWorking(ev.Run.Status)
+		}
+	case opclient.EscalationEvent:
+		m.escalation = newEscalationModal(EscalationRequestReceived{
+			RequestID: ev.RequestID,
+			Aspect:    ev.Aspect,
+			Tool:      ev.Tool,
+			Args:      ev.Args,
+			Reason:    ev.Reason,
+		})
+		if m.vpReady {
+			m.vp.GotoBottom()
+			m.unreadBelow = 0
+		}
+	}
+}
+
+func runStatusWorking(status string) bool {
+	switch strings.ToLower(status) {
+	case "queued", "running", "working", "in_progress", "started":
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *Model) appendChatMessage(msg opclient.ChatMessage) bool {
+	if !m.belongs(msg) {
+		return false
+	}
+	body := displayChatContent(msg, m.cfg.Agent)
+	if m.reconcilePending(msg, body) {
+		return true
+	}
+	class := blockAspect
+	speaker := msg.From
+	if speaker == "" {
+		speaker = m.cfg.Agent
+	}
+	if msg.From == m.cfg.OperatorName || msg.From == "operator" {
+		class = blockYou
+		speaker = m.cfg.OperatorName
+	}
+	b := chatBlock{
+		class:     class,
+		speaker:   speaker,
+		createdAt: parseChatTime(msg.ReceivedAt),
+		msgID:     msg.ID,
+	}
+	b.body.WriteString(body)
+	m.appendBlock(b)
+	return true
+}
+
+func (m *Model) appendOptimistic(text string) {
+	b := chatBlock{
+		class:     blockYou,
+		speaker:   m.cfg.OperatorName,
+		createdAt: time.Now(),
+		msgID:     -time.Now().UnixNano(),
+		pending:   true,
+	}
+	b.body.WriteString(text)
+	m.appendBlock(b)
+}
+
+func (m *Model) reconcilePending(msg opclient.ChatMessage, body string) bool {
+	if msg.From != m.cfg.OperatorName && msg.From != "operator" {
+		return false
+	}
+	for _, b := range m.blocks {
+		if b.class != blockYou || !b.pending {
+			continue
+		}
+		if strings.TrimSpace(b.body.String()) != strings.TrimSpace(body) {
+			continue
+		}
+		b.pending = false
+		b.failed = false
+		b.failedMsg = ""
+		b.msgID = msg.ID
+		return true
+	}
+	for _, b := range m.blocks {
+		if msg.ID > 0 && b.msgID == msg.ID {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Model) markPendingFailed(text string, err error) {
+	if err == nil {
+		return
+	}
+	for _, b := range m.blocks {
+		if b.class == blockYou && b.pending && strings.TrimSpace(b.body.String()) == strings.TrimSpace(text) {
+			b.pending = false
+			b.failed = true
+			b.failedMsg = err.Error()
+			return
+		}
+	}
+	m.appendSystem("send failed: " + err.Error())
+}
+
+func (m *Model) appendSystem(text string) {
+	m.appendBlock(chatBlock{
+		class:     blockSystem,
+		speaker:   "system",
+		createdAt: time.Now(),
+	})
+	m.blocks[len(m.blocks)-1].body.WriteString(text)
+}
+
+func displayChatContent(msg opclient.ChatMessage, agent string) string {
+	content := strings.TrimSpace(msg.Content)
+	prefix := "@" + agent + " "
+	return strings.TrimPrefix(content, prefix)
+}
+
+func parseChatTime(v string) time.Time {
+	if v == "" {
+		return time.Now()
+	}
+	if ts, err := time.Parse(time.RFC3339Nano, v); err == nil {
+		return ts
+	}
+	if ts, err := time.Parse(time.RFC3339, v); err == nil {
+		return ts
+	}
+	return time.Now()
+}
+
 func maxInt(a, b int) int {
 	if a > b {
 		return a
 	}
 	return b
-}
-
-func (m *Model) appendToActiveBlock(text string) {
-	if m.activeBlockIdx < 0 || m.activeBlockIdx >= len(m.blocks) {
-		return
-	}
-	m.blocks[m.activeBlockIdx].body.WriteString(text)
-}
-
-// dropActiveBlock removes the active streaming block entirely and
-// clears activeBlockIdx. Used when a turn's only content was a
-// notify-operator fence (cleaned text is empty): the red blockNotify
-// already carries the body, so the now-empty inline block must go.
-// If the active block isn't the tail (unexpected — would mean another
-// block was appended after it), fall back to emptying its body instead
-// of slicing, so we never drop the wrong block.
-func (m *Model) dropActiveBlock() {
-	if m.activeBlockIdx < 0 || m.activeBlockIdx >= len(m.blocks) {
-		return
-	}
-	if m.activeBlockIdx == len(m.blocks)-1 {
-		m.blocks = m.blocks[:m.activeBlockIdx]
-	} else {
-		m.blocks[m.activeBlockIdx].body.Reset()
-	}
-	m.activeBlockIdx = -1
-}
-
-func (m *Model) finishActiveBlock() {
-	if m.activeBlockIdx < 0 || m.activeBlockIdx >= len(m.blocks) {
-		return
-	}
-	if m.blocks[m.activeBlockIdx].class == blockAspectThinking {
-		m.blocks[m.activeBlockIdx].class = blockAspect
-	}
-	m.activeBlockIdx = -1
-}
-
-func (m *Model) markActiveBlockFailed(reason string) {
-	if m.activeBlockIdx < 0 || m.activeBlockIdx >= len(m.blocks) {
-		return
-	}
-	m.blocks[m.activeBlockIdx].failed = true
-	m.blocks[m.activeBlockIdx].failedMsg = reason
-	if m.blocks[m.activeBlockIdx].class == blockAspectThinking {
-		m.blocks[m.activeBlockIdx].class = blockAspect
-	}
-	m.activeBlockIdx = -1
 }
