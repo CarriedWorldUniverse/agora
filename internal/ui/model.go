@@ -38,6 +38,14 @@ type Config struct {
 	Client       *opclient.Client
 }
 
+// viewMode selects what the main viewport renders.
+type viewMode int
+
+const (
+	viewChat  viewMode = iota // chat transcript (default)
+	viewTrace                 // turn-scoped trace pane (ctrl+t)
+)
+
 type Model struct {
 	cfg Config
 
@@ -75,6 +83,14 @@ type Model struct {
 	// 1s tick chain so only one runs at a time.
 	turns           map[string]*turnState
 	presenceTicking bool
+
+	// view selects what the shared viewport shows: the chat transcript
+	// (default) or the on-demand trace pane (ctrl+t). trace buffers
+	// observe turn snapshots regardless of view — a separate consumer
+	// of ObserveTurn from the presence machinery above — so the pane
+	// is already populated the moment it opens.
+	view  viewMode
+	trace traceLog
 
 	// escalation holds the in-flight operator-approval modal, or nil
 	// when no escalation is pending. The first (and currently only)
@@ -213,15 +229,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.vp.Width = msg.Width
 			m.vp.Height = chatHeight
 		}
-		m.refreshChatContent(firstSize)
+		if m.view == viewTrace {
+			m.refreshTraceContent(firstSize)
+		} else {
+			m.refreshChatContent(firstSize)
+		}
 		return m, nil
 	case tea.KeyMsg:
 		// Modal capture: while an escalation is pending it owns every
-		// keystroke (it is modal). Routes BEFORE the chat input so the
-		// operator can't type into the chat behind it.
+		// keystroke (it is modal). Routes BEFORE the chat input AND the
+		// trace pane so the operator can't type behind it in any view.
 		if m.escalation != nil {
 			nm, cmd, _ := m.handleEscalationKey(msg)
 			return nm, cmd
+		}
+		// Trace pane next: chat keystrokes are disabled while it's up —
+		// only scrolling, ctrl+t, and quit route.
+		if m.view == viewTrace {
+			return m.handleTraceKey(msg)
 		}
 		return m.handleKey(msg)
 	case EscalationRequestReceived:
