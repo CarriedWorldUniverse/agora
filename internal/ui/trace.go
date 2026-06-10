@@ -232,7 +232,9 @@ func (m Model) traceContent() string {
 
 // handleTraceKey routes keystrokes while the trace pane is up: viewport
 // scrolling, ctrl+t (back to chat), and ctrl+c (quit). Everything else
-// — chat typing included — is swallowed. The escalation modal, when
+// — chat typing and chat-mode toggles like ctrl+g included — is
+// deliberately swallowed: chat state is invisible here, so a toggle
+// firing silently would only confuse. The escalation modal, when
 // active, captures keys before this is ever reached (Update routing).
 func (m Model) handleTraceKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
