@@ -81,7 +81,12 @@ func main() {
 		OperatorName: "operator",
 		Client:       client,
 	})
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	// WithMouseCellMotion forwards wheel events to the viewport (the
+	// Model's tea.MouseMsg case) — without it the terminal emulator
+	// keeps the wheel and "scrollback" scrolls the terminal, not the
+	// session. Text selection under mouse capture: use the clipboard
+	// yank binding, or the emulator's shift+drag override.
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	signalReceived := ""
 	{
