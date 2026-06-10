@@ -205,7 +205,9 @@ func (c *Client) ChatList(ctx context.Context, afterID int64, limit int) ([]Chat
 }
 
 func (c *Client) ChatSend(ctx context.Context, content, topic string, replyTo int64) error {
-	payload := map[string]any{"content": content, "topic": topic}
+	// `from` is required by the broker's chat.send handler; the dashboard
+	// sends from:"operator" the same way (api.js sendMessage).
+	payload := map[string]any{"from": "operator", "content": content, "topic": topic}
 	if replyTo > 0 {
 		payload["reply_to"] = replyTo
 	}
