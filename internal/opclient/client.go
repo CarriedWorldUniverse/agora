@@ -51,7 +51,7 @@ type Client struct {
 	readDone  chan error
 	writeMu   sync.Mutex
 	pendingMu sync.Mutex
-	pending   map[string]chan rpcResult
+	pending   map[string]rpcPending
 
 	subMu         sync.Mutex
 	subscriptions map[string]json.RawMessage
@@ -60,6 +60,7 @@ type Client struct {
 
 	cursorMu   sync.Mutex
 	lastSeenID int64
+	cursorBase int64
 	seen       map[int64]struct{}
 	cursorFile string
 }
@@ -67,6 +68,11 @@ type Client struct {
 type rpcResult struct {
 	env frames.Envelope
 	err error
+}
+
+type rpcPending struct {
+	wantKind frames.Kind
+	ch       chan rpcResult
 }
 
 // ChatMessage is the operator chat message shape used by chat.list and chat.update.
@@ -160,13 +166,14 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 		http:          httpClient,
 		tlsConfig:     tlsCfg,
 		readDone:      make(chan error, 1),
-		pending:       make(map[string]chan rpcResult),
+		pending:       make(map[string]rpcPending),
 		subscriptions: make(map[string]json.RawMessage),
 		events:        make(chan Event, 64),
 		seen:          make(map[int64]struct{}),
 		cursorFile:    filepath.Join(stateDir, "cursor.json"),
 	}
 	c.lastSeenID = c.loadCursor()
+	c.cursorBase = c.lastSeenID
 	if c.lastSeenID > 0 {
 		c.seen[c.lastSeenID] = struct{}{}
 	}
@@ -248,7 +255,7 @@ func (c *Client) rpc(ctx context.Context, kind string, payload any, dst any) err
 	}
 	ch := make(chan rpcResult, 1)
 	c.pendingMu.Lock()
-	c.pending[env.ID] = ch
+	c.pending[env.ID] = rpcPending{wantKind: frames.Kind(kind + ".result"), ch: ch}
 	c.pendingMu.Unlock()
 	defer func() {
 		c.pendingMu.Lock()
@@ -367,19 +374,19 @@ func (c *Client) readLoop(conn *websocket.Conn, done chan<- error) {
 func (c *Client) demux(env frames.Envelope) {
 	if env.InReplyTo != "" {
 		c.pendingMu.Lock()
-		ch := c.pending[env.InReplyTo]
+		pending, ok := c.pending[env.InReplyTo]
 		c.pendingMu.Unlock()
-		if ch != nil {
-			ch <- rpcResult{env: env}
+		if ok && (env.Kind == pending.wantKind || strings.HasSuffix(string(env.Kind), ".error")) {
+			pending.ch <- rpcResult{env: env}
 			return
 		}
 	}
 	if strings.HasSuffix(string(env.Kind), ".result") && env.ID != "" {
 		c.pendingMu.Lock()
-		ch := c.pending[env.ID]
+		pending, ok := c.pending[env.ID]
 		c.pendingMu.Unlock()
-		if ch != nil {
-			ch <- rpcResult{env: env}
+		if ok && env.Kind == pending.wantKind {
+			pending.ch <- rpcResult{env: env}
 			return
 		}
 	}
@@ -442,27 +449,39 @@ func (c *Client) replayAfterReconnect() {
 		subs[k] = append(json.RawMessage(nil), v...)
 	}
 	c.subMu.Unlock()
-	for kind, raw := range subs {
-		_ = c.sendRaw(c.ctx, kind, raw)
-	}
 	c.cursorMu.Lock()
 	after := c.lastSeenID
 	c.cursorMu.Unlock()
+	for kind, raw := range subs {
+		_ = c.sendRaw(c.ctx, kind, raw)
+	}
 	if after <= 0 {
 		return
 	}
-	msgs, _, err := c.ChatList(c.ctx, after, 200)
-	if err != nil {
-		return
-	}
-	for _, msg := range msgs {
-		c.deliverMsg(msg)
+	for {
+		msgs, hasMore, err := c.ChatList(c.ctx, after, 200)
+		if err != nil {
+			return
+		}
+		for _, msg := range msgs {
+			c.deliverMsg(msg)
+			if msg.ID > after {
+				after = msg.ID
+			}
+		}
+		if !hasMore || len(msgs) == 0 {
+			return
+		}
 	}
 }
 
 func (c *Client) deliverMsg(msg ChatMessage) {
 	if msg.ID > 0 {
 		c.cursorMu.Lock()
+		if msg.ID <= c.cursorBase {
+			c.cursorMu.Unlock()
+			return
+		}
 		if _, ok := c.seen[msg.ID]; ok {
 			c.cursorMu.Unlock()
 			return
@@ -534,9 +553,9 @@ func (c *Client) failPending(err error) {
 	}
 	c.pendingMu.Lock()
 	defer c.pendingMu.Unlock()
-	for id, ch := range c.pending {
+	for id, pending := range c.pending {
 		delete(c.pending, id)
-		ch <- rpcResult{err: err}
+		pending.ch <- rpcResult{err: err}
 	}
 }
 

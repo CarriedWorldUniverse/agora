@@ -31,6 +31,33 @@ func TestDialBypass(t *testing.T) {
 	}
 }
 
+func TestDialTokenRequiredWhenBypassDisabled(t *testing.T) {
+	srv := newFakeBroker(t)
+	srv.bypass = false
+	defer srv.Close()
+
+	_, err := opclient.Dial(context.Background(), opclient.Config{
+		BrokerURL: srv.URL,
+		StateDir:  t.TempDir(),
+	})
+	if err == nil {
+		t.Fatal("Dial succeeded without token when bypass disabled")
+	}
+
+	c, err := opclient.Dial(context.Background(), opclient.Config{
+		BrokerURL: srv.URL,
+		Token:     "jwt-token",
+		StateDir:  t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("Dial with token: %v", err)
+	}
+	defer c.Close()
+	if got := srv.lastConnectToken(); got != "jwt-token" {
+		t.Fatalf("connect token = %q, want jwt-token", got)
+	}
+}
+
 func TestRPCRoundTrip(t *testing.T) {
 	srv := newFakeBroker(t)
 	defer srv.Close()
@@ -74,6 +101,45 @@ func TestRPCRoundTrip(t *testing.T) {
 	<-done
 }
 
+func TestRPCIgnoresWrongResultKind(t *testing.T) {
+	srv := newFakeBroker(t)
+	defer srv.Close()
+	c := dialTestClient(t, srv)
+	defer c.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := srv.expectFrame(t, "chat.list")
+		srv.sendFrame(t, frames.Envelope{
+			Kind:      "runs.list.result",
+			InReplyTo: req.ID,
+			TS:        time.Now().UTC(),
+			Payload:   mustJSON(t, map[string]any{"runs": []any{}}),
+		})
+		srv.sendFrame(t, frames.Envelope{
+			Kind:      "chat.list.result",
+			InReplyTo: req.ID,
+			TS:        time.Now().UTC(),
+			Payload: mustJSON(t, map[string]any{
+				"messages": []map[string]any{{
+					"id": 8, "from": "maren", "content": "matched", "topic": "dm:maren",
+				}},
+				"has_more": false,
+			}),
+		})
+	}()
+
+	msgs, _, err := c.ChatList(context.Background(), 0, 50)
+	if err != nil {
+		t.Fatalf("ChatList: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Content != "matched" {
+		t.Fatalf("ChatList messages = %+v, want matched result", msgs)
+	}
+	<-done
+}
+
 func TestChatSendNoResult(t *testing.T) {
 	srv := newFakeBroker(t)
 	defer srv.Close()
@@ -94,6 +160,63 @@ func TestChatSendNoResult(t *testing.T) {
 	if payload.Content != "@maren hi" || payload.Topic != "dm:maren" {
 		t.Fatalf("chat.send payload = %+v", payload)
 	}
+}
+
+func TestTypedRosterAndRuns(t *testing.T) {
+	srv := newFakeBroker(t)
+	defer srv.Close()
+	c := dialTestClient(t, srv)
+	defer c.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		rosterReq := srv.expectFrame(t, "roster.list")
+		srv.sendFrame(t, frames.Envelope{
+			Kind:      "roster.list.result",
+			InReplyTo: rosterReq.ID,
+			TS:        time.Now().UTC(),
+			Payload: mustJSON(t, frames.RosterListResultPayload{
+				Aspects: []frames.RosterAspect{{Name: "maren", Status: "live"}},
+			}),
+		})
+		runsReq := srv.expectFrame(t, "runs.list")
+		var payload struct {
+			Limit int `json:"limit"`
+		}
+		if err := frames.PayloadAs(runsReq, &payload); err != nil {
+			t.Errorf("runs.list payload: %v", err)
+		}
+		if payload.Limit != 25 {
+			t.Errorf("runs.list limit = %d, want 25", payload.Limit)
+		}
+		srv.sendFrame(t, frames.Envelope{
+			Kind:      "runs.list.result",
+			InReplyTo: runsReq.ID,
+			TS:        time.Now().UTC(),
+			Payload: mustJSON(t, map[string]any{
+				"runs": []map[string]any{{
+					"id": "run-1", "aspect": "maren", "status": "running",
+				}},
+			}),
+		})
+	}()
+
+	aspects, err := c.RosterList(context.Background())
+	if err != nil {
+		t.Fatalf("RosterList: %v", err)
+	}
+	if len(aspects) != 1 || aspects[0].Name != "maren" || aspects[0].Status != "live" {
+		t.Fatalf("RosterList = %+v", aspects)
+	}
+	runs, err := c.RunsList(context.Background(), 25)
+	if err != nil {
+		t.Fatalf("RunsList: %v", err)
+	}
+	if len(runs) != 1 || runs[0].ID != "run-1" || runs[0].Status != "running" {
+		t.Fatalf("RunsList = %+v", runs)
+	}
+	<-done
 }
 
 func TestSubscribePushDeliversMsgEvent(t *testing.T) {
@@ -170,6 +293,176 @@ func TestReconnectCatchupFromCursor(t *testing.T) {
 	}
 }
 
+func TestReconnectCatchupUsesCursorBeforeLivePush(t *testing.T) {
+	srv := newFakeBroker(t)
+	defer srv.Close()
+	c := dialTestClient(t, srv)
+	defer c.Close()
+
+	if err := c.Subscribe(context.Background(), "subscribe.chat"); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	_ = srv.expectFrame(t, "subscribe.chat")
+	srv.sendFrame(t, frames.Envelope{
+		Kind: "chat.update",
+		ID:   "push-1",
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, map[string]any{
+			"id": 1, "from": "maren", "content": "first", "topic": "dm:maren",
+		}),
+	})
+	_ = expectEvent[opclient.MsgEvent](t, c.Events())
+
+	srv.dropConn()
+
+	_ = srv.expectFrame(t, "subscribe.chat")
+	srv.sendFrame(t, frames.Envelope{
+		Kind: "chat.update",
+		ID:   "push-3",
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, map[string]any{
+			"id": 3, "from": "maren", "content": "live", "topic": "dm:maren",
+		}),
+	})
+	req := srv.expectFrame(t, "chat.list")
+	var payload struct {
+		AfterID int64 `json:"after_id"`
+	}
+	if err := frames.PayloadAs(req, &payload); err != nil {
+		t.Fatalf("chat.list payload: %v", err)
+	}
+	if payload.AfterID != 1 {
+		t.Fatalf("catch-up after_id = %d, want pre-reconnect cursor 1", payload.AfterID)
+	}
+	srv.sendFrame(t, frames.Envelope{
+		Kind:      "chat.list.result",
+		InReplyTo: req.ID,
+		TS:        time.Now().UTC(),
+		Payload: mustJSON(t, map[string]any{
+			"messages": []map[string]any{{
+				"id": 2, "from": "maren", "content": "missed", "topic": "dm:maren",
+			}, {
+				"id": 3, "from": "maren", "content": "live", "topic": "dm:maren",
+			}},
+			"has_more": false,
+		}),
+	})
+	first := expectEvent[opclient.MsgEvent](t, c.Events())
+	second := expectEvent[opclient.MsgEvent](t, c.Events())
+	got := map[int64]string{
+		first.Message.ID:  first.Message.Content,
+		second.Message.ID: second.Message.Content,
+	}
+	if got[2] != "missed" || got[3] != "live" {
+		t.Fatalf("events = %+v, want missed and live once", got)
+	}
+}
+
+func TestPersistedCursorDedupsOlderPush(t *testing.T) {
+	srv := newFakeBroker(t)
+	defer srv.Close()
+	stateDir := t.TempDir()
+
+	c, err := opclient.Dial(context.Background(), opclient.Config{
+		BrokerURL: srv.URL,
+		StateDir:  stateDir,
+	})
+	if err != nil {
+		t.Fatalf("Dial first client: %v", err)
+	}
+	srv.sendFrame(t, frames.Envelope{
+		Kind: "chat.update",
+		ID:   "push-41",
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, map[string]any{
+			"id": 41, "from": "maren", "content": "persist me", "topic": "dm:maren",
+		}),
+	})
+	_ = expectEvent[opclient.MsgEvent](t, c.Events())
+	_ = c.Close()
+
+	c, err = opclient.Dial(context.Background(), opclient.Config{
+		BrokerURL: srv.URL,
+		StateDir:  stateDir,
+	})
+	if err != nil {
+		t.Fatalf("Dial second client: %v", err)
+	}
+	defer c.Close()
+	srv.sendFrame(t, frames.Envelope{
+		Kind: "chat.update",
+		ID:   "push-40",
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, map[string]any{
+			"id": 40, "from": "maren", "content": "old", "topic": "dm:maren",
+		}),
+	})
+	srv.sendFrame(t, frames.Envelope{
+		Kind: "chat.update",
+		ID:   "push-42",
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, map[string]any{
+			"id": 42, "from": "maren", "content": "new", "topic": "dm:maren",
+		}),
+	})
+	ev := expectEvent[opclient.MsgEvent](t, c.Events())
+	if ev.Message.ID != 42 || ev.Message.Content != "new" {
+		t.Fatalf("event = %+v, want only new message", ev)
+	}
+}
+
+func TestDialLoadsPersistedCursorForCatchup(t *testing.T) {
+	srv := newFakeBroker(t)
+	defer srv.Close()
+	stateDir := t.TempDir()
+
+	c, err := opclient.Dial(context.Background(), opclient.Config{
+		BrokerURL: srv.URL,
+		StateDir:  stateDir,
+	})
+	if err != nil {
+		t.Fatalf("Dial first client: %v", err)
+	}
+	srv.sendFrame(t, frames.Envelope{
+		Kind: "chat.update",
+		ID:   "push-41",
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, map[string]any{
+			"id": 41, "from": "maren", "content": "persist me", "topic": "dm:maren",
+		}),
+	})
+	_ = expectEvent[opclient.MsgEvent](t, c.Events())
+	_ = c.Close()
+
+	c, err = opclient.Dial(context.Background(), opclient.Config{
+		BrokerURL:    srv.URL,
+		StateDir:     stateDir,
+		ReconnectMin: 10 * time.Millisecond,
+		ReconnectMax: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("Dial second client: %v", err)
+	}
+	defer c.Close()
+	if err := c.Subscribe(context.Background(), "subscribe.chat"); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	_ = srv.expectFrame(t, "subscribe.chat")
+
+	srv.dropConn()
+	_ = srv.expectFrame(t, "subscribe.chat")
+	req := srv.expectFrame(t, "chat.list")
+	var payload struct {
+		AfterID int64 `json:"after_id"`
+	}
+	if err := frames.PayloadAs(req, &payload); err != nil {
+		t.Fatalf("chat.list payload: %v", err)
+	}
+	if payload.AfterID != 41 {
+		t.Fatalf("catch-up after_id = %d, want persisted cursor 41", payload.AfterID)
+	}
+}
+
 func dialTestClient(t *testing.T, srv *fakeBroker) *opclient.Client {
 	t.Helper()
 	c, err := opclient.Dial(context.Background(), opclient.Config{
@@ -194,14 +487,15 @@ type fakeBroker struct {
 	conn      *websocket.Conn
 	lastToken string
 	recv      chan frames.Envelope
+	bypass    bool
 }
 
 func newFakeBroker(t *testing.T) *fakeBroker {
 	t.Helper()
-	f := &fakeBroker{t: t, recv: make(chan frames.Envelope, 64)}
+	f := &fakeBroker{t: t, recv: make(chan frames.Envelope, 64), bypass: true}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/auth/mode", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]bool{"bypass": true})
+		_ = json.NewEncoder(w).Encode(map[string]bool{"bypass": f.bypass})
 	})
 	mux.HandleFunc("/connect", f.handleConnect)
 	f.server = httptest.NewServer(mux)
