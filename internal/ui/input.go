@@ -5,6 +5,7 @@
 package ui
 
 import (
+	"context"
 	"strings"
 	"time"
 
@@ -70,7 +71,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			speaker:   "system",
 			createdAt: time.Now(),
 		})
-		m.blocks[len(m.blocks)-1].body.WriteString("ctrl-c — deregistering... (press again to force exit)")
+		m.blocks[len(m.blocks)-1].body.WriteString("ctrl-c — exiting... (press again to force exit)")
 		m.refreshChatContent(false)
 		return m, func() tea.Msg { return QuitGraceful{} }
 	case "enter":
@@ -92,15 +93,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		if cmd, handled := dispatchCommand(&m, text); handled {
 			return m, cmd
 		}
-		m.appendBlock(chatBlock{
-			class:     blockYou,
-			speaker:   m.cfg.OperatorName,
-			createdAt: time.Now(),
-		})
-		m.blocks[len(m.blocks)-1].body.WriteString(text)
+		m.appendOptimistic(text)
 		m.refreshChatContent(false)
-		if m.onSubmit != nil {
-			m.onSubmit(text)
+		if m.cfg.Client != nil {
+			content := "@" + m.cfg.Agent + " " + text
+			topic := m.threadTopic()
+			return m, func() tea.Msg {
+				if err := m.cfg.Client.ChatSend(context.Background(), content, topic, 0); err != nil {
+					return SendFailed{Text: text, Err: err}
+				}
+				return nil
+			}
 		}
 		return m, nil
 	case "pgup", "pgdown", "ctrl+u", "ctrl+d":

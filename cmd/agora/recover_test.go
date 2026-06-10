@@ -57,8 +57,8 @@ func TestRecoverGoroutine_LoadBearingCancelsContext(t *testing.T) {
 	go func() {
 		defer close(done)
 		// Load-bearing: pass cancel so the panic triggers shutdown.
-		defer recoverGoroutine("bus.Run-spike", log, cancel)
-		panic("bus died")
+		defer recoverGoroutine("worker-spike", log, cancel)
+		panic("worker died")
 	}()
 	<-done
 

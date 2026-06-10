@@ -18,15 +18,15 @@
 //
 // Decision constants mirror nexus frames.EscalationApprove / .Deny on
 // the wire but are duplicated here so the UI layer doesn't import the
-// frames package; bus.SendEscalationDecision validates them broker-side.
+// frames package.
 package ui
 
 import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/lipgloss"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 const (
@@ -81,8 +81,8 @@ func (e *escalationModal) decisionFor() string {
 	return escalationApprove
 }
 
-// EscalationResolved is sent after a decision has been dispatched to the
-// bus (success or failure). It clears the modal. Err is non-nil when the
+// EscalationResolved is sent after a decision has been dispatched.
+// It clears the modal. Err is non-nil when the
 // send failed — the Model surfaces it as a system block so the operator
 // knows the answer didn't reach the aspect.
 type EscalationResolved struct {

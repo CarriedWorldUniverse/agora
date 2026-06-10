@@ -8,7 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// capturedDecision records what the modal dispatched to the (fake) bus.
+// capturedDecision records what the modal dispatched to the fake sender.
 type capturedDecision struct {
 	aspect, decision, note, requestID string
 	called                            bool
@@ -151,7 +151,7 @@ func TestEscalation_EscDeniesNotDismiss(t *testing.T) {
 	}
 }
 
-// The note typed before confirm reaches the bus call, trimmed.
+// The note typed before confirm reaches the sender, trimmed.
 func TestEscalation_NoteForwardedOnDeny(t *testing.T) {
 	cap := &capturedDecision{}
 	m := newModelWithCapture(cap, nil)

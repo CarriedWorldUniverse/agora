@@ -59,16 +59,14 @@ func renderStreamingLine(buf string) string {
 type blockClass int
 
 const (
-	blockYou            blockClass = iota // operator-typed input echo
-	blockAspect                           // aspect reply (panel OR chat mirror)
-	blockAspectThinking                   // active streaming; ends at TurnDone
-	blockNotify                           // notify-operator content
-	blockSystem                           // dropped submission, error, banner
-	blockDivider                          // since-you-left, session start
+	blockYou     blockClass = iota // operator-typed input echo
+	blockAspect                    // agent reply
+	blockNotify                    // operator notification content
+	blockSystem                    // error or banner
+	blockDivider                   // since-you-left, session start
 )
 
-// chatBlock is the post-rewrite scrollback primitive. One block per
-// turn worth of output; body mutates in place during streaming.
+// chatBlock is the scrollback primitive.
 type chatBlock struct {
 	class     blockClass
 	speaker   string
@@ -76,6 +74,8 @@ type chatBlock struct {
 	createdAt time.Time
 	failed    bool
 	failedMsg string // populated when failed=true; renders in header
+	msgID     int64
+	pending   bool
 }
 
 // renderChatBlock produces the styled header rule line + indented body.
@@ -111,6 +111,9 @@ func renderChatBlock(b chatBlock, width int, showTS bool) string {
 func blockHeaderText(b chatBlock) string {
 	switch b.class {
 	case blockYou:
+		if b.pending {
+			return "you · sending"
+		}
 		return "you"
 	case blockAspect:
 		s := b.speaker
@@ -118,8 +121,6 @@ func blockHeaderText(b chatBlock) string {
 			s += " · failed: " + b.failedMsg
 		}
 		return s
-	case blockAspectThinking:
-		return b.speaker + " · thinking"
 	case blockNotify:
 		return "⚡ " + b.speaker
 	case blockSystem:
@@ -140,8 +141,6 @@ func blockHeaderStyle(b chatBlock) lipgloss.Style {
 			return lipgloss.NewStyle().Foreground(lipgloss.Color("#F87171")).Bold(true)
 		}
 		return modelStyle
-	case blockAspectThinking:
-		return modelStyle.Italic(true)
 	case blockNotify:
 		return notifyStyle
 	case blockSystem:

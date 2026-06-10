@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/CarriedWorldUniverse/agora/internal/opclient"
 )
 
 func mkBlock(class blockClass, speaker, body string, ts time.Time) chatBlock {
@@ -41,14 +43,6 @@ func TestRenderChatBlock_TimestampToggle(t *testing.T) {
 	out := renderChatBlock(b, 60, true)
 	if !strings.Contains(out, "14:32") {
 		t.Fatalf("timestamp missing with showTS=true: %q", out)
-	}
-}
-
-func TestRenderChatBlock_AspectThinkingHeader(t *testing.T) {
-	b := mkBlock(blockAspectThinking, "shadow", "tokens streaming", time.Now())
-	out := renderChatBlock(b, 60, false)
-	if !strings.Contains(out, "shadow · thinking") {
-		t.Fatalf("expected 'shadow · thinking' in header: %q", out)
 	}
 }
 
@@ -130,5 +124,94 @@ func TestCoalesceBlocks_DividerNeverFolds(t *testing.T) {
 	out := coalesceBlocks(blocks)
 	if len(out) != 2 {
 		t.Fatalf("dividers must never fold; want 2 got %d", len(out))
+	}
+}
+
+func TestOpMsgEventAppendsDMThread(t *testing.T) {
+	m := NewModel(Config{Agent: "maren", OperatorName: "operator"})
+
+	m.applyOpEvent(opclient.MsgEvent{Message: opclient.ChatMessage{
+		ID:      7,
+		From:    "maren",
+		Content: "hi",
+		Topic:   "dm:maren",
+	}})
+
+	if len(m.blocks) != 1 {
+		t.Fatalf("want 1 block, got %d", len(m.blocks))
+	}
+	if got := m.blocks[0].body.String(); got != "hi" {
+		t.Fatalf("body = %q, want hi", got)
+	}
+}
+
+func TestOpMsgEventIgnoresOtherTopics(t *testing.T) {
+	m := NewModel(Config{Agent: "maren", OperatorName: "operator"})
+
+	m.applyOpEvent(opclient.MsgEvent{Message: opclient.ChatMessage{ID: 1, From: "maren", Content: "ticket", Topic: "NEX-1"}})
+	m.applyOpEvent(opclient.MsgEvent{Message: opclient.ChatMessage{ID: 2, From: "maren", Content: "empty"}})
+
+	if len(m.blocks) != 0 {
+		t.Fatalf("want no blocks, got %d", len(m.blocks))
+	}
+}
+
+func TestOwnSendOptimisticReconcilesOnEcho(t *testing.T) {
+	m := NewModel(Config{Agent: "maren", OperatorName: "operator"})
+	m.appendOptimistic("hello")
+
+	m.applyOpEvent(opclient.MsgEvent{Message: opclient.ChatMessage{
+		ID:      42,
+		From:    "operator",
+		Content: "@maren hello",
+		Topic:   "dm:maren",
+	}})
+
+	if len(m.blocks) != 1 {
+		t.Fatalf("want one reconciled block, got %d", len(m.blocks))
+	}
+	if m.blocks[0].pending {
+		t.Fatalf("block still pending after echo")
+	}
+	if got := m.blocks[0].msgID; got != 42 {
+		t.Fatalf("msgID = %d, want 42", got)
+	}
+}
+
+func TestStatusLineConnectionAndWorkingStates(t *testing.T) {
+	m := NewModel(Config{Agent: "maren", OperatorName: "operator"})
+	m.width = 80
+
+	if got := m.renderStatus(); !strings.Contains(got, "connecting") {
+		t.Fatalf("initial status missing connecting: %q", got)
+	}
+	m.applyOpEvent(opclient.ConnState{Connected: true})
+	if got := m.renderStatus(); !strings.Contains(got, "online") {
+		t.Fatalf("online status missing: %q", got)
+	}
+	m.applyOpEvent(opclient.RunEvent{Run: opclient.Run{Aspect: "maren", Status: "running"}})
+	if got := m.renderStatus(); !strings.Contains(got, "working") {
+		t.Fatalf("working status missing: %q", got)
+	}
+	m.applyOpEvent(opclient.ConnState{Connected: false})
+	if got := m.renderStatus(); !strings.Contains(got, "offline") {
+		t.Fatalf("offline status missing: %q", got)
+	}
+}
+
+func TestHistoryLoadedFiltersAndSortsOldestFirst(t *testing.T) {
+	m := NewModel(Config{Agent: "maren", OperatorName: "operator"})
+	updated, _ := m.Update(HistoryLoaded{Messages: []opclient.ChatMessage{
+		{ID: 3, From: "maren", Content: "new", Topic: "dm:maren"},
+		{ID: 1, From: "maren", Content: "old", Topic: "dm:maren"},
+		{ID: 2, From: "maren", Content: "ticket", Topic: "NEX-1"},
+	}})
+	m = updated.(Model)
+
+	if len(m.blocks) != 2 {
+		t.Fatalf("want 2 dm blocks, got %d", len(m.blocks))
+	}
+	if got := m.blocks[0].body.String(); got != "old" {
+		t.Fatalf("first body = %q, want old", got)
 	}
 }
