@@ -24,6 +24,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// defaultHistoryDepth is the scrollback cap applied when Config leaves
+// HistoryDepth unset. Also sizes the markdown memo-cache bound (2×).
+const defaultHistoryDepth = 1000
+
 type Config struct {
 	AspectID     string
 	Agent        string
@@ -53,8 +57,24 @@ type Model struct {
 	vpReady     bool
 	inboxDepth  int
 	connStatus  string
-	working     bool
 	unreadBelow int
+
+	// now is the model's clock; injectable so tests can pin time.
+	now func() time.Time
+
+	// Local-echo bookkeeping: every chat.send appends a pending block
+	// AND queues a pendingSend; the broker's chat.deliver echo acks the
+	// queue FIFO (content equality as a guard). seenIDs dedupes broker
+	// message ids across the echo-reconcile and append paths.
+	pendingSends []*pendingSend
+	sendSeq      int64
+	seenIDs      map[int64]struct{}
+
+	// Observe-driven presence: latest snapshot state per TurnID for the
+	// configured agent (replace-by-TurnID). presenceTicking guards the
+	// 1s tick chain so only one runs at a time.
+	turns           map[string]*turnState
+	presenceTicking bool
 
 	// escalation holds the in-flight operator-approval modal, or nil
 	// when no escalation is pending. The first (and currently only)
@@ -70,6 +90,8 @@ type Model struct {
 
 	quitting bool
 
+	// textareaEnabled gates the multiline compose path; on by default,
+	// kept as an opt-out seam for headless/test scenarios.
 	textareaEnabled bool
 	lastSubmitted   string // captured on Enter; used by /retry
 
@@ -77,6 +99,13 @@ type Model struct {
 	statusNotice   string
 
 	showTimestamps bool
+
+	// mdr renders agent message bodies as markdown (glamour) and
+	// memoizes output per coalesced body. Built once per WindowSizeMsg
+	// — word wrap is width-dependent, so the rebuild also invalidates
+	// the memo cache — never per message. nil (pre-first-resize or
+	// construction failure) falls back to plain-text bodies.
+	mdr *markdownRenderer
 
 	slashHint    string
 	sessionStart time.Time
@@ -90,7 +119,7 @@ type Model struct {
 
 func NewModel(cfg Config) Model {
 	if cfg.HistoryDepth <= 0 {
-		cfg.HistoryDepth = 1000
+		cfg.HistoryDepth = defaultHistoryDepth
 	}
 	if cfg.InputHistory <= 0 {
 		cfg.InputHistory = 100
@@ -110,7 +139,7 @@ func NewModel(cfg Config) Model {
 
 	ta := textarea.New()
 	ta.Prompt = "› "
-	ta.Placeholder = "agora starting…"
+	ta.Placeholder = "message " + cfg.Agent
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
 	ta.KeyMap.InsertNewline = key.NewBinding(
@@ -118,21 +147,19 @@ func NewModel(cfg Config) Model {
 		key.WithHelp("shift+enter", "insert newline"),
 	)
 	ta.SetHeight(1)
-	textareaEnabled := cfg.Client != nil
-	if textareaEnabled {
-		ta.Placeholder = "message " + cfg.Agent
-		ta.Focus()
-	} else {
-		ta.Blur()
-	}
+	ta.Focus()
 
 	m := Model{
 		cfg: cfg, input: ta, historyIdx: -1,
 		connStatus:        "connecting",
 		lastInteractionAt: time.Now(),
 		sessionStart:      time.Now(),
-		textareaEnabled:   textareaEnabled,
+		textareaEnabled:   true,
 		writeClipboard:    clipboard.WriteAll,
+		now:               time.Now,
+		seenIDs:           make(map[int64]struct{}),
+		turns:             make(map[string]*turnState),
+		showTimestamps:    true,
 	}
 	if cfg.Client != nil {
 		m.escalationSend = func(aspect, decision, note, requestID string) error {
@@ -159,7 +186,7 @@ func (m Model) Init() tea.Cmd {
 		tea.Tick(idleTickInterval, func(time.Time) tea.Msg { return idleTick{} }),
 	}
 	if m.cfg.Client != nil {
-		cmds = append(cmds, loadHistoryCmd(m.cfg.Client), subscribeCmd(m.cfg.Client), waitOpEventCmd(m.cfg.Client))
+		cmds = append(cmds, loadHistoryCmd(m.cfg.Client), subscribeCmd(m.cfg.Client, m.cfg.Agent), waitOpEventCmd(m.cfg.Client))
 	}
 	return tea.Batch(cmds...)
 }
@@ -170,6 +197,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.input.SetWidth(maxInt(0, msg.Width-3))
+		// Glamour wraps at construction-time width: rebuild on resize,
+		// never per message. The rebuild carries a fresh memo cache —
+		// width changed, so every cached render is stale.
+		m.mdr = newMarkdownRenderer(msg.Width)
+		if m.mdr != nil {
+			m.mdr.maxCache = 2 * m.cfg.HistoryDepth
+		}
 		chatHeight := m.chatHeight()
 		firstSize := !m.vpReady
 		if firstSize {
@@ -237,14 +271,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshChatContent(true)
 		return m, nil
 	case OpEventReceived:
-		m.applyOpEvent(msg.Event)
-		return m, waitOpEventCmd(m.cfg.Client)
+		cmd := m.applyOpEvent(msg.Event)
+		return m, tea.Batch(cmd, waitOpEventCmd(m.cfg.Client))
 	case opEventPoll:
 		return m, waitOpEventCmd(m.cfg.Client)
 	case SendFailed:
 		m.markPendingFailed(msg.Text, msg.Err)
 		m.refreshChatContent(false)
 		return m, nil
+	case sendEchoTimeout:
+		if m.expirePendingSend(msg.seq) {
+			m.refreshChatContent(false)
+		}
+		return m, nil
+	case presenceTick:
+		m.pruneStaleTurns()
+		if !m.presenceActive() {
+			m.presenceTicking = false
+			return m, nil
+		}
+		return m, presenceTickCmd()
 	case ClearStatusNotice:
 		m.statusNotice = ""
 		return m, nil
@@ -276,10 +322,15 @@ func loadHistoryCmd(c *opclient.Client) tea.Cmd {
 	}
 }
 
-func subscribeCmd(c *opclient.Client) tea.Cmd {
+func subscribeCmd(c *opclient.Client, agent string) tea.Cmd {
 	return func() tea.Msg {
-		err := c.Subscribe(context.Background(), "subscribe.chat", "subscribe.observe")
-		if err != nil {
+		ctx := context.Background()
+		if err := c.Subscribe(ctx, "subscribe.chat"); err != nil {
+			return SendFailed{Text: "subscribe", Err: err}
+		}
+		// subscribe.observe requires an aspect; the broker ignores the
+		// subscription when the payload is empty.
+		if err := c.SubscribeWith(ctx, "subscribe.observe", map[string]any{"aspect": agent}); err != nil {
 			return SendFailed{Text: "subscribe", Err: err}
 		}
 		return nil

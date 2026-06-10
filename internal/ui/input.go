@@ -98,19 +98,20 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		if cmd, handled := dispatchCommand(&m, text); handled {
 			return m, cmd
 		}
-		m.appendOptimistic(text)
+		ackTimeout := m.appendOptimistic(text)
 		m.refreshChatContent(false)
 		if m.cfg.Client != nil {
 			content := "@" + m.cfg.Agent + " " + text
 			topic := m.threadTopic()
-			return m, func() tea.Msg {
+			send := func() tea.Msg {
 				if err := m.cfg.Client.ChatSend(context.Background(), content, topic, 0); err != nil {
 					return SendFailed{Text: text, Err: err}
 				}
 				return nil
 			}
+			return m, tea.Batch(send, ackTimeout)
 		}
-		return m, nil
+		return m, ackTimeout
 	case "pgup", "pgdown", "ctrl+u", "ctrl+d":
 		var vpCmd tea.Cmd
 		m.vp, vpCmd = m.vp.Update(msg)

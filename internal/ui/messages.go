@@ -47,5 +47,22 @@ type ReadyToQuit struct{}
 
 type idleTick struct{}
 
+// sendEchoTimeout fires echoAckTimeout after a chat.send; if the send's
+// broker echo hasn't reconciled the pending block by then, the block is
+// marked undelivered.
+type sendEchoTimeout struct{ seq int64 }
+
+// presenceTick drives the 1s elapsed re-render while the agent's
+// presence is active. The chain self-terminates when presence clears.
+type presenceTick struct{}
+
 const idleTickInterval = 60 * time.Second
 const idleThreshold = 5 * time.Minute
+
+// echoAckTimeout bounds how long a sent message may wait for its
+// chat.deliver echo before rendering ✗ undelivered.
+const echoAckTimeout = 10 * time.Second
+
+// presenceStaleAfter is the staleness guard on observe-driven presence:
+// an in-flight turn with no fresh snapshot for this long stops counting.
+const presenceStaleAfter = 5 * time.Minute

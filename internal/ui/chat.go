@@ -7,8 +7,77 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// markdownRenderer pairs the glamour render func with a memo cache.
+// Refreshes re-render the whole transcript, so without memoization
+// every arriving message costs O(transcript) glamour parses. The cache
+// is keyed on the coalesced body string — the only render input besides
+// width, which is fixed per renderer (rebuild on resize replaces the
+// whole struct, cache included). render is a func field (not the
+// *glamour.TermRenderer itself) so tests can wrap it with a counter.
+type markdownRenderer struct {
+	render func(string) (string, error)
+	cache  map[string]string
+	// maxCache bounds the memo map: at maxCache entries it resets
+	// (coalescing churn leaves stale keys; a dumb size cap beats an
+	// LRU here). <=0 disables the bound.
+	maxCache int
+}
+
+// newMarkdownRenderer builds the glamour renderer used for agent
+// message bodies. Word wrap is set under the viewport width so the
+// transcript's two-space body indent never pushes lines past the edge.
+// Construction is cheap but not free: the Model rebuilds it once per
+// WindowSizeMsg, never per message. A nil return (construction error)
+// downgrades agent bodies to plain text.
+func newMarkdownRenderer(width int) *markdownRenderer {
+	wrap := width - 2
+	if wrap < 10 {
+		wrap = 10
+	}
+	r, err := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(wrap),
+	)
+	if err != nil {
+		return nil
+	}
+	return &markdownRenderer{
+		render:   r.Render,
+		cache:    make(map[string]string),
+		maxCache: 2 * defaultHistoryDepth,
+	}
+}
+
+// renderMarkdownBody renders an agent body through glamour, trimming
+// the blank-line padding glamour adds so blocks stay compact, and
+// memoizes the result. Returns ok=false (caller falls back to the
+// plain-text path) on any render error or empty result; failures are
+// not cached.
+func renderMarkdownBody(md *markdownRenderer, body string) (string, bool) {
+	if out, ok := md.cache[body]; ok {
+		return out, true
+	}
+	out, err := md.render(body)
+	if err != nil {
+		return "", false
+	}
+	out = strings.Trim(out, "\n")
+	if out == "" {
+		return "", false
+	}
+	if md.maxCache > 0 && len(md.cache) >= md.maxCache {
+		md.cache = nil
+	}
+	if md.cache == nil {
+		md.cache = make(map[string]string)
+	}
+	md.cache[body] = out
+	return out, true
+}
 
 // wrapLines applies width-based wrapping to a multiline string. Used
 // to keep long messages visible without horizontal scroll. Empty
@@ -75,12 +144,34 @@ type chatBlock struct {
 	failed    bool
 	failedMsg string // populated when failed=true; renders in header
 	msgID     int64
-	pending   bool
+	pending   bool // sent, awaiting broker echo — renders "…"
+	delivered bool // echo reconciled — renders "✓"
+}
+
+// sendStateMarker is the dim delivery-state suffix on operator blocks:
+// "…" while awaiting the broker echo, "✓" once the echo reconciles,
+// "✗ undelivered" on RPC failure or ack timeout.
+func sendStateMarker(b chatBlock) string {
+	if b.class != blockYou {
+		return ""
+	}
+	switch {
+	case b.pending:
+		return "…"
+	case b.failed:
+		return "✗ undelivered"
+	case b.delivered:
+		return "✓"
+	}
+	return ""
 }
 
 // renderChatBlock produces the styled header rule line + indented body.
-// showTS adds "HH:MM" to the right edge of the header rule.
-func renderChatBlock(b chatBlock, width int, showTS bool) string {
+// showTS adds "HH:MM" to the right edge of the header rule. md (when
+// non-nil) markdown-renders AGENT bodies only — operator text stays
+// verbatim, and stored block content is never touched: glamour applies
+// strictly at render time so echo reconciliation keeps comparing raw text.
+func renderChatBlock(b chatBlock, width int, showTS bool, md *markdownRenderer) string {
 	headerText := blockHeaderText(b)
 	headerStyleFn := blockHeaderStyle(b)
 
@@ -90,17 +181,28 @@ func renderChatBlock(b chatBlock, width int, showTS bool) string {
 	}
 
 	// header: "<glyph?><speaker><state?> <rule fill> <ts?>"
-	leftWidth := lipgloss.Width(headerText)
+	left := headerStyleFn.Render(headerText)
+	if marker := sendStateMarker(b); marker != "" {
+		left += " " + dimStyle.Render(marker)
+	}
+	leftWidth := lipgloss.Width(left)
 	rightWidth := lipgloss.Width(tsSuffix)
 	ruleWidth := width - leftWidth - rightWidth - 1 // 1 for space between
 	if ruleWidth < 3 {
 		ruleWidth = 3
 	}
-	header := headerStyleFn.Render(headerText) + " " + dividerStyle.Render(strings.Repeat("─", ruleWidth)) + tsSuffix
+	header := left + " " + dividerStyle.Render(strings.Repeat("─", ruleWidth)) + tsSuffix
 
 	body := b.body.String()
 	if body == "" {
 		return header
+	}
+	if b.class == blockAspect && md != nil {
+		if rendered, ok := renderMarkdownBody(md, body); ok {
+			// Glamour output is pre-wrapped and carries its own ANSI
+			// styling; indent only — no wrapLines, no body style pass.
+			return header + "\n" + indentLines(rendered, "  ")
+		}
 	}
 	bodyStyleFn := blockBodyStyle(b)
 	wrapped := wrapLines(body, width-2)
@@ -111,9 +213,8 @@ func renderChatBlock(b chatBlock, width int, showTS bool) string {
 func blockHeaderText(b chatBlock) string {
 	switch b.class {
 	case blockYou:
-		if b.pending {
-			return "you · sending"
-		}
+		// Delivery state renders as a dim marker suffix
+		// (sendStateMarker), not in the header text.
 		return "you"
 	case blockAspect:
 		s := b.speaker
@@ -182,6 +283,8 @@ func appendClonedBlock(out []*chatBlock, src chatBlock) []*chatBlock {
 		createdAt: src.createdAt,
 		failed:    src.failed,
 		failedMsg: src.failedMsg,
+		pending:   src.pending,
+		delivered: src.delivered,
 	}
 	b.body.WriteString(src.body.String())
 	return append(out, b)
@@ -209,6 +312,12 @@ func coalesceBlocks(blocks []*chatBlock) []*chatBlock {
 			ptrs = appendClonedBlock(ptrs, *cur)
 			continue
 		}
+		// Blocks in different delivery states keep their own markers —
+		// a pending send must not fold into a delivered/failed one.
+		if last.pending != cur.pending || last.delivered != cur.delivered || last.failed != cur.failed {
+			ptrs = appendClonedBlock(ptrs, *cur)
+			continue
+		}
 		if cur.createdAt.Sub(last.createdAt) > 60*time.Second {
 			ptrs = appendClonedBlock(ptrs, *cur)
 			continue
@@ -220,16 +329,27 @@ func coalesceBlocks(blocks []*chatBlock) []*chatBlock {
 }
 
 // renderBlockContent renders a slice of blocks at the given width,
-// returns one string suitable for viewport.SetContent. Mirrors
-// renderChatContent's signature but for blocks.
-func renderBlockContent(blocks []*chatBlock, width int, showTS bool) string {
+// returns one string suitable for viewport.SetContent. Speaker turns
+// get breathing room: a blank separator line lands between consecutive
+// blocks of DIFFERENT speakers (or classes), while consecutive blocks
+// from the same speaker stay tight (single newline — their header
+// rules already separate them visually).
+func renderBlockContent(blocks []*chatBlock, width int, showTS bool, md *markdownRenderer) string {
 	coalesced := coalesceBlocks(blocks)
-	parts := make([]string, 0, len(coalesced))
-	for _, b := range coalesced {
+	var sb strings.Builder
+	for i, b := range coalesced {
+		if i > 0 {
+			prev := coalesced[i-1]
+			if prev.class == b.class && prev.speaker == b.speaker {
+				sb.WriteString("\n")
+			} else {
+				sb.WriteString("\n\n")
+			}
+		}
 		// Dereference for the value-param renderer. Render path is
 		// read-only — calls b.body.String(), never Write — so the
 		// implicit Builder copy in the call is safe.
-		parts = append(parts, renderChatBlock(*b, width, showTS))
+		sb.WriteString(renderChatBlock(*b, width, showTS, md))
 	}
-	return strings.Join(parts, "\n\n")
+	return sb.String()
 }

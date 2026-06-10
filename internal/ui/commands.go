@@ -126,25 +126,19 @@ func cmdRetry(m *Model, _ string) tea.Cmd {
 		m.refreshChatContent(false)
 		return nil
 	}
-	m.appendBlock(chatBlock{
-		class:     blockYou,
-		speaker:   m.cfg.OperatorName,
-		createdAt: time.Now(),
-		msgID:     -time.Now().UnixNano(),
-		pending:   true,
-	})
-	m.blocks[len(m.blocks)-1].body.WriteString(m.lastSubmitted)
+	text := m.lastSubmitted
+	ackTimeout := m.appendOptimistic(text)
 	m.refreshChatContent(false)
 	if m.cfg.Client == nil {
-		return nil
+		return ackTimeout
 	}
-	text := m.lastSubmitted
-	return func() tea.Msg {
+	send := func() tea.Msg {
 		if err := m.cfg.Client.ChatSend(context.Background(), "@"+m.cfg.Agent+" "+text, m.threadTopic(), 0); err != nil {
 			return SendFailed{Text: text, Err: err}
 		}
 		return nil
 	}
+	return tea.Batch(send, ackTimeout)
 }
 
 // commandNames returns the registered command names, alphabetised,
