@@ -101,7 +101,7 @@ func TestConnState_CycleAppendsTranscriptMarkers(t *testing.T) {
 	m.applyOpEvent(opclient.ConnState{Connected: true})
 	m.applyOpEvent(opclient.ConnState{Connected: false})
 	m.applyOpEvent(opclient.ConnState{Connected: true})
-	rendered := renderBlockContent(m.blocks, 80, false)
+	rendered := renderBlockContent(m.blocks, 80, false, nil)
 	if !strings.Contains(rendered, "connection lost") {
 		t.Fatalf("rendered chat content missing 'connection lost' marker:\n%s", rendered)
 	}
@@ -128,7 +128,7 @@ func TestConnState_InitialConnectAddsNoMarker(t *testing.T) {
 	m := NewModel(Config{AspectID: "shadow"})
 	m.applyOpEvent(opclient.ConnState{Connected: true})
 	if len(m.blocks) != 0 {
-		rendered := renderBlockContent(m.blocks, 80, false)
+		rendered := renderBlockContent(m.blocks, 80, false, nil)
 		t.Fatalf("clean startup connect appended %d block(s):\n%s", len(m.blocks), rendered)
 	}
 	if !strings.Contains(m.renderStatus(), "online") {

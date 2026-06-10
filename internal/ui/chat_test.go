@@ -28,7 +28,7 @@ func mkBlockP(class blockClass, speaker, body string, ts time.Time) *chatBlock {
 func TestRenderChatBlock_YouHeaderAndBody(t *testing.T) {
 	now := time.Date(2026, 5, 23, 14, 32, 0, 0, time.UTC)
 	b := mkBlock(blockYou, "you", "ship NEX-92 when keel's done", now)
-	out := renderChatBlock(b, 60, false)
+	out := renderChatBlock(b, 60, false, nil)
 	if !strings.Contains(out, "you") {
 		t.Fatalf("header missing 'you': %q", out)
 	}
@@ -43,7 +43,7 @@ func TestRenderChatBlock_YouHeaderAndBody(t *testing.T) {
 func TestRenderChatBlock_TimestampToggle(t *testing.T) {
 	now := time.Date(2026, 5, 23, 14, 32, 0, 0, time.UTC)
 	b := mkBlock(blockYou, "you", "hi", now)
-	out := renderChatBlock(b, 60, true)
+	out := renderChatBlock(b, 60, true, nil)
 	if !strings.Contains(out, "14:32") {
 		t.Fatalf("timestamp missing with showTS=true: %q", out)
 	}
@@ -51,7 +51,7 @@ func TestRenderChatBlock_TimestampToggle(t *testing.T) {
 
 func TestRenderChatBlock_NotifyHeader(t *testing.T) {
 	b := mkBlock(blockNotify, "shadow", "NEX-87 needs you", time.Now())
-	out := renderChatBlock(b, 60, false)
+	out := renderChatBlock(b, 60, false, nil)
 	if !strings.Contains(out, "⚡ shadow") {
 		t.Fatalf("expected '⚡ shadow' in header: %q", out)
 	}
@@ -61,7 +61,7 @@ func TestRenderChatBlock_FailedHeader(t *testing.T) {
 	b := mkBlock(blockAspect, "shadow", "partial", time.Now())
 	b.failed = true
 	b.failedMsg = "send timeout"
-	out := renderChatBlock(b, 60, false)
+	out := renderChatBlock(b, 60, false, nil)
 	if !strings.Contains(out, "shadow · failed: send timeout") {
 		t.Fatalf("expected failed header: %q", out)
 	}
@@ -69,7 +69,7 @@ func TestRenderChatBlock_FailedHeader(t *testing.T) {
 
 func TestRenderChatBlock_DividerInline(t *testing.T) {
 	b := mkBlock(blockDivider, "", "since you left (2h 14m)", time.Now())
-	out := renderChatBlock(b, 60, false)
+	out := renderChatBlock(b, 60, false, nil)
 	if !strings.Contains(out, "since you left (2h 14m)") {
 		t.Fatalf("divider missing label: %q", out)
 	}
@@ -191,7 +191,7 @@ func TestSendRendersPendingMarker(t *testing.T) {
 	if !m.blocks[0].pending {
 		t.Fatalf("optimistic block not pending")
 	}
-	out := renderBlockContent(m.blocks, 80, false)
+	out := renderBlockContent(m.blocks, 80, false, nil)
 	if !strings.Contains(out, "…") {
 		t.Fatalf("pending block missing … marker:\n%s", out)
 	}
@@ -215,7 +215,7 @@ func TestEchoDeliverFlipsPendingToAck(t *testing.T) {
 	if !m.blocks[0].delivered {
 		t.Fatalf("block not marked delivered after echo")
 	}
-	out := renderBlockContent(m.blocks, 80, false)
+	out := renderBlockContent(m.blocks, 80, false, nil)
 	if !strings.Contains(out, "✓") {
 		t.Fatalf("delivered block missing ✓ marker:\n%s", out)
 	}
@@ -249,7 +249,7 @@ func TestEchoTimeoutMarksUndelivered(t *testing.T) {
 	if !m.blocks[0].failed {
 		t.Fatalf("block not failed after timeout")
 	}
-	out := renderBlockContent(m.blocks, 80, false)
+	out := renderBlockContent(m.blocks, 80, false, nil)
 	if !strings.Contains(out, "✗ undelivered") {
 		t.Fatalf("timed-out block missing ✗ undelivered marker:\n%s", out)
 	}
@@ -292,7 +292,7 @@ func TestSendFailedMarksPendingBlockFailed(t *testing.T) {
 	if !m.blocks[0].failed {
 		t.Fatalf("pending block not failed after SendFailed")
 	}
-	out := renderBlockContent(m.blocks, 80, false)
+	out := renderBlockContent(m.blocks, 80, false, nil)
 	if !strings.Contains(out, "✗ undelivered") {
 		t.Fatalf("failed block missing ✗ undelivered marker:\n%s", out)
 	}
@@ -453,5 +453,125 @@ func TestHistoryLoadedFiltersAndSortsOldestFirst(t *testing.T) {
 	}
 	if got := m.blocks[0].body.String(); got != "old" {
 		t.Fatalf("first body = %q, want old", got)
+	}
+}
+
+// --- Task 9: transcript styling + markdown ---
+
+func TestBlockHeaderStyles_OperatorVsAgentDistinct(t *testing.T) {
+	you := mkBlock(blockYou, "you", "hi", time.Now())
+	agent := mkBlock(blockAspect, "maren", "hello", time.Now())
+	youFg := blockHeaderStyle(you).GetForeground()
+	agentFg := blockHeaderStyle(agent).GetForeground()
+	if youFg == agentFg {
+		t.Fatalf("operator and agent headers share a foreground: %v", youFg)
+	}
+}
+
+func TestTranscriptTimestampsOnEachHeader(t *testing.T) {
+	t1 := time.Date(2026, 6, 10, 9, 5, 0, 0, time.UTC)
+	t2 := time.Date(2026, 6, 10, 9, 7, 0, 0, time.UTC)
+	blocks := []*chatBlock{
+		mkBlockP(blockYou, "you", "morning", t1),
+		mkBlockP(blockAspect, "maren", "hello", t2),
+	}
+	out := renderBlockContent(blocks, 80, true, nil)
+	if !strings.Contains(out, "09:05") {
+		t.Fatalf("operator header missing HH:MM timestamp:\n%s", out)
+	}
+	if !strings.Contains(out, "09:07") {
+		t.Fatalf("agent header missing HH:MM timestamp:\n%s", out)
+	}
+}
+
+func TestTimestampsDefaultOn(t *testing.T) {
+	m := NewModel(Config{Agent: "maren", OperatorName: "operator"})
+	if !m.showTimestamps {
+		t.Fatalf("showTimestamps should default to on")
+	}
+}
+
+func TestRenderBlockContent_BlankLineBetweenDifferentSpeakers(t *testing.T) {
+	now := time.Date(2026, 6, 10, 9, 0, 0, 0, time.UTC)
+	blocks := []*chatBlock{
+		mkBlockP(blockYou, "you", "ping", now),
+		mkBlockP(blockAspect, "maren", "pong", now.Add(time.Second)),
+	}
+	out := renderBlockContent(blocks, 80, false, nil)
+	lines := strings.Split(out, "\n")
+	blank := 0
+	for _, l := range lines {
+		if strings.TrimSpace(l) == "" {
+			blank++
+		}
+	}
+	if blank < 1 {
+		t.Fatalf("no blank separator line between different speakers:\n%s", out)
+	}
+}
+
+func TestRenderBlockContent_SameSpeakerBlocksStayTight(t *testing.T) {
+	now := time.Date(2026, 6, 10, 9, 0, 0, 0, time.UTC)
+	// 2 minutes apart: past the coalesce gap, so they stay separate
+	// blocks — but same speaker, so no blank breathing-room line.
+	blocks := []*chatBlock{
+		mkBlockP(blockAspect, "maren", "first", now),
+		mkBlockP(blockAspect, "maren", "second", now.Add(2*time.Minute)),
+	}
+	out := renderBlockContent(blocks, 80, false, nil)
+	for _, l := range strings.Split(out, "\n") {
+		if strings.TrimSpace(l) == "" {
+			t.Fatalf("same-speaker consecutive blocks separated by blank line:\n%s", out)
+		}
+	}
+}
+
+func TestAgentMarkdownRendersViaGlamour(t *testing.T) {
+	md := newMarkdownRenderer(80)
+	if md == nil {
+		t.Fatalf("newMarkdownRenderer returned nil")
+	}
+	b := mkBlock(blockAspect, "maren", "this is **bold** stuff\n\n```go\nfmt.Println(\"hi\")\n```", time.Now())
+	out := renderChatBlock(b, 80, false, md)
+	// Glamour output characteristics, not raw-markdown survival: the
+	// auto style resolves per-environment (notty in tests keeps **
+	// emphasis markers literal), but fences are ALWAYS transformed —
+	// the code renders as a styled/indented block, backticks gone.
+	if strings.Contains(out, "```") {
+		t.Fatalf("raw code fence survived glamour render:\n%s", out)
+	}
+	if !strings.Contains(out, "bold") {
+		t.Fatalf("bold text content lost:\n%s", out)
+	}
+	if !strings.Contains(out, "fmt.Println") {
+		t.Fatalf("code block content lost:\n%s", out)
+	}
+	// And it must actually differ from the plain-text path.
+	plain := renderChatBlock(b, 80, false, nil)
+	if out == plain {
+		t.Fatalf("glamour render identical to plain render:\n%s", out)
+	}
+}
+
+func TestAgentMarkdownCompact_NoLeadingTrailingBlankPadding(t *testing.T) {
+	md := newMarkdownRenderer(80)
+	b := mkBlock(blockAspect, "maren", "just a line", time.Now())
+	out := renderChatBlock(b, 80, false, md)
+	lines := strings.Split(out, "\n")
+	if strings.TrimSpace(lines[len(lines)-1]) == "" {
+		t.Fatalf("trailing blank padding left by glamour:\n%q", out)
+	}
+	// Header is line 0; body should start on line 1, not after blank padding.
+	if len(lines) < 2 || strings.TrimSpace(lines[1]) == "" {
+		t.Fatalf("leading blank padding between header and body:\n%q", out)
+	}
+}
+
+func TestOperatorMessagesStayPlain(t *testing.T) {
+	md := newMarkdownRenderer(80)
+	b := mkBlock(blockYou, "you", "keep my **stars** literal", time.Now())
+	out := renderChatBlock(b, 80, false, md)
+	if !strings.Contains(out, "**stars**") {
+		t.Fatalf("operator body was markdown-rendered, want raw text:\n%s", out)
 	}
 }

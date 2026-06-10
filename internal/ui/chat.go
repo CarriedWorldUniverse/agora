@@ -7,8 +7,46 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// newMarkdownRenderer builds the glamour renderer used for agent
+// message bodies. Word wrap is set under the viewport width so the
+// transcript's two-space body indent never pushes lines past the edge.
+// Construction is cheap but not free: the Model rebuilds it once per
+// WindowSizeMsg, never per message. A nil return (construction error)
+// downgrades agent bodies to plain text.
+func newMarkdownRenderer(width int) *glamour.TermRenderer {
+	wrap := width - 2
+	if wrap < 10 {
+		wrap = 10
+	}
+	r, err := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(wrap),
+	)
+	if err != nil {
+		return nil
+	}
+	return r
+}
+
+// renderMarkdownBody renders an agent body through glamour, trimming
+// the blank-line padding glamour adds so blocks stay compact. Returns
+// ok=false (caller falls back to the plain-text path) on any render
+// error or empty result.
+func renderMarkdownBody(md *glamour.TermRenderer, body string) (string, bool) {
+	out, err := md.Render(body)
+	if err != nil {
+		return "", false
+	}
+	out = strings.Trim(out, "\n")
+	if out == "" {
+		return "", false
+	}
+	return out, true
+}
 
 // wrapLines applies width-based wrapping to a multiline string. Used
 // to keep long messages visible without horizontal scroll. Empty
@@ -98,8 +136,11 @@ func sendStateMarker(b chatBlock) string {
 }
 
 // renderChatBlock produces the styled header rule line + indented body.
-// showTS adds "HH:MM" to the right edge of the header rule.
-func renderChatBlock(b chatBlock, width int, showTS bool) string {
+// showTS adds "HH:MM" to the right edge of the header rule. md (when
+// non-nil) markdown-renders AGENT bodies only — operator text stays
+// verbatim, and stored block content is never touched: glamour applies
+// strictly at render time so echo reconciliation keeps comparing raw text.
+func renderChatBlock(b chatBlock, width int, showTS bool, md *glamour.TermRenderer) string {
 	headerText := blockHeaderText(b)
 	headerStyleFn := blockHeaderStyle(b)
 
@@ -124,6 +165,13 @@ func renderChatBlock(b chatBlock, width int, showTS bool) string {
 	body := b.body.String()
 	if body == "" {
 		return header
+	}
+	if b.class == blockAspect && md != nil {
+		if rendered, ok := renderMarkdownBody(md, body); ok {
+			// Glamour output is pre-wrapped and carries its own ANSI
+			// styling; indent only — no wrapLines, no body style pass.
+			return header + "\n" + indentLines(rendered, "  ")
+		}
 	}
 	bodyStyleFn := blockBodyStyle(b)
 	wrapped := wrapLines(body, width-2)
@@ -250,16 +298,27 @@ func coalesceBlocks(blocks []*chatBlock) []*chatBlock {
 }
 
 // renderBlockContent renders a slice of blocks at the given width,
-// returns one string suitable for viewport.SetContent. Mirrors
-// renderChatContent's signature but for blocks.
-func renderBlockContent(blocks []*chatBlock, width int, showTS bool) string {
+// returns one string suitable for viewport.SetContent. Speaker turns
+// get breathing room: a blank separator line lands between consecutive
+// blocks of DIFFERENT speakers (or classes), while consecutive blocks
+// from the same speaker stay tight (single newline — their header
+// rules already separate them visually).
+func renderBlockContent(blocks []*chatBlock, width int, showTS bool, md *glamour.TermRenderer) string {
 	coalesced := coalesceBlocks(blocks)
-	parts := make([]string, 0, len(coalesced))
-	for _, b := range coalesced {
+	var sb strings.Builder
+	for i, b := range coalesced {
+		if i > 0 {
+			prev := coalesced[i-1]
+			if prev.class == b.class && prev.speaker == b.speaker {
+				sb.WriteString("\n")
+			} else {
+				sb.WriteString("\n\n")
+			}
+		}
 		// Dereference for the value-param renderer. Render path is
 		// read-only — calls b.body.String(), never Write — so the
 		// implicit Builder copy in the call is safe.
-		parts = append(parts, renderChatBlock(*b, width, showTS))
+		sb.WriteString(renderChatBlock(*b, width, showTS, md))
 	}
-	return strings.Join(parts, "\n\n")
+	return sb.String()
 }

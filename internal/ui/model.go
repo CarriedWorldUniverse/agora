@@ -18,6 +18,7 @@ import (
 
 	"github.com/CarriedWorldUniverse/agora/internal/opclient"
 	"github.com/atotto/clipboard"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -95,6 +96,12 @@ type Model struct {
 
 	showTimestamps bool
 
+	// mdr renders agent message bodies as markdown (glamour). Built
+	// once per WindowSizeMsg — word wrap is width-dependent — never
+	// per message. nil (pre-first-resize or construction failure)
+	// falls back to plain-text bodies.
+	mdr *glamour.TermRenderer
+
 	slashHint    string
 	sessionStart time.Time
 
@@ -153,6 +160,7 @@ func NewModel(cfg Config) Model {
 		now:               time.Now,
 		seenIDs:           make(map[int64]struct{}),
 		turns:             make(map[string]*turnState),
+		showTimestamps:    true,
 	}
 	if cfg.Client != nil {
 		m.escalationSend = func(aspect, decision, note, requestID string) error {
@@ -190,6 +198,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.input.SetWidth(maxInt(0, msg.Width-3))
+		// Glamour wraps at construction-time width: rebuild on resize,
+		// never per message.
+		m.mdr = newMarkdownRenderer(msg.Width)
 		chatHeight := m.chatHeight()
 		firstSize := !m.vpReady
 		if firstSize {

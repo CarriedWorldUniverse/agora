@@ -119,7 +119,7 @@ func (m *Model) refreshChatContent(forceBottom bool) {
 		return
 	}
 	atBottom := m.vp.AtBottom()
-	m.vp.SetContent(renderBlockContent(m.blocks, m.vp.Width, m.showTimestamps))
+	m.vp.SetContent(renderBlockContent(m.blocks, m.vp.Width, m.showTimestamps, m.mdr))
 	if forceBottom || atBottom {
 		m.vp.GotoBottom()
 		m.unreadBelow = 0
