@@ -21,9 +21,11 @@ import (
 )
 
 const (
-	defaultRPCDeadline = 10 * time.Second
-	defaultReconnect   = time.Second
-	maxReconnect       = 32 * time.Second
+	defaultRPCDeadline       = 10 * time.Second
+	defaultReconnect         = time.Second
+	maxReconnect             = 32 * time.Second
+	defaultHeartbeatInterval = 20 * time.Second
+	defaultHeartbeatTimeout  = 10 * time.Second
 )
 
 // Config controls the operator websocket connection.
@@ -36,6 +38,11 @@ type Config struct {
 	RPCDeadline  time.Duration
 	ReconnectMin time.Duration
 	ReconnectMax time.Duration
+
+	// HeartbeatInterval is how often the client pings the broker to detect
+	// half-open connections; HeartbeatTimeout bounds the wait for each pong.
+	HeartbeatInterval time.Duration
+	HeartbeatTimeout  time.Duration
 }
 
 // Client is a long-lived operator websocket connection.
@@ -135,6 +142,12 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 	}
 	if cfg.ReconnectMax <= 0 {
 		cfg.ReconnectMax = maxReconnect
+	}
+	if cfg.HeartbeatInterval <= 0 {
+		cfg.HeartbeatInterval = defaultHeartbeatInterval
+	}
+	if cfg.HeartbeatTimeout <= 0 {
+		cfg.HeartbeatTimeout = defaultHeartbeatTimeout
 	}
 	tlsCfg, err := tlsConfigFromPinnedCert(cfg.PinnedCertPEM)
 	if err != nil {
@@ -348,7 +361,37 @@ func (c *Client) connect(ctx context.Context) error {
 	c.connMu.Unlock()
 	c.emit(ConnState{Connected: true})
 	go c.readLoop(conn, done)
+	go c.heartbeat(conn)
 	return nil
+}
+
+// heartbeat pings the broker on a fixed interval to detect half-open
+// connections (e.g. tailnet route loss without FIN/RST), where readLoop's
+// Read would otherwise block forever. It is bound to one conn generation:
+// it exits on ctx done or on the first Ping failure — pinging a conn that
+// readLoop already closed errors immediately, so a normal disconnect also
+// ends the goroutine within one tick.
+func (c *Client) heartbeat(conn *websocket.Conn) {
+	t := time.NewTicker(c.cfg.HeartbeatInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-t.C:
+			ctx, cancel := context.WithTimeout(c.ctx, c.cfg.HeartbeatTimeout)
+			err := conn.Ping(ctx)
+			cancel()
+			if err != nil {
+				// Closing makes readLoop's Read return; that path owns
+				// ConnState emission and reconnect wake-up. CloseNow, not
+				// Close: a graceful close handshake would block waiting for
+				// a reply from a peer we just determined is unreachable.
+				_ = conn.CloseNow()
+				return
+			}
+		}
+	}
 }
 
 func (c *Client) readLoop(conn *websocket.Conn, done chan<- error) {

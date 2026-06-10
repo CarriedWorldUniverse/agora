@@ -176,6 +176,50 @@ func TestReconnectCatchupFromCursor(t *testing.T) {
 	}
 }
 
+func TestHeartbeatDetectsDeadConnAndReconnects(t *testing.T) {
+	srv := newFakeBroker(t)
+	defer srv.Close()
+	// Every connection completes the WS upgrade and then stops reading
+	// frames entirely — the client's pings get no pong.
+	srv.setStopReading(true)
+
+	c, err := opclient.Dial(context.Background(), opclient.Config{
+		BrokerURL:         srv.URL,
+		StateDir:          t.TempDir(),
+		ReconnectMin:      50 * time.Millisecond,
+		ReconnectMax:      200 * time.Millisecond,
+		HeartbeatInterval: 100 * time.Millisecond,
+		HeartbeatTimeout:  200 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+
+	// The heartbeat must notice the dead connection and tear it down,
+	// which emits ConnState{Connected:false}.
+	deadline := time.After(5 * time.Second)
+	for disconnected := false; !disconnected; {
+		select {
+		case ev := <-c.Events():
+			if cs, ok := ev.(opclient.ConnState); ok && !cs.Connected {
+				disconnected = true
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for ConnState{Connected:false}: heartbeat never detected the dead connection")
+		}
+	}
+
+	// The reconnect loop must then redial: the fixture sees a second connection.
+	for srv.connections() < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for redial, connections = %d", srv.connections())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 func dialTestClient(t *testing.T, srv *fakeBroker) *opclient.Client {
 	t.Helper()
 	c, err := opclient.Dial(context.Background(), opclient.Config{
@@ -195,16 +239,19 @@ type fakeBroker struct {
 
 	t      *testing.T
 	server *httptest.Server
+	closed chan struct{}
 
-	mu        sync.Mutex
-	conn      *websocket.Conn
-	lastToken string
-	recv      chan frames.Envelope
+	mu          sync.Mutex
+	conn        *websocket.Conn
+	lastToken   string
+	connCount   int
+	stopReading bool
+	recv        chan frames.Envelope
 }
 
 func newFakeBroker(t *testing.T) *fakeBroker {
 	t.Helper()
-	f := &fakeBroker{t: t, recv: make(chan frames.Envelope, 64)}
+	f := &fakeBroker{t: t, recv: make(chan frames.Envelope, 64), closed: make(chan struct{})}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/auth/mode", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]bool{"bypass": true})
@@ -215,7 +262,26 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 	return f
 }
 
-func (f *fakeBroker) Close() { f.server.Close() }
+func (f *fakeBroker) Close() {
+	close(f.closed)
+	f.server.Close()
+}
+
+// setStopReading makes subsequently accepted connections complete the WS
+// upgrade and then never read frames. coder/websocket answers protocol pings
+// inside Read, so a non-reading peer never pongs — from the client's point of
+// view the connection is half-open.
+func (f *fakeBroker) setStopReading(v bool) {
+	f.mu.Lock()
+	f.stopReading = v
+	f.mu.Unlock()
+}
+
+func (f *fakeBroker) connections() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.connCount
+}
 
 func (f *fakeBroker) handleConnect(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
@@ -230,7 +296,15 @@ func (f *fakeBroker) handleConnect(w http.ResponseWriter, r *http.Request) {
 		_ = f.conn.Close(websocket.StatusNormalClosure, "replaced")
 	}
 	f.conn = conn
+	f.connCount++
+	stop := f.stopReading
 	f.mu.Unlock()
+	if stop {
+		// Hold the connection open without reading until the broker shuts
+		// down: the peer's pings go unanswered.
+		<-f.closed
+		return
+	}
 	for {
 		typ, data, err := conn.Read(r.Context())
 		if err != nil {
