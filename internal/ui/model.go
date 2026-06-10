@@ -125,7 +125,7 @@ func NewModel(cfg Config) Model {
 		ta.Blur()
 	}
 
-	return Model{
+	m := Model{
 		cfg: cfg, input: ta, historyIdx: -1,
 		connStatus:        "connecting",
 		lastInteractionAt: time.Now(),
@@ -133,6 +133,18 @@ func NewModel(cfg Config) Model {
 		textareaEnabled:   textareaEnabled,
 		wheelCheckExpiry:  time.Now().Add(30 * time.Second),
 	}
+	if cfg.Client != nil {
+		m.escalationSend = func(aspect, decision, note, requestID string) error {
+			return cfg.Client.EscalationDecide(context.Background(), opclient.EscalationDecisionPayload{
+				Aspect:    aspect,
+				Decision:  decision,
+				Operator:  cfg.OperatorName,
+				Note:      note,
+				RequestID: requestID,
+			})
+		}
+	}
+	return m
 }
 
 func (m Model) Init() tea.Cmd {

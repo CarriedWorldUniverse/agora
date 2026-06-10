@@ -98,6 +98,8 @@ type Run struct {
 	Raw    json.RawMessage `json:"-"`
 }
 
+type EscalationDecisionPayload = frames.EscalationDecisionPayload
+
 // Event is one asynchronous operator-client event.
 type Event interface{ event() }
 
@@ -210,6 +212,10 @@ func (c *Client) ChatSend(ctx context.Context, content, topic string, replyTo in
 	return c.send(ctx, "chat.send", payload)
 }
 
+func (c *Client) EscalationDecide(ctx context.Context, payload EscalationDecisionPayload) error {
+	return c.sendFrame(ctx, frames.KindEscalationDecision, payload)
+}
+
 func (c *Client) RosterList(ctx context.Context) ([]RosterAspect, error) {
 	var out frames.RosterListResultPayload
 	if err := c.rpc(ctx, "roster.list", map[string]any{}, &out); err != nil {
@@ -280,6 +286,14 @@ func (c *Client) rpc(ctx context.Context, kind string, payload any, dst any) err
 
 func (c *Client) send(ctx context.Context, kind string, payload any) error {
 	env, err := frames.NewRequest(frames.Kind(kind), payload)
+	if err != nil {
+		return err
+	}
+	return c.writeEnvelope(ctx, env)
+}
+
+func (c *Client) sendFrame(ctx context.Context, kind frames.Kind, payload any) error {
+	env, err := frames.New(kind, payload)
 	if err != nil {
 		return err
 	}
