@@ -11,13 +11,29 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// markdownRenderer pairs the glamour render func with a memo cache.
+// Refreshes re-render the whole transcript, so without memoization
+// every arriving message costs O(transcript) glamour parses. The cache
+// is keyed on the coalesced body string — the only render input besides
+// width, which is fixed per renderer (rebuild on resize replaces the
+// whole struct, cache included). render is a func field (not the
+// *glamour.TermRenderer itself) so tests can wrap it with a counter.
+type markdownRenderer struct {
+	render func(string) (string, error)
+	cache  map[string]string
+	// maxCache bounds the memo map: at maxCache entries it resets
+	// (coalescing churn leaves stale keys; a dumb size cap beats an
+	// LRU here). <=0 disables the bound.
+	maxCache int
+}
+
 // newMarkdownRenderer builds the glamour renderer used for agent
 // message bodies. Word wrap is set under the viewport width so the
 // transcript's two-space body indent never pushes lines past the edge.
 // Construction is cheap but not free: the Model rebuilds it once per
 // WindowSizeMsg, never per message. A nil return (construction error)
 // downgrades agent bodies to plain text.
-func newMarkdownRenderer(width int) *glamour.TermRenderer {
+func newMarkdownRenderer(width int) *markdownRenderer {
 	wrap := width - 2
 	if wrap < 10 {
 		wrap = 10
@@ -29,15 +45,23 @@ func newMarkdownRenderer(width int) *glamour.TermRenderer {
 	if err != nil {
 		return nil
 	}
-	return r
+	return &markdownRenderer{
+		render:   r.Render,
+		cache:    make(map[string]string),
+		maxCache: 2 * defaultHistoryDepth,
+	}
 }
 
 // renderMarkdownBody renders an agent body through glamour, trimming
-// the blank-line padding glamour adds so blocks stay compact. Returns
-// ok=false (caller falls back to the plain-text path) on any render
-// error or empty result.
-func renderMarkdownBody(md *glamour.TermRenderer, body string) (string, bool) {
-	out, err := md.Render(body)
+// the blank-line padding glamour adds so blocks stay compact, and
+// memoizes the result. Returns ok=false (caller falls back to the
+// plain-text path) on any render error or empty result; failures are
+// not cached.
+func renderMarkdownBody(md *markdownRenderer, body string) (string, bool) {
+	if out, ok := md.cache[body]; ok {
+		return out, true
+	}
+	out, err := md.render(body)
 	if err != nil {
 		return "", false
 	}
@@ -45,6 +69,13 @@ func renderMarkdownBody(md *glamour.TermRenderer, body string) (string, bool) {
 	if out == "" {
 		return "", false
 	}
+	if md.maxCache > 0 && len(md.cache) >= md.maxCache {
+		md.cache = nil
+	}
+	if md.cache == nil {
+		md.cache = make(map[string]string)
+	}
+	md.cache[body] = out
 	return out, true
 }
 
@@ -140,7 +171,7 @@ func sendStateMarker(b chatBlock) string {
 // non-nil) markdown-renders AGENT bodies only — operator text stays
 // verbatim, and stored block content is never touched: glamour applies
 // strictly at render time so echo reconciliation keeps comparing raw text.
-func renderChatBlock(b chatBlock, width int, showTS bool, md *glamour.TermRenderer) string {
+func renderChatBlock(b chatBlock, width int, showTS bool, md *markdownRenderer) string {
 	headerText := blockHeaderText(b)
 	headerStyleFn := blockHeaderStyle(b)
 
@@ -303,7 +334,7 @@ func coalesceBlocks(blocks []*chatBlock) []*chatBlock {
 // blocks of DIFFERENT speakers (or classes), while consecutive blocks
 // from the same speaker stay tight (single newline — their header
 // rules already separate them visually).
-func renderBlockContent(blocks []*chatBlock, width int, showTS bool, md *glamour.TermRenderer) string {
+func renderBlockContent(blocks []*chatBlock, width int, showTS bool, md *markdownRenderer) string {
 	coalesced := coalesceBlocks(blocks)
 	var sb strings.Builder
 	for i, b := range coalesced {

@@ -693,3 +693,138 @@ func TestOperatorMessagesStayPlain(t *testing.T) {
 		t.Fatalf("operator body was markdown-rendered, want raw text:\n%s", out)
 	}
 }
+
+// --- glamour memoization across content refreshes ---
+
+// countingMarkdownRenderer wraps the real glamour render func with an
+// invocation counter — glamour itself stays real, only the call count
+// is observed.
+func countingMarkdownRenderer(t *testing.T, width int) (*markdownRenderer, *int) {
+	t.Helper()
+	md := newMarkdownRenderer(width)
+	if md == nil {
+		t.Fatalf("newMarkdownRenderer returned nil")
+	}
+	calls := 0
+	real := md.render
+	md.render = func(s string) (string, error) {
+		calls++
+		return real(s)
+	}
+	return md, &calls
+}
+
+// Two refreshes over the same transcript must invoke the underlying
+// glamour renderer once per unique agent body, not once per refresh.
+func TestMarkdownMemo_RefreshRendersOncePerUniqueBody(t *testing.T) {
+	md, calls := countingMarkdownRenderer(t, 80)
+	now := time.Date(2026, 6, 10, 9, 0, 0, 0, time.UTC)
+	blocks := []*chatBlock{
+		mkBlockP(blockAspect, "maren", "alpha **one**", now),
+		mkBlockP(blockYou, "you", "operator text stays plain", now.Add(time.Second)),
+		mkBlockP(blockAspect, "maren", "beta _two_", now.Add(2*time.Second)),
+	}
+	first := renderBlockContent(blocks, 80, false, md)
+	if *calls != 2 {
+		t.Fatalf("first refresh: %d render calls, want 2 (one per unique agent body)", *calls)
+	}
+	second := renderBlockContent(blocks, 80, false, md)
+	if *calls != 2 {
+		t.Fatalf("second refresh re-rendered cached bodies: %d calls, want 2", *calls)
+	}
+	if first != second {
+		t.Fatalf("memoized refresh changed output:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
+// The rendered unit is the COALESCED body: consecutive same-speaker
+// blocks render as one glamour call, and a new arrival that extends the
+// coalesced run produces one fresh render (new key), not a re-render of
+// each source block.
+func TestMarkdownMemo_KeyedOnCoalescedBody(t *testing.T) {
+	md, calls := countingMarkdownRenderer(t, 80)
+	now := time.Date(2026, 6, 10, 9, 0, 0, 0, time.UTC)
+	blocks := []*chatBlock{
+		mkBlockP(blockAspect, "maren", "alpha", now),
+		mkBlockP(blockAspect, "maren", "beta", now.Add(time.Second)),
+	}
+	renderBlockContent(blocks, 80, false, md)
+	if *calls != 1 {
+		t.Fatalf("coalesced pair: %d render calls, want 1", *calls)
+	}
+	// New arrival extends the coalesced run → the coalesced body is a
+	// new cache key → exactly one more render.
+	blocks = append(blocks, mkBlockP(blockAspect, "maren", "gamma", now.Add(2*time.Second)))
+	renderBlockContent(blocks, 80, false, md)
+	if *calls != 2 {
+		t.Fatalf("extended coalesced run: %d render calls, want 2", *calls)
+	}
+}
+
+// Resize rebuilds the renderer (wrap width changed) and clears the memo
+// cache, so the same body renders again at the new width.
+func TestMarkdownMemo_ResizeRebuildsRendererAndClearsCache(t *testing.T) {
+	m := NewModel(Config{Agent: "maren", OperatorName: "operator"})
+	up, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	m = up.(Model)
+	body := strings.Repeat("wrap-sensitive words flow here ", 8)
+	m.appendBlock(mkBlock(blockAspect, "maren", body, time.Now()))
+	m.refreshChatContent(true)
+	if len(m.mdr.cache) != 1 {
+		t.Fatalf("render did not populate memo cache: %d entries, want 1", len(m.mdr.cache))
+	}
+	// Content refresh with an unchanged transcript is a pure cache hit.
+	calls := 0
+	real := m.mdr.render
+	m.mdr.render = func(s string) (string, error) {
+		calls++
+		return real(s)
+	}
+	m.refreshChatContent(false)
+	if calls != 0 {
+		t.Fatalf("refresh after caching hit glamour %d times, want 0", calls)
+	}
+	old := m.mdr
+	oldOut, ok := old.cache[body]
+	if !ok {
+		t.Fatalf("cache not keyed on coalesced body string")
+	}
+	up, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	m = up.(Model)
+	if m.mdr == old {
+		t.Fatalf("resize did not rebuild the markdown renderer")
+	}
+	if calls != 0 {
+		t.Fatalf("old renderer/cache still in the loop after resize: %d calls", calls)
+	}
+	// The fresh cache holds the body again — proof the renderer ran
+	// post-invalidation — and at the new wrap width the output differs.
+	newOut, ok := m.mdr.cache[body]
+	if !ok {
+		t.Fatalf("resize refresh did not re-render and re-cache the body")
+	}
+	if newOut == oldOut {
+		t.Fatalf("post-resize render identical to old width's output; stale cache survived")
+	}
+	if want := 2 * m.cfg.HistoryDepth; m.mdr.maxCache != want {
+		t.Fatalf("maxCache = %d, want 2×HistoryDepth = %d", m.mdr.maxCache, want)
+	}
+}
+
+// The memo map is bounded: once it reaches maxCache entries it resets
+// rather than growing without limit under coalescing churn.
+func TestMarkdownMemo_SizeCapResets(t *testing.T) {
+	md, _ := countingMarkdownRenderer(t, 80)
+	md.maxCache = 4
+	for i := 0; i < 10; i++ {
+		if _, ok := renderMarkdownBody(md, fmt.Sprintf("body number %d", i)); !ok {
+			t.Fatalf("render %d failed", i)
+		}
+		if len(md.cache) > 4 {
+			t.Fatalf("cache grew past cap after %d renders: %d entries", i+1, len(md.cache))
+		}
+	}
+	if len(md.cache) == 0 {
+		t.Fatalf("cache empty after renders; reset should re-admit fresh entries")
+	}
+}

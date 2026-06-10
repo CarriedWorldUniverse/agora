@@ -22,8 +22,11 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/glamour"
 )
+
+// defaultHistoryDepth is the scrollback cap applied when Config leaves
+// HistoryDepth unset. Also sizes the markdown memo-cache bound (2×).
+const defaultHistoryDepth = 1000
 
 type Config struct {
 	AspectID     string
@@ -97,11 +100,12 @@ type Model struct {
 
 	showTimestamps bool
 
-	// mdr renders agent message bodies as markdown (glamour). Built
-	// once per WindowSizeMsg — word wrap is width-dependent — never
-	// per message. nil (pre-first-resize or construction failure)
-	// falls back to plain-text bodies.
-	mdr *glamour.TermRenderer
+	// mdr renders agent message bodies as markdown (glamour) and
+	// memoizes output per coalesced body. Built once per WindowSizeMsg
+	// — word wrap is width-dependent, so the rebuild also invalidates
+	// the memo cache — never per message. nil (pre-first-resize or
+	// construction failure) falls back to plain-text bodies.
+	mdr *markdownRenderer
 
 	slashHint    string
 	sessionStart time.Time
@@ -115,7 +119,7 @@ type Model struct {
 
 func NewModel(cfg Config) Model {
 	if cfg.HistoryDepth <= 0 {
-		cfg.HistoryDepth = 1000
+		cfg.HistoryDepth = defaultHistoryDepth
 	}
 	if cfg.InputHistory <= 0 {
 		cfg.InputHistory = 100
@@ -194,8 +198,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.input.SetWidth(maxInt(0, msg.Width-3))
 		// Glamour wraps at construction-time width: rebuild on resize,
-		// never per message.
+		// never per message. The rebuild carries a fresh memo cache —
+		// width changed, so every cached render is stale.
 		m.mdr = newMarkdownRenderer(msg.Width)
+		if m.mdr != nil {
+			m.mdr.maxCache = 2 * m.cfg.HistoryDepth
+		}
 		chatHeight := m.chatHeight()
 		firstSize := !m.vpReady
 		if firstSize {
