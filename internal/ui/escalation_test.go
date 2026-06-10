@@ -205,8 +205,8 @@ func TestEscalation_SendFailureSurfacesError(t *testing.T) {
 func TestEscalation_CapturesKeysBeforeChatInput(t *testing.T) {
 	cap := &capturedDecision{}
 	m := newModelWithCapture(cap, nil)
-	// Enable the textarea path so a stray key COULD reach chat if not captured.
-	m.textareaEnabled = true
+	// The textarea path is on by default, so a stray key COULD reach
+	// chat if the modal failed to capture it.
 	m, _ = runUpdate(m, EscalationRequestReceived{RequestID: "r5", Aspect: "anvil", Tool: "Bash"})
 	m, _ = runUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
 	for _, b := range m.blocks {

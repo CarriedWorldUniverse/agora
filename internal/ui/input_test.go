@@ -11,7 +11,6 @@ import (
 
 func TestYankLastMessageWritesClipboardAndStatus(t *testing.T) {
 	m := NewModel(Config{Agent: "maren", OperatorName: "operator"})
-	m.textareaEnabled = true
 	m.writeClipboard = func(s string) error {
 		if s != "copy me" {
 			t.Fatalf("clipboard text = %q, want copy me", s)
@@ -60,8 +59,6 @@ func TestYankLastMessageReportsNoMessage(t *testing.T) {
 
 func TestYankKeyDoesNotStealComposerInput(t *testing.T) {
 	m := NewModel(Config{Agent: "maren", OperatorName: "operator"})
-	m.textareaEnabled = true
-	m.input.Focus()
 	m.input.SetValue("he")
 	called := false
 	m.writeClipboard = func(string) error {
@@ -82,8 +79,6 @@ func TestYankKeyDoesNotStealComposerInput(t *testing.T) {
 
 func TestBracketedPasteYDoesNotTriggerYank(t *testing.T) {
 	m := NewModel(Config{Agent: "maren", OperatorName: "operator"})
-	m.textareaEnabled = true
-	m.input.Focus()
 	called := false
 	m.writeClipboard = func(string) error {
 		called = true
@@ -98,6 +93,44 @@ func TestBracketedPasteYDoesNotTriggerYank(t *testing.T) {
 	}
 	if got := updated.input.Value(); got != "y" {
 		t.Fatalf("composer value = %q, want y", got)
+	}
+}
+
+// --- Task 10: input ergonomics ---
+
+// Multiline compose is the default path: no flag, no client required.
+func TestMultilineComposeDefaultOn(t *testing.T) {
+	m := NewModel(Config{Agent: "maren", OperatorName: "operator"})
+	if !m.textareaEnabled {
+		t.Fatalf("textareaEnabled should default to on without any flag")
+	}
+	if !m.input.Focused() {
+		t.Fatalf("compose textarea should be focused by default")
+	}
+	// And it is genuinely multiline: alt+enter inserts a newline and the
+	// compose area grows with the content.
+	m.input.SetValue("line one")
+	m.input.CursorEnd()
+	updated, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	if got := updated.input.LineCount(); got < 2 {
+		t.Fatalf("alt+enter did not insert a newline: LineCount = %d", got)
+	}
+	if got := updated.input.Height(); got != 2 {
+		t.Fatalf("compose area did not grow with content: Height = %d, want 2", got)
+	}
+}
+
+// Up-arrow on an empty compose area recalls the previously sent input.
+func TestUpArrowRecallsPreviousSentInput(t *testing.T) {
+	m := NewModel(Config{Agent: "maren", OperatorName: "operator"})
+	m.input.SetValue("ship NEX-558 when keel's done")
+	updated, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := updated.input.Value(); got != "" {
+		t.Fatalf("compose area not cleared after send: %q", got)
+	}
+	updated, _ = updated.handleKey(tea.KeyMsg{Type: tea.KeyUp})
+	if got := updated.input.Value(); got != "ship NEX-558 when keel's done" {
+		t.Fatalf("up-arrow recall = %q, want the sent input", got)
 	}
 }
 

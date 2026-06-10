@@ -2,11 +2,13 @@ package ui
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/CarriedWorldUniverse/agora/internal/opclient"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 var errSendBoom = errors.New("rpc write failed")
@@ -315,7 +317,9 @@ func TestStatusLineConnectionStates(t *testing.T) {
 	}
 }
 
-func TestRunEventDoesNotDriveWorkingStatus(t *testing.T) {
+// runs.* is dispatch Jobs, never DM turns: a RunEvent must not light
+// the "is working…" presence line (that is observe-driven only).
+func TestRunEventDoesNotLightPresence(t *testing.T) {
 	m := NewModel(Config{Agent: "maren", OperatorName: "operator"})
 	m.width = 80
 	m.applyOpEvent(opclient.ConnState{Connected: true})
@@ -453,6 +457,120 @@ func TestHistoryLoadedFiltersAndSortsOldestFirst(t *testing.T) {
 	}
 	if got := m.blocks[0].body.String(); got != "old" {
 		t.Fatalf("first body = %q, want old", got)
+	}
+}
+
+// --- Task 10: scroll hold + unread indicator + FIFO double-send ---
+
+// newScrolledModel builds a sized model whose transcript overflows the
+// viewport, scrolled to the top (not at bottom).
+func newScrolledModel(t *testing.T) Model {
+	t.Helper()
+	m := NewModel(Config{Agent: "maren", OperatorName: "operator"})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	m = updated.(Model)
+	base := time.Date(2026, 6, 10, 9, 0, 0, 0, time.UTC)
+	for i := 0; i < 40; i++ {
+		speaker, class := "maren", blockAspect
+		if i%2 == 0 {
+			speaker, class = "operator", blockYou
+		}
+		m.appendBlock(mkBlock(class, speaker, fmt.Sprintf("line %d", i), base.Add(time.Duration(i)*time.Minute)))
+	}
+	m.refreshChatContent(true)
+	m.vp.GotoTop()
+	if m.vp.AtBottom() {
+		t.Fatalf("setup: viewport still at bottom; not enough content to scroll")
+	}
+	if m.unreadBelow != 0 {
+		t.Fatalf("setup: unreadBelow = %d, want 0", m.unreadBelow)
+	}
+	return m
+}
+
+// An arriving message while scrolled up must NOT jump the view to the
+// bottom; the unread-below counter increments per arrival instead.
+func TestArrivalHoldsScrollAndIncrementsUnread(t *testing.T) {
+	m := newScrolledModel(t)
+
+	m.applyOpEvent(opclient.MsgEvent{Message: opclient.ChatMessage{
+		ID: 100, From: "maren", Content: "first while away", Topic: "dm:maren",
+	}})
+
+	if got := m.vp.YOffset; got != 0 {
+		t.Fatalf("arrival moved the viewport: YOffset = %d, want 0", got)
+	}
+	if m.vp.AtBottom() {
+		t.Fatalf("arrival jumped the view to the bottom")
+	}
+	if m.unreadBelow != 1 {
+		t.Fatalf("unreadBelow = %d after first arrival, want 1", m.unreadBelow)
+	}
+
+	m.applyOpEvent(opclient.MsgEvent{Message: opclient.ChatMessage{
+		ID: 101, From: "maren", Content: "second while away", Topic: "dm:maren",
+	}})
+
+	if m.unreadBelow != 2 {
+		t.Fatalf("unreadBelow = %d after second arrival, want 2", m.unreadBelow)
+	}
+	if got := m.renderStatus(); !strings.Contains(got, "↓ 2 below") {
+		t.Fatalf("status line missing unread indicator: %q", got)
+	}
+}
+
+// `end` jumps to the bottom and clears the unread counter (so does the
+// status line's advertised Ctrl-E; both route through the same case).
+func TestEndJumpsToBottomAndClearsUnread(t *testing.T) {
+	m := newScrolledModel(t)
+	m.applyOpEvent(opclient.MsgEvent{Message: opclient.ChatMessage{
+		ID: 100, From: "maren", Content: "while away", Topic: "dm:maren",
+	}})
+	if m.unreadBelow != 1 {
+		t.Fatalf("precondition: unreadBelow = %d, want 1", m.unreadBelow)
+	}
+
+	updated, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEnd})
+
+	if !updated.vp.AtBottom() {
+		t.Fatalf("end did not scroll to bottom")
+	}
+	if updated.unreadBelow != 0 {
+		t.Fatalf("unreadBelow = %d after end, want 0", updated.unreadBelow)
+	}
+}
+
+// Sending the same text twice quickly queues two pending blocks; echo
+// reconciliation is FIFO, so the first echo flips the FIRST block only
+// and the second echo flips the second.
+func TestDoubleSendReconcilesFIFO(t *testing.T) {
+	m := NewModel(Config{Agent: "maren", OperatorName: "operator"})
+	m.appendOptimistic("dup")
+	m.appendOptimistic("dup")
+	if len(m.blocks) != 2 || !m.blocks[0].pending || !m.blocks[1].pending {
+		t.Fatalf("want 2 pending blocks, got %d", len(m.blocks))
+	}
+
+	m.applyOpEvent(opclient.MsgEvent{Message: opclient.ChatMessage{
+		ID: 100, From: "operator", Content: "@maren dup", Topic: "dm:maren",
+	}})
+
+	if !m.blocks[0].delivered || m.blocks[0].msgID != 100 {
+		t.Fatalf("first echo did not flip the FIRST pending block: %+v", m.blocks[0])
+	}
+	if m.blocks[1].delivered || !m.blocks[1].pending {
+		t.Fatalf("first echo touched the second pending block")
+	}
+
+	m.applyOpEvent(opclient.MsgEvent{Message: opclient.ChatMessage{
+		ID: 101, From: "operator", Content: "@maren dup", Topic: "dm:maren",
+	}})
+
+	if !m.blocks[1].delivered || m.blocks[1].msgID != 101 {
+		t.Fatalf("second echo did not flip the second pending block: %+v", m.blocks[1])
+	}
+	if len(m.pendingSends) != 0 {
+		t.Fatalf("pendingSends not drained: %d left", len(m.pendingSends))
 	}
 }
 

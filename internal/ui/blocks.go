@@ -223,12 +223,6 @@ func (m *Model) applyOpEvent(ev opclient.Event) tea.Cmd {
 		if m.belongs(ev.Message) && ev.Message.From == m.cfg.Agent {
 			m.clearActivePresence()
 		}
-	case opclient.RunEvent:
-		// runs.* is dispatch Jobs, never DM turns; tracked but it does
-		// not feed the rendered presence state.
-		if ev.Run.Aspect == "" || ev.Run.Aspect == m.cfg.Agent {
-			m.working = runStatusWorking(ev.Run.Status)
-		}
 	case opclient.ObserveTurn:
 		return m.applyObserveTurn(ev)
 	case opclient.EscalationEvent:
@@ -331,15 +325,6 @@ func (m *Model) ensurePresenceTick() tea.Cmd {
 
 func presenceTickCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(time.Time) tea.Msg { return presenceTick{} })
-}
-
-func runStatusWorking(status string) bool {
-	switch strings.ToLower(status) {
-	case "queued", "running", "working", "in_progress", "started":
-		return true
-	default:
-		return false
-	}
 }
 
 func (m *Model) appendChatMessage(msg opclient.ChatMessage) bool {

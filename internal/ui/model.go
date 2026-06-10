@@ -18,11 +18,11 @@ import (
 
 	"github.com/CarriedWorldUniverse/agora/internal/opclient"
 	"github.com/atotto/clipboard"
-	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 )
 
 type Config struct {
@@ -54,7 +54,6 @@ type Model struct {
 	vpReady     bool
 	inboxDepth  int
 	connStatus  string
-	working     bool
 	unreadBelow int
 
 	// now is the model's clock; injectable so tests can pin time.
@@ -88,6 +87,8 @@ type Model struct {
 
 	quitting bool
 
+	// textareaEnabled gates the multiline compose path; on by default,
+	// kept as an opt-out seam for headless/test scenarios.
 	textareaEnabled bool
 	lastSubmitted   string // captured on Enter; used by /retry
 
@@ -134,7 +135,7 @@ func NewModel(cfg Config) Model {
 
 	ta := textarea.New()
 	ta.Prompt = "› "
-	ta.Placeholder = "agora starting…"
+	ta.Placeholder = "message " + cfg.Agent
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
 	ta.KeyMap.InsertNewline = key.NewBinding(
@@ -142,20 +143,14 @@ func NewModel(cfg Config) Model {
 		key.WithHelp("shift+enter", "insert newline"),
 	)
 	ta.SetHeight(1)
-	textareaEnabled := cfg.Client != nil
-	if textareaEnabled {
-		ta.Placeholder = "message " + cfg.Agent
-		ta.Focus()
-	} else {
-		ta.Blur()
-	}
+	ta.Focus()
 
 	m := Model{
 		cfg: cfg, input: ta, historyIdx: -1,
 		connStatus:        "connecting",
 		lastInteractionAt: time.Now(),
 		sessionStart:      time.Now(),
-		textareaEnabled:   textareaEnabled,
+		textareaEnabled:   true,
 		writeClipboard:    clipboard.WriteAll,
 		now:               time.Now,
 		seenIDs:           make(map[int64]struct{}),
