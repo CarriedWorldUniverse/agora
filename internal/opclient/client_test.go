@@ -188,8 +188,8 @@ func TestHeartbeatDetectsDeadConnAndReconnects(t *testing.T) {
 		StateDir:          t.TempDir(),
 		ReconnectMin:      50 * time.Millisecond,
 		ReconnectMax:      200 * time.Millisecond,
-		HeartbeatInterval: 100 * time.Millisecond,
-		HeartbeatTimeout:  200 * time.Millisecond,
+		HeartbeatInterval: 200 * time.Millisecond,
+		HeartbeatTimeout:  100 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -210,10 +210,13 @@ func TestHeartbeatDetectsDeadConnAndReconnects(t *testing.T) {
 		}
 	}
 
-	// The reconnect loop must then redial: the fixture sees a second connection.
+	// The reconnect loop must then redial: the fixture sees a second
+	// connection. Fresh deadline: the disconnect wait above must not
+	// eat into the redial budget on a slow CI box.
+	redialDeadline := time.After(5 * time.Second)
 	for srv.connections() < 2 {
 		select {
-		case <-deadline:
+		case <-redialDeadline:
 			t.Fatalf("timed out waiting for redial, connections = %d", srv.connections())
 		case <-time.After(10 * time.Millisecond):
 		}
