@@ -246,6 +246,14 @@ func (s *Session) retrieve(msg string) []*store.Fact {
 	return seeds
 }
 
+// RetrievePreview exposes retrieval seeding for the control MCP's
+// render_preview (no model call, no RecordRender bookkeeping).
+func (s *Session) RetrievePreview(msg string) []*store.Fact {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.retrieve(msg)
+}
+
 // ---- tools served to the model ----
 
 func (s *Session) toolDefs() []backend.ToolDef {
