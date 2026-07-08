@@ -18,7 +18,8 @@ import (
 type Renderer struct {
 	st       *store.Store
 	epoch    int
-	coreText string // frozen at epoch open
+	coreText string          // frozen at epoch open
+	coreIDs  map[string]bool // frozen at epoch open — dedup set for subgraph
 }
 
 // New opens epoch 1 over the store's current VERIFIED set.
@@ -36,6 +37,10 @@ func (r *Renderer) NewEpoch() error {
 		return err
 	}
 	r.epoch++
+	r.coreIDs = map[string]bool{}
+	for _, f := range core {
+		r.coreIDs[f.ID] = true
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "## Working memory — core (epoch %d)\n", r.epoch)
 	if len(core) == 0 {
@@ -58,12 +63,9 @@ func (r *Renderer) RenderCore() string { return r.coreText }
 // neighbors, deduped against the core (core facts are already in context),
 // plus contradiction notices for anything touching core/pinned facts.
 func (r *Renderer) RenderSubgraph(seeds []*store.Fact) (string, []string) {
-	coreIDs := map[string]bool{}
-	if core, err := r.st.Core(); err == nil {
-		for _, f := range core {
-			coreIDs[f.ID] = true
-		}
-	}
+	// dedup against the FROZEN core set: a fact verified mid-epoch is not in
+	// the frozen core block, so it must still surface via subgraph/recall.
+	coreIDs := r.coreIDs
 	seen := map[string]bool{}
 	var facts []*store.Fact
 	add := func(f *store.Fact) {

@@ -311,7 +311,23 @@ func (s *Store) RecordRender(id string, turn int) error {
 
 func (s *Store) Get(id string) (*Fact, error) {
 	row := s.db.QueryRow(`SELECT id,statement,kind,status,stale,pinned,trust,confidence,entities,parents,session_id,created,last_confirmed,render_turns FROM facts WHERE id=?`, id)
-	return scanFact(row)
+	f, err := scanFact(row)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(`SELECT session_id,turn,start,end FROM provenance WHERE fact_id=?`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sp Span
+		if err := rows.Scan(&sp.SessionID, &sp.Turn, &sp.Start, &sp.End); err != nil {
+			return nil, err
+		}
+		f.Provenance = append(f.Provenance, sp)
+	}
+	return f, rows.Err()
 }
 
 // QueryText: LIKE-based retrieval fallback until the embedder lands.
