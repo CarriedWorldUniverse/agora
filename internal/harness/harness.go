@@ -50,7 +50,13 @@ type TurnRecord struct {
 	N         int    `json:"n"`
 	User      string `json:"user"`
 	Assistant string `json:"assistant"`
-	Time      string `json:"time"`
+	// Injected is the working-memory subgraph block that was inserted before
+	// this turn's user message. It is REPLAYED verbatim in the tail so every
+	// request is byte-identical to the previous request plus a suffix —
+	// prefix-cache stability (spec invariant 4). Churn lives at the END of
+	// the prompt, never in the system block.
+	Injected string `json:"injected,omitempty"`
+	Time     string `json:"time"`
 }
 
 // TurnResult is what the control MCP's prompt() returns (spec §7).
@@ -135,31 +141,39 @@ func (s *Session) Turn(ctx context.Context, userMsg string) (*TurnResult, error)
 	s.mu.Lock()
 	turnN := len(s.transcript) + 1
 
-	// 1. assemble
+	// 1. assemble — cache-friendly layout (invariant 4): stable prefix first
+	// (system + epoch-frozen core), append-only tail next, ALL per-turn churn
+	// (subgraph block) at the END, immediately before the user message.
 	var blocks []string
 	if s.cfg.SystemPrompt != "" {
 		blocks = append(blocks, s.cfg.SystemPrompt)
 	}
 	var renderedIDs []string
 	var notices []string
+	injected := ""
 	if s.cfg.MapEnabled {
-		blocks = append(blocks, s.rend.RenderCore())
+		blocks = append(blocks, s.rend.RenderCore()) // byte-stable within an epoch
 		seeds := s.retrieve(userMsg)
 		sub, ids := s.rend.RenderSubgraph(seeds)
-		blocks = append(blocks, sub)
 		renderedIDs = ids
+		if strings.TrimSpace(sub) != "" {
+			injected = sub
+		}
 		for _, line := range strings.Split(sub, "\n") {
 			if strings.Contains(line, "NOTICE:") {
 				notices = append(notices, strings.TrimPrefix(strings.TrimSpace(line), "- "))
 			}
 		}
 	}
-	// assembly budget: fixed blocks + current message spend first; the tail
-	// gets the remainder, oldest turns dropped first.
-	fixedTok := approxTokens(strings.Join(blocks, "\n\n")) + approxTokens(userMsg)
+	// assembly budget: fixed blocks + churn + current message spend first;
+	// the tail gets the remainder, oldest turns dropped first.
+	fixedTok := approxTokens(strings.Join(blocks, "\n\n")) + approxTokens(injected) + approxTokens(userMsg)
 	msgs := s.tailMessages(s.cfg.AssemblyBudget - fixedTok)
 	s.mu.Unlock()
 
+	if injected != "" {
+		msgs = append(msgs, backend.ProviderMessage{Role: "user", Content: injected})
+	}
 	msgs = append(msgs, backend.ProviderMessage{Role: "user", Content: userMsg})
 
 	// 2. infer, harness-owned tool loop
@@ -202,7 +216,7 @@ func (s *Session) Turn(ctx context.Context, userMsg string) (*TurnResult, error)
 	for _, id := range renderedIDs {
 		s.st.RecordRender(id, turnN)
 	}
-	rec := TurnRecord{N: turnN, User: userMsg, Assistant: finalText, Time: time.Now().UTC().Format(time.RFC3339)}
+	rec := TurnRecord{N: turnN, User: userMsg, Assistant: finalText, Injected: injected, Time: time.Now().UTC().Format(time.RFC3339)}
 	s.transcript = append(s.transcript, rec)
 	s.appendTranscript(rec)
 	s.mu.Unlock()
@@ -541,7 +555,7 @@ func (s *Session) tailMessages(budget int) []backend.ProviderMessage {
 	spend := 0
 	for i := len(s.transcript) - 1; i >= start; i-- {
 		t := s.transcript[i]
-		cost := approxTokens(t.User) + approxTokens(t.Assistant)
+		cost := approxTokens(t.User) + approxTokens(t.Assistant) + approxTokens(t.Injected)
 		if spend+cost > budget {
 			break
 		}
@@ -550,6 +564,9 @@ func (s *Session) tailMessages(budget int) []backend.ProviderMessage {
 	}
 	var msgs []backend.ProviderMessage
 	for _, t := range s.transcript[len(s.transcript)-kept:] {
+		if t.Injected != "" {
+			msgs = append(msgs, backend.ProviderMessage{Role: "user", Content: t.Injected})
+		}
 		msgs = append(msgs, backend.ProviderMessage{Role: "user", Content: t.User})
 		msgs = append(msgs, backend.ProviderMessage{Role: "assistant", Content: t.Assistant})
 	}

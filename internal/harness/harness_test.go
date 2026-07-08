@@ -67,10 +67,18 @@ func TestTurnInjectsMapBlocksAndExtractsAsync(t *testing.T) {
 	if res.Answer != "the answer" {
 		t.Fatalf("answer: %q", res.Answer)
 	}
-	// map blocks injected into the system prompt
+	// cache-friendly layout: core (stable) in the system prompt; the per-turn
+	// subgraph rides at the END of messages, just before the user message
 	sys := fp.reqs[0].AppendSystemPrompt
-	if !strings.Contains(sys, "Working memory — core") || !strings.Contains(sys, "Working memory — relevant now") {
-		t.Fatalf("map blocks missing from system prompt:\n%s", sys)
+	if !strings.Contains(sys, "Working memory — core") {
+		t.Fatalf("core block missing from system prompt:\n%s", sys)
+	}
+	if strings.Contains(sys, "Working memory — relevant now") {
+		t.Fatal("subgraph churn must NOT be in the system prompt (breaks prefix cache)")
+	}
+	m := fp.reqs[0].Messages
+	if len(m) < 2 || !strings.Contains(m[len(m)-2].Content, "Working memory — relevant now") {
+		t.Fatalf("subgraph block must precede the user message at the prompt end")
 	}
 	// tools offered
 	if len(fp.reqs[0].Tools) != 2 {
