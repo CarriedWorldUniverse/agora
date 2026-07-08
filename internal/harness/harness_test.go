@@ -196,3 +196,36 @@ func TestDedupAndOperatorCorrection(t *testing.T) {
 		t.Fatalf("equal-trust contradiction must keep both flagged (got %d live)", live)
 	}
 }
+
+func TestSourceAttributionTrust(t *testing.T) {
+	fp := &fakeProvider{script: []backend.ProviderResult{{FinalText: "a"}, {FinalText: "b"}, {FinalText: "c"}}}
+	prop := &fakeProposer{}
+	s, st := newRig(t, fp, prop, true)
+
+	// user-sourced AND grounded in user text => OPERATOR_STATED, enters VERIFIED
+	prop.out = []extractor.FactProposal{{Statement: "the render seat moves to ember-node", Kind: "OBSERVED", Source: "user", Entities: []string{"ember-node"}}}
+	s.Turn(context.Background(), "decision: the render seat moves to ember-node today")
+	ids := s.WaitExtraction()
+	f, _ := st.Get(ids[0])
+	if f.Trust != store.TrustOperatorStated || f.Status != store.StatusVerified {
+		t.Fatalf("grounded user fact: want OPERATOR_STATED/VERIFIED, got %s/%s", f.Trust, f.Status)
+	}
+
+	// extractor CLAIMS user but statement is not grounded in user words => stays model trust
+	prop.out = []extractor.FactProposal{{Statement: "the belief field diffusion runs on gpu shaders nightly", Kind: "OBSERVED", Source: "user", Entities: []string{"belief-field"}}}
+	s.Turn(context.Background(), "ok sounds good, carry on")
+	ids = s.WaitExtraction()
+	f, _ = st.Get(ids[0])
+	if f.Trust != store.TrustModelObserved || f.Status != store.StatusProposed {
+		t.Fatalf("ungrounded user-claimed fact: want MODEL_OBSERVED/PROPOSED, got %s/%s", f.Trust, f.Status)
+	}
+
+	// assistant-sourced => model trust regardless of overlap
+	prop.out = []extractor.FactProposal{{Statement: "the build is green after the fix", Kind: "OBSERVED", Source: "assistant", Entities: []string{"build"}}}
+	s.Turn(context.Background(), "the build is green after the fix you said?")
+	ids = s.WaitExtraction()
+	f, _ = st.Get(ids[0])
+	if f.Trust != store.TrustModelObserved {
+		t.Fatalf("assistant fact: want MODEL_OBSERVED, got %s", f.Trust)
+	}
+}

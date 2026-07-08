@@ -1,0 +1,70 @@
+{
+ "id": "multihop-10-overflow",
+ "version": 1,
+ "pressure_tier": "overflow",
+ "turns": [
+  {
+   "message": "how's the mesh pipeline looking?",
+   "pad_to": 18000
+  },
+  {
+   "message": "any news on the water sim?",
+   "pad_to": 18000
+  },
+  {
+   "message": "decision: the belief field write pass moves to the compute queue called aurora-queue.",
+   "pad_to": 18000
+  },
+  {
+   "message": "what's the status of the belief field pass?",
+   "pad_to": 18000
+  },
+  {
+   "message": "did the nightly render finish?",
+   "pad_to": 18000
+  },
+  {
+   "message": "how are the npc brains behaving?",
+   "pad_to": 18000
+  },
+  {
+   "message": "anything odd in the chunk streamer?",
+   "pad_to": 18000
+  },
+  {
+   "message": "how's the economy readout?",
+   "pad_to": 18000
+  },
+  {
+   "message": "did the settlement gen run clean?",
+   "pad_to": 18000
+  },
+  {
+   "message": "any drift in the CA kernel?",
+   "pad_to": 18000
+  },
+  {
+   "message": "how's the road network pass?",
+   "pad_to": 18000
+  },
+  {
+   "message": "what about the biome blending?",
+   "pad_to": 18000
+  },
+  {
+   "message": "another decision: everything on aurora-queue gets profiled by the tool called glimmer.",
+   "pad_to": 18000
+  },
+  {
+   "message": "how did the profiling session go?",
+   "pad_to": 18000
+  },
+  {
+   "message": "so which profiler ends up covering the belief field write pass? think it through.",
+   "probe": {
+    "type": "contains",
+    "want": "glimmer"
+   }
+  }
+ ]
+}

@@ -1,0 +1,39 @@
+{
+ "id": "correction-fits",
+ "version": 1,
+ "pressure_tier": "fits-in-window",
+ "turns": [
+  {
+   "message": "note: the bench results database lives in sqlite."
+  },
+  {
+   "message": "how's the extractor precision coming along?"
+  },
+  {
+   "message": "correction on earlier - the bench results database moves to postgres, not sqlite."
+  },
+  {
+   "message": "unrelated: any news on the water sim?"
+  },
+  {
+   "message": "where does the bench results database live?",
+   "probe": {
+    "type": "contains",
+    "want": "postgres"
+   }
+  },
+  {
+   "message": "and just to be sure it is not the old one",
+   "probe": {
+    "type": "not_contains",
+    "want": "sqlite is the"
+   }
+  },
+  {
+   "message": "final check",
+   "probe": {
+    "type": "no_live_contradiction"
+   }
+  }
+ ]
+}

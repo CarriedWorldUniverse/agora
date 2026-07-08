@@ -1,0 +1,56 @@
+{
+ "id": "multihop-10-fits-in-window",
+ "version": 1,
+ "pressure_tier": "fits-in-window",
+ "turns": [
+  {
+   "message": "how's the mesh pipeline looking?"
+  },
+  {
+   "message": "any news on the water sim?"
+  },
+  {
+   "message": "decision: the belief field write pass moves to the compute queue called aurora-queue."
+  },
+  {
+   "message": "what's the status of the belief field pass?"
+  },
+  {
+   "message": "did the nightly render finish?"
+  },
+  {
+   "message": "how are the npc brains behaving?"
+  },
+  {
+   "message": "anything odd in the chunk streamer?"
+  },
+  {
+   "message": "how's the economy readout?"
+  },
+  {
+   "message": "did the settlement gen run clean?"
+  },
+  {
+   "message": "any drift in the CA kernel?"
+  },
+  {
+   "message": "how's the road network pass?"
+  },
+  {
+   "message": "what about the biome blending?"
+  },
+  {
+   "message": "another decision: everything on aurora-queue gets profiled by the tool called glimmer."
+  },
+  {
+   "message": "how did the profiling session go?"
+  },
+  {
+   "message": "so which profiler ends up covering the belief field write pass? think it through.",
+   "probe": {
+    "type": "contains",
+    "want": "glimmer"
+   }
+  }
+ ]
+}

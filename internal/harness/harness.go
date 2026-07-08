@@ -348,6 +348,13 @@ func (s *Session) extractTurn(turnN int) {
 		if kind == store.KindDerived {
 			trust = store.TrustModelDerived
 		}
+		// source attribution: the extractor PROPOSES source=user, but model
+		// say-so must not mint VERIFIED facts (the keel lesson). Grant
+		// OPERATOR_STATED only when the statement is deterministically
+		// grounded in the user's own words.
+		if p.Source == "user" && kind != store.KindDerived && groundedInText(p.Statement, cur.User) {
+			trust = store.TrustOperatorStated
+		}
 		f := store.Fact{
 			Statement:  p.Statement,
 			Kind:       kind,
@@ -387,6 +394,24 @@ func (s *Session) extractTurn(turnN int) {
 	s.mu.Lock()
 	s.lastIDs = ids
 	s.mu.Unlock()
+}
+
+// groundedInText: at least 60% of the statement's content words appear in
+// the candidate source text. Cheap, deterministic, and biased conservative —
+// a false negative just leaves the fact at model trust/PROPOSED.
+func groundedInText(statement, text string) bool {
+	stmt := tokset(statement)
+	src := tokset(text)
+	if len(stmt) == 0 {
+		return false
+	}
+	hit := 0
+	for w := range stmt {
+		if src[w] {
+			hit++
+		}
+	}
+	return float64(hit)/float64(len(stmt)) >= 0.6
 }
 
 func tokset(s string) map[string]bool {

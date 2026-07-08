@@ -22,7 +22,8 @@ import (
 // and status starts at PROPOSED regardless of Confidence.
 type FactProposal struct {
 	Statement  string   `json:"statement"`
-	Kind       string   `json:"kind"` // OBSERVED | DERIVED | PREFERENCE | CONSTRAINT
+	Kind       string   `json:"kind"`   // OBSERVED | DERIVED | PREFERENCE | CONSTRAINT
+	Source     string   `json:"source"` // "user" | "assistant" — who asserted it (proposed; caller must ground-check)
 	Entities   []string `json:"entities"`
 	Confidence float64  `json:"confidence"`
 }
@@ -82,11 +83,16 @@ func (e *Extractor) Propose(current Turn, context []Turn, glossary map[string]st
 		return nil, fmt.Errorf("extractor emitted invalid JSON despite grammar: %w", err)
 	}
 
-	// pass 2: kind classification, one dedicated thinking call per fact
+	// pass 2: kind + source classification, one dedicated thinking call per fact
 	for i := range facts {
-		if k, err := e.classifyKind(facts[i].Statement, current); err == nil && k != "" {
-			facts[i].Kind = k
-		} // on error: keep pass-1 kind; classification is best-effort
+		if k, src, err := e.classifyKindSource(facts[i].Statement, current); err == nil {
+			if k != "" {
+				facts[i].Kind = k
+			}
+			if src != "" {
+				facts[i].Source = src
+			}
+		} // on error: keep pass-1 values; classification is best-effort
 	}
 	return facts, nil
 }
@@ -102,8 +108,9 @@ func (e *Extractor) Close() {
 
 const factGrammar = `
 root      ::= "[" ws (fact (ws "," ws fact)*)? ws "]"
-fact      ::= "{" ws "\"statement\"" ws ":" ws string ws "," ws "\"kind\"" ws ":" ws kind ws "," ws "\"entities\"" ws ":" ws entities ws "," ws "\"confidence\"" ws ":" ws number ws "}"
+fact      ::= "{" ws "\"statement\"" ws ":" ws string ws "," ws "\"kind\"" ws ":" ws kind ws "," ws "\"source\"" ws ":" ws source ws "," ws "\"entities\"" ws ":" ws entities ws "," ws "\"confidence\"" ws ":" ws number ws "}"
 kind      ::= "\"OBSERVED\"" | "\"DERIVED\"" | "\"PREFERENCE\"" | "\"CONSTRAINT\""
+source    ::= "\"user\"" | "\"assistant\""
 entities  ::= "[" ws (string (ws "," ws string)*)? ws "]"
 string    ::= "\"" ([^"\\] | "\\" .)* "\""
 number    ::= "0" ("." [0-9]+)? | "1" ("." "0"+)?
@@ -111,7 +118,11 @@ ws        ::= [ \t\n]*
 `
 
 // extraction system prompt v3 — best on the golden set at 1.7B (P=79.3%).
-const extractSystemPrompt = `You extract durable facts from conversation turns for a working-memory store. Output ONLY a JSON array of fact objects: {"statement","kind","entities","confidence"}.
+const extractSystemPrompt = `You extract durable facts from conversation turns for a working-memory store. Output ONLY a JSON array of fact objects: {"statement","kind","source","entities","confidence"}.
+
+SOURCE — who ASSERTED the fact:
+- "user": the fact's substance was stated by the user (decisions, corrections, orders, reports). If the assistant merely restates or confirms what the user said, the source is still "user".
+- "assistant": the fact's substance was introduced by the assistant (its own observations, conclusions, plans).
 
 WHAT COUNTS AS ONE FACT:
 - One real-world fact = ONE entry. Merge clauses about the same thing into a single complete statement. NEVER split one fact across two entries.
@@ -130,9 +141,12 @@ Rules:
 - entities: kebab-case slugs. If a KNOWN ENTITIES slug applies, use it VERBATIM. Never invent spaced or capitalized names.
 - Do not re-extract facts from PREVIOUS TURNS; they are context for pronoun resolution only.`
 
-// kind classifier prompt v2 — decision tree; run with thinking ENABLED and no
-// grammar (a grammar from token 1 suppresses Qwen3 thinking — spike 3 finding).
-const kindSystemPrompt = `Classify ONE extracted fact into exactly one kind. Think briefly, then answer with the single word.
+// kind+source classifier prompt v3 — decision tree; run with thinking ENABLED
+// and no grammar (a grammar from token 1 suppresses Qwen3 thinking — spike 3).
+// v3 adds SOURCE judgment: the 1.7B extractor attributes source by whose WORDS
+// the statement echoes (44% on golden); assertion-provenance is a judgment call
+// that belongs in this 4B pass.
+const kindSystemPrompt = `Classify ONE extracted fact. Think briefly, then answer with exactly two words: KIND SOURCE.
 
 Decide with two questions:
 
@@ -145,7 +159,13 @@ Q2 — Was it REASONED OUT in this turn, or directly stated?
   Someone concluded/diagnosed/planned it in this turn ("so the cause is...", "that means...", "therefore I'll...") => DERIVED
   Directly stated as fact, event, state, or past decision => OBSERVED
 
-The operator saying what THEY want done = PREFERENCE even if phrased as "always/never". A rule the SYSTEM must obey = CONSTRAINT regardless of who said it.`
+The operator saying what THEY want done = PREFERENCE even if phrased as "always/never". A rule the SYSTEM must obey = CONSTRAINT regardless of who said it.
+
+Then decide SOURCE — who INTRODUCED the fact's substance, regardless of whose words the statement echoes:
+  The user gave the decision/order/correction/report (even if the assistant restated or confirmed it) => user
+  The assistant introduced it (its own observation, diagnosis, plan) => assistant
+
+Final answer format: KIND SOURCE (e.g. "CONSTRAINT user" or "DERIVED assistant").`
 
 func buildExtractionPrompt(current Turn, context []Turn, glossary map[string]string) string {
 	var b strings.Builder
@@ -174,27 +194,38 @@ func buildExtractionPrompt(current Turn, context []Turn, glossary map[string]str
 	return b.String()
 }
 
-func (e *Extractor) classifyKind(statement string, turn Turn) (string, error) {
+func (e *Extractor) classifyKindSource(statement string, turn Turn) (string, string, error) {
 	prompt := "<|im_start|>system\n" + kindSystemPrompt + "<|im_end|>\n<|im_start|>user\n" +
 		"TURN IT CAME FROM:\n[user]: " + turn.User + "\n[assistant]: " + turn.Assistant +
 		"\n\nFACT: " + statement + "\n\nKind?<|im_end|>\n<|im_start|>assistant\n"
 	ctx, err := e.kind.NewContext(2048, e.threads)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer ctx.Free()
 	out, _, err := ctx.Generate(prompt, "", 512)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	verdict := out
 	if i := strings.LastIndex(out, "</think>"); i >= 0 {
 		verdict = out[i+len("</think>"):]
 	}
+	kind, source := "", ""
 	for _, k := range []string{"CONSTRAINT", "PREFERENCE", "DERIVED", "OBSERVED"} {
 		if strings.Contains(verdict, k) {
-			return k, nil
+			kind = k
+			break
 		}
 	}
-	return "", fmt.Errorf("no kind in verdict")
+	lower := strings.ToLower(verdict)
+	if strings.Contains(lower, "user") {
+		source = "user"
+	} else if strings.Contains(lower, "assistant") {
+		source = "assistant"
+	}
+	if kind == "" && source == "" {
+		return "", "", fmt.Errorf("no verdict")
+	}
+	return kind, source, nil
 }

@@ -1,0 +1,23 @@
+{
+ "id": "rederive-fits",
+ "version": 1,
+ "pressure_tier": "fits-in-window",
+ "turns": [
+  {
+   "message": "the waterfall stutters whenever new chunks load, and the stutter scales with stream distance. what's your diagnosis?"
+  },
+  {
+   "message": "agreed, that's the cause. remember it."
+  },
+  {
+   "message": "how's the settlement generator?"
+  },
+  {
+   "message": "quick reminder - what did we conclude was causing the waterfall stutter?",
+   "probe": {
+    "type": "contains",
+    "want": "chunk"
+   }
+  }
+ ]
+}
