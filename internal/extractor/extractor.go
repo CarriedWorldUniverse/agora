@@ -62,7 +62,12 @@ func New(cfg Config) (*Extractor, error) {
 			return nil, fmt.Errorf("kind model: %w", err)
 		}
 	}
-	return &Extractor{extract: em, kind: km, threads: cfg.Threads}, nil
+	ex := &Extractor{extract: em, kind: km, threads: cfg.Threads}
+	// warmup: the first real extraction after load intermittently produced
+	// nothing (a cold-model first-call effect — cost turn 1's facts in the
+	// first native-driving session). A throwaway pass settles both models.
+	_, _ = ex.Propose(Turn{User: "warmup: the cache size is 64.", Assistant: "Noted."}, nil, nil)
+	return ex, nil
 }
 
 // Propose extracts durable facts from the current turn. context carries the

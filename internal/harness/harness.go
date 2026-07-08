@@ -86,6 +86,13 @@ type Session struct {
 	pending    int      // extractions enqueued but not yet completed
 }
 
+// memoryFraming tells the model that working memory is automatic. Prepended to
+// the assembled prompt on map-enabled turns, ahead of the (stable) core block.
+const memoryFraming = `## Working memory (automatic)
+Durable facts from this conversation are captured for you automatically in the background — you never save, persist, or write anything yourself, and you have no tool to do so. Facts already known appear under "Working memory" below; treat them as established context. Just converse naturally: when the user tells you something, respond to its substance — do not acknowledge it as "saved" or apologize for being unable to save it. Use the ` + "`recall`" + ` tool ONLY when you need older context that is not visible in the prompt, and ` + "`inspect`" + ` only to check a fact's evidence. Never call them just to verify that something was stored.`
+
+// toolDescription for recall reflects the automatic-memory framing.
+
 type discardSink struct{}
 
 func (discardSink) Emit(backend.Event) {}
@@ -152,6 +159,12 @@ func (s *Session) Turn(ctx context.Context, userMsg string) (*TurnResult, error)
 	var notices []string
 	injected := ""
 	if s.cfg.MapEnabled {
+		// memory framing: the model must treat working memory as AUTOMATIC and
+		// invisible. Without this it reads recall/inspect as "the only memory
+		// tools I have", fixates on being unable to "save" facts, and burns
+		// turns apologizing (found by native driving 2026-07-08). It should just
+		// converse; the harness persists facts in the background.
+		blocks = append(blocks, memoryFraming)
 		blocks = append(blocks, s.rend.RenderCore()) // byte-stable within an epoch
 		seeds := s.retrieve(userMsg)
 		sub, ids := s.rend.RenderSubgraph(seeds)
@@ -286,12 +299,12 @@ func (s *Session) toolDefs() []backend.ToolDef {
 	return []backend.ToolDef{
 		{
 			Name:        "recall",
-			Description: "Search the session's working memory for established facts. Use when the answer depends on something decided or observed earlier that is not in the visible context.",
+			Description: "Retrieve OLDER facts from earlier in this conversation that are not shown in the current prompt. Only needed when answering requires context beyond what is visible. Facts are stored automatically; this only reads them.",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"what to search for"}},"required":["query"]}`),
 		},
 		{
 			Name:        "inspect",
-			Description: "Audit one working-memory fact back to its transcript evidence by fact id.",
+			Description: "Show the original transcript evidence behind one fact id (for auditing why a fact is believed). Rarely needed.",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"fact_id":{"type":"string"}},"required":["fact_id"]}`),
 		},
 	}
