@@ -1,0 +1,200 @@
+// Package extractor implements the ctxmap fact extractor: a small in-process
+// CPU model (llama.cpp via cgo) that distills durable facts from turn deltas.
+//
+// This is the P1 seam from the ctxmap spec: the secret it hides is which
+// small model + prompt does extraction. The winning config (spike 3, 2026-07-07,
+// benched on the frozen extraction-golden scorer) is a two-model hybrid:
+// Qwen3-1.7B for extraction (P=79.3%) + Qwen3-4B for kind classification
+// (thinking enabled, decision-tree prompt; kind acc 74%).
+package extractor
+
+import (
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/CarriedWorldUniverse/agora/internal/extractor/llama"
+)
+
+// FactProposal is what the extractor emits. It is NOT a stored fact:
+// provenance is attached by the caller (which knows the transcript span),
+// and status starts at PROPOSED regardless of Confidence.
+type FactProposal struct {
+	Statement  string   `json:"statement"`
+	Kind       string   `json:"kind"` // OBSERVED | DERIVED | PREFERENCE | CONSTRAINT
+	Entities   []string `json:"entities"`
+	Confidence float64  `json:"confidence"`
+}
+
+// Turn is one user+assistant exchange, extractor-visible text only
+// (dialogue + model-authored text; tool results are excluded by spec v0).
+type Turn struct {
+	User      string
+	Assistant string
+}
+
+type Config struct {
+	ExtractModelPath string // Qwen3-1.7B-Q8 (default extraction model)
+	KindModelPath    string // Qwen3-4B-Q8; empty = reuse extraction model
+	Threads          int
+}
+
+type Extractor struct {
+	extract *llama.Model
+	kind    *llama.Model
+	threads int
+}
+
+func New(cfg Config) (*Extractor, error) {
+	if cfg.Threads == 0 {
+		cfg.Threads = 8
+	}
+	em, err := llama.LoadModel(cfg.ExtractModelPath)
+	if err != nil {
+		return nil, fmt.Errorf("extract model: %w", err)
+	}
+	km := em
+	if cfg.KindModelPath != "" && cfg.KindModelPath != cfg.ExtractModelPath {
+		km, err = llama.LoadModel(cfg.KindModelPath)
+		if err != nil {
+			return nil, fmt.Errorf("kind model: %w", err)
+		}
+	}
+	return &Extractor{extract: em, kind: km, threads: cfg.Threads}, nil
+}
+
+// Propose extracts durable facts from the current turn. context carries the
+// previous K turns (K=2 per spec) and glossary the store's known entity slugs.
+func (e *Extractor) Propose(current Turn, context []Turn, glossary map[string]string) ([]FactProposal, error) {
+	ctx, err := e.extract.NewContext(4096, e.threads)
+	if err != nil {
+		return nil, err
+	}
+	defer ctx.Free()
+
+	out, _, err := ctx.Generate(buildExtractionPrompt(current, context, glossary), factGrammar, 768)
+	if err != nil {
+		return nil, err
+	}
+	var facts []FactProposal
+	if err := json.Unmarshal([]byte(out), &facts); err != nil {
+		return nil, fmt.Errorf("extractor emitted invalid JSON despite grammar: %w", err)
+	}
+
+	// pass 2: kind classification, one dedicated thinking call per fact
+	for i := range facts {
+		if k, err := e.classifyKind(facts[i].Statement, current); err == nil && k != "" {
+			facts[i].Kind = k
+		} // on error: keep pass-1 kind; classification is best-effort
+	}
+	return facts, nil
+}
+
+func (e *Extractor) Close() {
+	if e.kind != e.extract {
+		e.kind.Free()
+	}
+	e.extract.Free()
+}
+
+// ---- prompts and grammars (frozen from spike 3; hash-fingerprinted by bench) ----
+
+const factGrammar = `
+root      ::= "[" ws (fact (ws "," ws fact)*)? ws "]"
+fact      ::= "{" ws "\"statement\"" ws ":" ws string ws "," ws "\"kind\"" ws ":" ws kind ws "," ws "\"entities\"" ws ":" ws entities ws "," ws "\"confidence\"" ws ":" ws number ws "}"
+kind      ::= "\"OBSERVED\"" | "\"DERIVED\"" | "\"PREFERENCE\"" | "\"CONSTRAINT\""
+entities  ::= "[" ws (string (ws "," ws string)*)? ws "]"
+string    ::= "\"" ([^"\\] | "\\" .)* "\""
+number    ::= "0" ("." [0-9]+)? | "1" ("." "0"+)?
+ws        ::= [ \t\n]*
+`
+
+// extraction system prompt v3 — best on the golden set at 1.7B (P=79.3%).
+const extractSystemPrompt = `You extract durable facts from conversation turns for a working-memory store. Output ONLY a JSON array of fact objects: {"statement","kind","entities","confidence"}.
+
+WHAT COUNTS AS ONE FACT:
+- One real-world fact = ONE entry. Merge clauses about the same thing into a single complete statement. NEVER split one fact across two entries.
+- When the assistant merely restates, confirms, or acknowledges what the user said, that is the SAME fact — extract it once, not twice.
+- General knowledge explanations (how something works in general) are NOT durable session facts. A turn that is question + textbook answer => [].
+- Transient chit-chat, greetings, scheduling small-talk => [].
+
+KIND rubric — the DEFAULT is OBSERVED:
+- OBSERVED: state, events, decisions, corrections, descriptions. When unsure, use OBSERVED.
+- CONSTRAINT: ONLY a standing rule about how things MUST or MUST NEVER be done, phrased as law ("must never allocate", "no structure steeper than 30 degrees", "nothing below q8"). A decision or state is NOT a constraint.
+- PREFERENCE: ONLY how the operator personally likes things done ("I prefer", "from now on do X", style/format/habit).
+- DERIVED: ONLY a new conclusion or diagnosis reasoned out in this turn ("so the cause is X", "therefore I'll do Y"), not something directly stated.
+
+Rules:
+- statement: one short self-contained declarative sentence; resolve all pronouns using context.
+- entities: kebab-case slugs. If a KNOWN ENTITIES slug applies, use it VERBATIM. Never invent spaced or capitalized names.
+- Do not re-extract facts from PREVIOUS TURNS; they are context for pronoun resolution only.`
+
+// kind classifier prompt v2 — decision tree; run with thinking ENABLED and no
+// grammar (a grammar from token 1 suppresses Qwen3 thinking — spike 3 finding).
+const kindSystemPrompt = `Classify ONE extracted fact into exactly one kind. Think briefly, then answer with the single word.
+
+Decide with two questions:
+
+Q1 — Is it about the FUTURE (a standing rule for how things should be done from now on)?
+  YES, and it is the operator's wish about workflow, style, format, or habits (how THEY like work done: "squash before pushing", "reports as tables", "run jobs overnight") => PREFERENCE
+  YES, and it is a technical invariant of the SYSTEM (what the code/system must or must never do: "never allocate mid-tick", "max 30 degree slopes", "minimum q8") => CONSTRAINT
+  NO => Q2
+
+Q2 — Was it REASONED OUT in this turn, or directly stated?
+  Someone concluded/diagnosed/planned it in this turn ("so the cause is...", "that means...", "therefore I'll...") => DERIVED
+  Directly stated as fact, event, state, or past decision => OBSERVED
+
+The operator saying what THEY want done = PREFERENCE even if phrased as "always/never". A rule the SYSTEM must obey = CONSTRAINT regardless of who said it.`
+
+func buildExtractionPrompt(current Turn, context []Turn, glossary map[string]string) string {
+	var b strings.Builder
+	b.WriteString("<|im_start|>system\n" + extractSystemPrompt + "<|im_end|>\n<|im_start|>user\n")
+	if len(glossary) > 0 {
+		b.WriteString("KNOWN ENTITIES:\n")
+		keys := make([]string, 0, len(glossary))
+		for k := range glossary {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Fprintf(&b, "- %s: %s\n", k, glossary[k])
+		}
+		b.WriteString("\n")
+	}
+	if len(context) > 0 {
+		b.WriteString("PREVIOUS TURNS (context only, do not re-extract):\n")
+		for _, t := range context {
+			fmt.Fprintf(&b, "[user]: %s\n[assistant]: %s\n", t.User, t.Assistant)
+		}
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "CURRENT TURN (extract from this):\n[user]: %s\n[assistant]: %s<|im_end|>\n", current.User, current.Assistant)
+	b.WriteString("<|im_start|>assistant\n<think>\n\n</think>\n\n")
+	return b.String()
+}
+
+func (e *Extractor) classifyKind(statement string, turn Turn) (string, error) {
+	prompt := "<|im_start|>system\n" + kindSystemPrompt + "<|im_end|>\n<|im_start|>user\n" +
+		"TURN IT CAME FROM:\n[user]: " + turn.User + "\n[assistant]: " + turn.Assistant +
+		"\n\nFACT: " + statement + "\n\nKind?<|im_end|>\n<|im_start|>assistant\n"
+	ctx, err := e.kind.NewContext(2048, e.threads)
+	if err != nil {
+		return "", err
+	}
+	defer ctx.Free()
+	out, _, err := ctx.Generate(prompt, "", 512)
+	if err != nil {
+		return "", err
+	}
+	verdict := out
+	if i := strings.LastIndex(out, "</think>"); i >= 0 {
+		verdict = out[i+len("</think>"):]
+	}
+	for _, k := range []string{"CONSTRAINT", "PREFERENCE", "DERIVED", "OBSERVED"} {
+		if strings.Contains(verdict, k) {
+			return k, nil
+		}
+	}
+	return "", fmt.Errorf("no kind in verdict")
+}
