@@ -11,6 +11,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/coder/websocket v1.8.14
 	github.com/mark3labs/mcp-go v0.54.1
+	github.com/mattn/go-sqlite3 v1.14.47
 	github.com/openai/openai-go v1.12.0
 )
 
