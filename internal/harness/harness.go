@@ -327,10 +327,15 @@ func (s *Session) extractTurn(turnN int) {
 		return
 	}
 	cur := s.transcript[turnN-1]
+	// Defensive cap: the extractor sees dialogue, not bulk payloads. Oversized
+	// turn text (pasted logs, padded bench turns) is head+tail truncated so the
+	// extraction prompt always fits the extractor's context.
+	cur.User = capText(cur.User, 4000)
+	cur.Assistant = capText(cur.Assistant, 4000)
 	var ctxTurns []extractor.Turn
 	for i := turnN - 1 - s.cfg.ContextTurns; i < turnN-1; i++ {
 		if i >= 0 {
-			ctxTurns = append(ctxTurns, extractor.Turn{User: s.transcript[i].User, Assistant: s.transcript[i].Assistant})
+			ctxTurns = append(ctxTurns, extractor.Turn{User: capText(s.transcript[i].User, 1200), Assistant: capText(s.transcript[i].Assistant, 1200)})
 		}
 	}
 	glossary := s.glossary()
@@ -394,6 +399,16 @@ func (s *Session) extractTurn(turnN int) {
 	s.mu.Lock()
 	s.lastIDs = ids
 	s.mu.Unlock()
+}
+
+// capText keeps the head and tail of oversized text (facts cluster at the
+// edges of pasted-payload turns: the human sentence before, the ask after).
+func capText(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	half := max / 2
+	return s[:half] + "\n[…truncated…]\n" + s[len(s)-half:]
 }
 
 // groundedInText: at least 60% of the statement's content words appear in

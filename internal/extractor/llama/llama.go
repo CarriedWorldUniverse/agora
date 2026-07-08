@@ -38,8 +38,9 @@ type Model struct {
 }
 
 type Context struct {
-	ctx *C.struct_llama_context
-	m   *Model
+	ctx  *C.struct_llama_context
+	m    *Model
+	nCtx int
 }
 
 func LoadModel(path string) (*Model, error) {
@@ -58,7 +59,7 @@ func (m *Model) NewContext(nCtx, nThreads int) (*Context, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("failed to create context")
 	}
-	return &Context{ctx: ctx, m: m}, nil
+	return &Context{ctx: ctx, m: m, nCtx: nCtx}, nil
 }
 
 func (m *Model) tokenize(text string, addBOS bool) ([]C.llama_token, error) {
@@ -110,10 +111,22 @@ func (c *Context) Generate(prompt string, grammar string, maxTokens int) (string
 	C.llama_sampler_chain_add(chain, C.llama_sampler_init_greedy())
 	defer C.llama_sampler_free(chain)
 
-	// prefill
-	batch := C.llama_batch_get_one(&toks[0], C.int32_t(len(toks)))
-	if C.llama_decode(c.ctx, batch) != 0 {
-		return "", 0, fmt.Errorf("decode failed on prefill")
+	// prefill in n_batch-sized chunks: a single oversized llama_decode call
+	// trips GGML_ASSERT(n_tokens_all <= n_batch) and SIGABRTs the process
+	// (found by the overflow-tier bench workload).
+	const chunk = 2048 // llama_context_default_params n_batch
+	if len(toks) > c.nCtx-8 {
+		return "", 0, fmt.Errorf("prompt (%d tokens) exceeds context %d", len(toks), c.nCtx)
+	}
+	for off := 0; off < len(toks); off += chunk {
+		end := off + chunk
+		if end > len(toks) {
+			end = len(toks)
+		}
+		batch := C.llama_batch_get_one(&toks[off], C.int32_t(end-off))
+		if C.llama_decode(c.ctx, batch) != 0 {
+			return "", 0, fmt.Errorf("decode failed on prefill chunk at %d", off)
+		}
 	}
 
 	var out strings.Builder
