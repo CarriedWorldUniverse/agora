@@ -16,6 +16,7 @@ import (
 
 	"github.com/CarriedWorldUniverse/agora/internal/backend/openai"
 	"github.com/CarriedWorldUniverse/agora/internal/bench"
+	"github.com/CarriedWorldUniverse/agora/internal/embed"
 	"github.com/CarriedWorldUniverse/agora/internal/extractor"
 	"github.com/CarriedWorldUniverse/agora/internal/harness"
 	"github.com/CarriedWorldUniverse/agora/internal/render"
@@ -57,6 +58,12 @@ func main() {
 	if out, err := exec.Command("git", "rev-parse", "--short", "HEAD").Output(); err == nil {
 		rev = strings.TrimSpace(string(out))
 	}
+	// a dirty tree must not share a fingerprint with its base commit —
+	// pre/post-change rows would silently aggregate (found when reconciler-v2
+	// test rows landed on the old rev's fingerprint)
+	if err := exec.Command("git", "diff", "--quiet", "HEAD").Run(); err != nil {
+		rev += "-dirty"
+	}
 	exPath := env("CTXMAP_EXTRACT_MODEL", filepath.Join(os.Getenv("HOME"), "models/Qwen3-1.7B-Q8_0.gguf"))
 	kindPath := env("CTXMAP_KIND_MODEL", filepath.Join(os.Getenv("HOME"), "models/Qwen3-4B-Q8_0.gguf"))
 	fp := bench.Fingerprint{
@@ -65,6 +72,8 @@ func main() {
 	}
 
 	var prop harness.Proposer
+	var emb *embed.Llama
+	var judge harness.PairJudge
 	if *mapOn {
 		ex, err := extractor.New(extractor.Config{ExtractModelPath: exPath, KindModelPath: kindPath, Threads: 12})
 		if err != nil {
@@ -72,6 +81,13 @@ func main() {
 		}
 		defer ex.Close()
 		prop = ex
+		judge = ex
+		if mp := env("CTXMAP_EMBED_MODEL", filepath.Join(os.Getenv("HOME"), "models/nomic-embed-text-v1.5.Q8_0.gguf")); mp != "" {
+			if e, err := embed.NewLlama(mp, 8); err == nil {
+				emb = e
+				defer e.Close()
+			}
+		}
 	}
 	prov := openai.NewWithBaseURL(env("CTXMAP_API_KEY", "dummy"), env("CTXMAP_BASE_URL", "http://100.92.111.3:4000/v1"))
 
@@ -85,6 +101,9 @@ func main() {
 			return nil, nil, nil, err
 		}
 		sess := harness.NewSession(harness.Config{Model: *model, MapEnabled: *mapOn, TailTurns: *tail, AssemblyBudget: *budget}, prov, st, rend, prop)
+		if emb != nil && judge != nil {
+			sess.SetReconciler(emb, judge)
+		}
 		return sess, st, func() { sess.Close(); st.Close() }, nil
 	}
 

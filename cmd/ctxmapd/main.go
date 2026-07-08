@@ -10,6 +10,7 @@
 //   CTXMAP_API_KEY        backend key (default "dummy")
 //   CTXMAP_EXTRACT_MODEL  gguf path for the extraction model (Qwen3-1.7B-Q8)
 //   CTXMAP_KIND_MODEL     gguf path for the kind model (Qwen3-4B-Q8; empty = reuse)
+//   CTXMAP_EMBED_MODEL    gguf path for the embedding model (nomic-embed; empty = token fallback)
 //   CTXMAP_DATA_DIR       where session stores + transcripts live (default ~/.ctxmap)
 package main
 
@@ -24,6 +25,7 @@ import (
 	"sync"
 
 	"github.com/CarriedWorldUniverse/agora/internal/backend/openai"
+	"github.com/CarriedWorldUniverse/agora/internal/embed"
 	"github.com/CarriedWorldUniverse/agora/internal/extractor"
 	"github.com/CarriedWorldUniverse/agora/internal/harness"
 	"github.com/CarriedWorldUniverse/agora/internal/render"
@@ -60,6 +62,7 @@ type server struct {
 	mu       sync.Mutex
 	sessions map[string]*sessionEntry
 	prop     *lockedProposer // lazy-loaded
+	emb      *embed.Llama    // lazy-loaded with prop; nil if no model configured
 	dataDir  string
 }
 
@@ -191,7 +194,21 @@ func (s *server) loadExtractor() (*lockedProposer, error) {
 		return nil, err
 	}
 	s.prop = &lockedProposer{p: ex}
+	if mp := env("CTXMAP_EMBED_MODEL", filepath.Join(os.Getenv("HOME"), "models/nomic-embed-text-v1.5.Q8_0.gguf")); mp != "" {
+		if e, err := embed.NewLlama(mp, 8); err == nil {
+			s.emb = e
+		} // embed load failure degrades to token-overlap reconciliation
+	}
 	return s.prop, nil
+}
+
+// lockedJudge serializes JudgePair against the shared 4B model.
+type lockedJudge struct{ lp *lockedProposer }
+
+func (l *lockedJudge) JudgePair(a, b string) (extractor.PairVerdict, error) {
+	l.lp.mu.Lock()
+	defer l.lp.mu.Unlock()
+	return l.lp.p.JudgePair(a, b)
 }
 
 func (s *server) call(name string, raw json.RawMessage) (string, error) {
@@ -247,6 +264,11 @@ func (s *server) call(name string, raw json.RawMessage) (string, error) {
 			TailTurns:      a.TailTurns,
 			TranscriptPath: filepath.Join(s.dataDir, tmpID+".transcript.jsonl"),
 		}, prov, st, rend, prop)
+		if mapOn && s.emb != nil {
+			if lp, ok := prop.(*lockedProposer); ok {
+				sess.SetReconciler(s.emb, &lockedJudge{lp: lp})
+			}
+		}
 		s.mu.Lock()
 		s.sessions[sess.ID()] = &sessionEntry{sess: sess, st: st, rend: rend}
 		s.mu.Unlock()

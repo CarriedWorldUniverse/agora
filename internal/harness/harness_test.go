@@ -237,3 +237,95 @@ func TestSourceAttributionTrust(t *testing.T) {
 		t.Fatalf("assistant fact: want MODEL_OBSERVED, got %s", f.Trust)
 	}
 }
+
+// fakeEmbedder: deterministic vectors — same "topic key" (first word) = high
+// cosine, different = low. Lets reconciler tests run without a model.
+type fakeEmbedder struct{}
+
+func (fakeEmbedder) Embed(text string) ([]float32, error) {
+	v := make([]float32, 8)
+	topic := strings.Fields(strings.ToLower(text))[0]
+	for i, c := range topic {
+		v[i%8] += float32(c)
+	}
+	// content variation in a minor dimension so dup≠identical
+	v[7] += float32(len(text)% 7)
+	var n float64
+	for _, x := range v {
+		n += float64(x) * float64(x)
+	}
+	for i := range v {
+		v[i] = float32(float64(v[i]) / (n + 1e-9) * 100)
+	}
+	// re-normalize
+	n = 0
+	for _, x := range v {
+		n += float64(x) * float64(x)
+	}
+	for i := range v {
+		v[i] = float32(float64(v[i]) / (sqrt(n)))
+	}
+	return v, nil
+}
+
+func sqrt(f float64) float64 {
+	x := f
+	for i := 0; i < 20; i++ {
+		x = (x + f/x) / 2
+	}
+	return x
+}
+
+type fakeJudge struct{ verdict extractor.PairVerdict }
+
+func (f *fakeJudge) JudgePair(a, b string) (extractor.PairVerdict, error) { return f.verdict, nil }
+
+func TestReconcilerV2JudgePath(t *testing.T) {
+	fp := &fakeProvider{script: []backend.ProviderResult{{FinalText: "a"}, {FinalText: "b"}}}
+	prop := &fakeProposer{}
+	s, st := newRig(t, fp, prop, true)
+	judge := &fakeJudge{verdict: extractor.PairContradicts}
+	s.SetReconciler(fakeEmbedder{}, judge)
+
+	// first fact lands + gets an embedding
+	prop.out = []extractor.FactProposal{{Statement: "benchdb results are stored in sqlite", Kind: "OBSERVED", Source: "assistant", Entities: []string{"bench-db"}}}
+	s.Turn(context.Background(), "noting where bench results go")
+	ids := s.WaitExtraction()
+	if len(ids) != 1 {
+		t.Fatalf("want 1 fact, got %d", len(ids))
+	}
+	embs, _ := st.Embeddings()
+	if len(embs) != 1 {
+		t.Fatalf("embedding not persisted: %d", len(embs))
+	}
+
+	// same topic (same leading word => high cosine), judge says CONTRADICTS
+	prop.out = []extractor.FactProposal{{Statement: "benchdb results are stored in postgres", Kind: "OBSERVED", Source: "assistant", Entities: []string{"bench-db"}}}
+	s.Turn(context.Background(), "correction incoming")
+	s.WaitExtraction()
+	all, _ := st.QueryEntity("bench-db", 10)
+	if len(all) != 2 {
+		t.Fatalf("want 2 facts, got %d", len(all))
+	}
+	foundLink := false
+	for _, f := range all {
+		links, _ := st.Links(f.ID)
+		if len(links[store.LinkContradicts]) > 0 {
+			foundLink = true
+		}
+	}
+	if !foundLink {
+		t.Fatal("judge CONTRADICTS verdict must create a CONTRADICTS link")
+	}
+
+	// judge says SAME => dedup, no third fact
+	judge.verdict = extractor.PairSame
+	fp.script = []backend.ProviderResult{{FinalText: "c"}}
+	prop.out = []extractor.FactProposal{{Statement: "benchdb results are stored in postgres now", Kind: "OBSERVED", Source: "assistant", Entities: []string{"bench-db"}}}
+	s.Turn(context.Background(), "same again")
+	s.WaitExtraction()
+	all, _ = st.QueryEntity("bench-db", 10)
+	if len(all) != 2 {
+		t.Fatalf("SAME verdict must dedup: want 2 facts, got %d", len(all))
+	}
+}

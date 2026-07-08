@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,18 @@ import (
 // satisfies it. A nil Proposer disables extraction (map-off ablation).
 type Proposer interface {
 	Propose(current extractor.Turn, ctx []extractor.Turn, glossary map[string]string) ([]extractor.FactProposal, error)
+}
+
+// PairJudge classifies the relation between two same-topic statements
+// (SAME / CONTRADICTS / DISTINCT). *extractor.Extractor satisfies it.
+type PairJudge interface {
+	JudgePair(a, b string) (extractor.PairVerdict, error)
+}
+
+// Embedder produces L2-normalized sentence vectors. Optional: nil falls back
+// to token-overlap reconciliation.
+type Embedder interface {
+	Embed(text string) ([]float32, error)
 }
 
 type Config struct {
@@ -80,6 +93,9 @@ type Session struct {
 	transcript []TurnRecord
 	sessionID string
 
+	judge    PairJudge // optional; nil = no pair judgment (token heuristics only)
+	embedder Embedder  // optional; nil = token-overlap reconciliation
+
 	extractQ   chan int // turn numbers pending extraction
 	wg         sync.WaitGroup
 	lastIDs    []string // facts asserted by the most recent completed extraction
@@ -118,6 +134,13 @@ func NewSession(cfg Config, p backend.Provider, st *store.Store, rend *render.Re
 	s.wg.Add(1)
 	go s.extractWorker()
 	return s
+}
+
+// SetReconciler wires the embedding-based reconciler (both optional; the
+// extractor usually doubles as the PairJudge).
+func (s *Session) SetReconciler(e Embedder, j PairJudge) {
+	s.embedder = e
+	s.judge = j
 }
 
 func (s *Session) ID() string { return s.sessionID }
@@ -412,7 +435,7 @@ func (s *Session) extractTurn(turnN int) {
 		if dupID, contraID := s.reconcileScan(p.Statement, p.Entities); dupID != "" {
 			s.st.RecordRender(dupID, turnN) // re-observation confirms
 			continue
-		} else if contraID != "" {
+		} else if contraID != "" { // asserted below, then linked+resolved
 			if kind == store.KindDerived {
 				// derived needs parents; contradiction candidates are weak parents — skip derived contras in v0
 			}
@@ -420,6 +443,7 @@ func (s *Session) extractTurn(turnN int) {
 			if err == nil {
 				s.st.ResolveContradiction(id, contraID)
 				ids = append(ids, id)
+				s.saveEmbedding(id, p.Statement)
 			}
 			continue
 		}
@@ -433,6 +457,7 @@ func (s *Session) extractTurn(turnN int) {
 		}
 		if id, err := s.st.AssertFact(f); err == nil {
 			ids = append(ids, id)
+			s.saveEmbedding(id, p.Statement)
 		}
 	}
 	s.mu.Lock()
@@ -468,6 +493,15 @@ func groundedInText(statement, text string) bool {
 	return float64(hit)/float64(len(stmt)) >= 0.6
 }
 
+func (s *Session) saveEmbedding(id, statement string) {
+	if s.embedder == nil {
+		return
+	}
+	if vec, err := s.embedder.Embed(statement); err == nil {
+		s.st.SetEmbedding(id, vec)
+	}
+}
+
 func tokset(s string) map[string]bool {
 	out := map[string]bool{}
 	for _, w := range wordRe.FindAllString(strings.ToLower(s), -1) {
@@ -494,10 +528,82 @@ func overlapF1(a, b string) float64 {
 	return 2 * p * r / (p + r)
 }
 
-// reconcileScan returns (dupID, contraID): dup at >=0.9 statement overlap;
-// contradiction candidate at >=0.55 overlap sharing >=1 entity (same topic,
-// different content). Heuristic until the embedder-based reconciler lands.
+// Reconciler thresholds — calibrated on labeled pairs (embed/calibrate_test):
+// UNREL topped out at 0.65; DUP spanned 0.88-0.94; CONTRA spanned 0.86-1.00.
+// Cosine CANNOT separate dup from contradiction (a contradiction IS a
+// near-paraphrase with one changed value — "caps at 40" vs "caps at 12"
+// scored 0.996), so cosine only GATES same-topic candidates; the truth
+// relation is judged by the 4B (PairJudge). Token-identity is the free
+// fast path for verbatim dups.
+const (
+	sameTopicCos = 0.80 // below this: unrelated, no judgment needed
+	tokenDupF1   = 0.90 // at/above this: duplicate without a model call
+)
+
+// reconcileScan returns (dupID, contraID) for a new statement against the
+// store. Embedding+judge path when wired; token-overlap heuristics otherwise.
 func (s *Session) reconcileScan(statement string, entities []string) (string, string) {
+	if s.embedder == nil || s.judge == nil {
+		return s.reconcileScanTokens(statement, entities)
+	}
+	vec, err := s.embedder.Embed(statement)
+	if err != nil {
+		return s.reconcileScanTokens(statement, entities)
+	}
+	all, err := s.st.Embeddings()
+	if err != nil {
+		return s.reconcileScanTokens(statement, entities)
+	}
+	// rank same-topic candidates by cosine, best first
+	type cand struct {
+		id  string
+		cos float64
+	}
+	var cands []cand
+	for id, v := range all {
+		if c := cosine(vec, v); c >= sameTopicCos {
+			cands = append(cands, cand{id, c})
+		}
+	}
+	sort.Slice(cands, func(i, j int) bool { return cands[i].cos > cands[j].cos })
+	if len(cands) > 3 {
+		cands = cands[:3] // judge at most the 3 nearest — bounded model cost
+	}
+	for _, c := range cands {
+		f, err := s.st.Get(c.id)
+		if err != nil || f.Status == store.StatusRetracted {
+			continue
+		}
+		if overlapF1(statement, f.Statement) >= tokenDupF1 {
+			return f.ID, "" // verbatim dup, no model call
+		}
+		verdict, err := s.judge.JudgePair(statement, f.Statement)
+		if err != nil {
+			continue
+		}
+		switch verdict {
+		case extractor.PairSame:
+			return f.ID, ""
+		case extractor.PairContradicts:
+			return "", f.ID
+		} // DISTINCT: keep scanning
+	}
+	return "", ""
+}
+
+func cosine(a, b []float32) float64 {
+	if len(a) != len(b) || len(a) == 0 {
+		return 0
+	}
+	var dot float64
+	for i := range a {
+		dot += float64(a[i]) * float64(b[i])
+	}
+	return dot
+}
+
+// reconcileScanTokens is the pre-embedder fallback heuristic.
+func (s *Session) reconcileScanTokens(statement string, entities []string) (string, string) {
 	seen := map[string]bool{}
 	var cands []*store.Fact
 	for _, e := range entities {

@@ -199,6 +199,47 @@ func buildExtractionPrompt(current Turn, context []Turn, glossary map[string]str
 	return b.String()
 }
 
+// PairVerdict is the reconciler's judgment of two same-topic statements.
+type PairVerdict string
+
+const (
+	PairSame        PairVerdict = "SAME"
+	PairContradicts PairVerdict = "CONTRADICTS"
+	PairDistinct    PairVerdict = "DISTINCT"
+)
+
+const pairSystemPrompt = `Two statements about the same topic. Think briefly, then answer with exactly one word:
+- SAME: they assert the same fact (different wording is fine)
+- CONTRADICTS: they cannot both be true (a value, place, or polarity differs)
+- DISTINCT: compatible but different facts about the topic`
+
+// JudgePair classifies the relation between a new statement and an existing
+// fact. Runs on the kind/judgment model (4B, thinking enabled) — calibration
+// showed embeddings cannot make this call (dup and contradiction cosines
+// overlap almost completely; a contradiction IS a near-paraphrase).
+func (e *Extractor) JudgePair(a, b string) (PairVerdict, error) {
+	prompt := "<|im_start|>system\n" + pairSystemPrompt + "<|im_end|>\n<|im_start|>user\nA: " + a + "\nB: " + b + "\n\nVerdict?<|im_end|>\n<|im_start|>assistant\n"
+	ctx, err := e.kind.NewContext(2048, e.threads)
+	if err != nil {
+		return "", err
+	}
+	defer ctx.Free()
+	out, _, err := ctx.Generate(prompt, "", 512)
+	if err != nil {
+		return "", err
+	}
+	verdict := out
+	if i := strings.LastIndex(out, "</think>"); i >= 0 {
+		verdict = out[i+len("</think>"):]
+	}
+	for _, v := range []PairVerdict{PairContradicts, PairDistinct, PairSame} {
+		if strings.Contains(verdict, string(v)) {
+			return v, nil
+		}
+	}
+	return "", fmt.Errorf("no pair verdict")
+}
+
 func (e *Extractor) classifyKindSource(statement string, turn Turn) (string, string, error) {
 	prompt := "<|im_start|>system\n" + kindSystemPrompt + "<|im_end|>\n<|im_start|>user\n" +
 		"TURN IT CAME FROM:\n[user]: " + turn.User + "\n[assistant]: " + turn.Assistant +

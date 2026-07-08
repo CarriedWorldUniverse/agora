@@ -13,10 +13,12 @@ package store
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 	"time"
@@ -410,6 +412,41 @@ func (s *Store) Links(id string) (map[LinkType][]string, error) {
 		out[LinkType(t)] = append(out[LinkType(t)], oid)
 	}
 	return out, nil
+}
+
+// SetEmbedding stores a fact's embedding vector (little-endian float32 blob).
+func (s *Store) SetEmbedding(id string, vec []float32) error {
+	buf := make([]byte, 4*len(vec))
+	for i, v := range vec {
+		binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(v))
+	}
+	res, err := s.db.Exec(`UPDATE facts SET embedding=? WHERE id=?`, buf, id)
+	return execErr(res, err, id)
+}
+
+// Embeddings returns id -> vector for all non-retracted facts that have one.
+// Brute-force cosine over this map is the v0 nearest-neighbor path (a session
+// store holds tens-to-hundreds of facts; sqlite-vec deferred until size demands).
+func (s *Store) Embeddings() (map[string][]float32, error) {
+	rows, err := s.db.Query(`SELECT id, embedding FROM facts WHERE status!=? AND embedding IS NOT NULL`, string(StatusRetracted))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]float32{}
+	for rows.Next() {
+		var id string
+		var buf []byte
+		if err := rows.Scan(&id, &buf); err != nil {
+			return nil, err
+		}
+		vec := make([]float32, len(buf)/4)
+		for i := range vec {
+			vec[i] = math.Float32frombits(binary.LittleEndian.Uint32(buf[i*4:]))
+		}
+		out[id] = vec
+	}
+	return out, rows.Err()
 }
 
 // Audit checks the deterministic invariants (spec §5) — CI / debug command.

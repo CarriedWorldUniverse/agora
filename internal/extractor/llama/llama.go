@@ -23,11 +23,21 @@ static struct llama_context_params spike_ctx_params(int n_ctx, int n_threads) {
 	p.n_threads_batch = n_threads;
 	return p;
 }
+static struct llama_context_params spike_embed_ctx_params(int n_ctx, int n_threads) {
+	struct llama_context_params p = llama_context_default_params();
+	p.n_ctx = n_ctx;
+	p.n_threads = n_threads;
+	p.n_threads_batch = n_threads;
+	p.embeddings = true;
+	p.pooling_type = LLAMA_POOLING_TYPE_MEAN;
+	return p;
+}
 */
 import "C"
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"unsafe"
 )
@@ -145,6 +155,56 @@ func (c *Context) Generate(prompt string, grammar string, maxTokens int) (string
 		}
 	}
 	return out.String(), generated, nil
+}
+
+// Embed runs the prompt through an embeddings-mode context and returns the
+// mean-pooled, L2-normalized sentence vector. The model must be an embedding
+// model (e.g. nomic-embed) and the context created with NewEmbedContext.
+func (c *Context) Embed(text string) ([]float32, error) {
+	toks, err := c.m.tokenize(text, true)
+	if err != nil {
+		return nil, err
+	}
+	if len(toks) > c.nCtx-4 {
+		toks = toks[:c.nCtx-4]
+	}
+	// clear KV between embeds: each call is an independent sequence
+	C.llama_memory_clear(C.llama_get_memory(c.ctx), C.bool(true))
+	batch := C.llama_batch_get_one(&toks[0], C.int32_t(len(toks)))
+	if C.llama_decode(c.ctx, batch) != 0 {
+		return nil, fmt.Errorf("embed decode failed")
+	}
+	nEmbd := int(C.llama_model_n_embd(c.m.model))
+	ptr := C.llama_get_embeddings_seq(c.ctx, 0)
+	if ptr == nil {
+		ptr = C.llama_get_embeddings(c.ctx)
+	}
+	if ptr == nil {
+		return nil, fmt.Errorf("no embeddings returned")
+	}
+	raw := unsafe.Slice((*float32)(unsafe.Pointer(ptr)), nEmbd)
+	out := make([]float32, nEmbd)
+	var norm float64
+	for i, v := range raw {
+		out[i] = v
+		norm += float64(v) * float64(v)
+	}
+	if norm > 0 {
+		inv := float32(1.0 / (math.Sqrt(norm)))
+		for i := range out {
+			out[i] *= inv
+		}
+	}
+	return out, nil
+}
+
+// NewEmbedContext creates a context in embeddings mode (mean pooling).
+func (m *Model) NewEmbedContext(nCtx, nThreads int) (*Context, error) {
+	ctx := C.llama_init_from_model(m.model, C.spike_embed_ctx_params(C.int(nCtx), C.int(nThreads)))
+	if ctx == nil {
+		return nil, fmt.Errorf("failed to create embed context")
+	}
+	return &Context{ctx: ctx, m: m, nCtx: nCtx}, nil
 }
 
 func (c *Context) Free()  { C.llama_free(c.ctx) }
