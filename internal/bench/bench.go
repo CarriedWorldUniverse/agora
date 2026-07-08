@@ -187,7 +187,13 @@ func Run(ctx context.Context, w *Workload, fp Fingerprint, rep int, mk SessionFa
 		if wt.PadTo > 0 {
 			msg += "\n\n" + filler(w.ID, i, wt.PadTo)
 		}
-		res, err := sess.Turn(ctx, msg)
+		// Per-turn timeout + one retry: a single dropped backend response must
+		// fail the rep, never wedge the campaign (learned the hard way —
+		// campaign 1 hung 2h on one stalled stream with no client timeout).
+		res, err := turnWithTimeout(ctx, sess, msg, turnTimeout(wt.PadTo))
+		if err != nil {
+			res, err = turnWithTimeout(ctx, sess, msg, turnTimeout(wt.PadTo))
+		}
 		if err != nil {
 			return nil, fmt.Errorf("turn %d: %w", i+1, err)
 		}
@@ -217,6 +223,22 @@ func Run(ctx context.Context, w *Workload, fp Fingerprint, rep int, mk SessionFa
 		rec.PassRate = float64(pass) / float64(len(rec.Probes))
 	}
 	return rec, nil
+}
+
+// turnTimeout scales with padding: overflow-tier prefills are legitimately
+// slow (cold ~200k-token prefill can take minutes on the GB10).
+func turnTimeout(padTokens int) time.Duration {
+	base := 5 * time.Minute
+	if padTokens > 4000 {
+		base = 20 * time.Minute
+	}
+	return base
+}
+
+func turnWithTimeout(ctx context.Context, sess *harness.Session, msg string, d time.Duration) (*harness.TurnResult, error) {
+	tctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	return sess.Turn(tctx, msg)
 }
 
 func evalProbe(p *Probe, answer string, st *store.Store) ProbeResult {
