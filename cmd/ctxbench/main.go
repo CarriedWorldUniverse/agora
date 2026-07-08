@@ -35,6 +35,7 @@ func main() {
 	mapOn := flag.Bool("map", true, "map enabled")
 	tail := flag.Int("tail", 8, "tail turns")
 	model := flag.String("model", "ornith", "backend model")
+	budget := flag.Int("budget", 200000, "assembly budget (approx tokens)")
 	dbPath := flag.String("db", filepath.Join(os.Getenv("HOME"), ".ctxmap", "bench.db"), "bench.db path")
 	flag.Parse()
 	if *wlPath == "" {
@@ -60,7 +61,7 @@ func main() {
 	kindPath := env("CTXMAP_KIND_MODEL", filepath.Join(os.Getenv("HOME"), "models/Qwen3-4B-Q8_0.gguf"))
 	fp := bench.Fingerprint{
 		HarnessRev: rev, ExtractModel: filepath.Base(exPath), KindModel: filepath.Base(kindPath),
-		BackendModel: *model, MapEnabled: *mapOn, TailTurns: *tail,
+		BackendModel: *model, MapEnabled: *mapOn, TailTurns: *tail, AssemblyBudget: *budget,
 	}
 
 	var prop harness.Proposer
@@ -83,7 +84,7 @@ func main() {
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		sess := harness.NewSession(harness.Config{Model: *model, MapEnabled: *mapOn, TailTurns: *tail}, prov, st, rend, prop)
+		sess := harness.NewSession(harness.Config{Model: *model, MapEnabled: *mapOn, TailTurns: *tail, AssemblyBudget: *budget}, prov, st, rend, prop)
 		return sess, st, func() { sess.Close(); st.Close() }, nil
 	}
 

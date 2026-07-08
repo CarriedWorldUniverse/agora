@@ -37,6 +37,12 @@ type Config struct {
 	TailTurns    int    // raw transcript tail length (turns)
 	ContextTurns int    // turns of context handed to the extractor (spec: 2)
 	MapEnabled   bool   // ablation switch (control MCP: map on/off)
+	// AssemblyBudget caps the assembled prompt (system + map blocks + tail +
+	// message) in approximate tokens (chars/4). All bench targets share one
+	// budget (spec §9.1 fairness rule); the tail gets whatever the fixed
+	// blocks don't use, oldest turns dropped first (naive truncation — this
+	// IS the standard comparator's compaction). 0 = default 200k.
+	AssemblyBudget int
 	TranscriptPath string // jsonl ground truth; empty = no file
 }
 
@@ -87,6 +93,9 @@ func NewSession(cfg Config, p backend.Provider, st *store.Store, rend *render.Re
 	}
 	if cfg.ContextTurns == 0 {
 		cfg.ContextTurns = 2
+	}
+	if cfg.AssemblyBudget == 0 {
+		cfg.AssemblyBudget = 200_000 // inside a 256k window with headroom for output
 	}
 	s := &Session{
 		cfg: cfg, provider: p, st: st, rend: rend, prop: prop,
@@ -145,7 +154,10 @@ func (s *Session) Turn(ctx context.Context, userMsg string) (*TurnResult, error)
 			}
 		}
 	}
-	msgs := s.tailMessages()
+	// assembly budget: fixed blocks + current message spend first; the tail
+	// gets the remainder, oldest turns dropped first.
+	fixedTok := approxTokens(strings.Join(blocks, "\n\n")) + approxTokens(userMsg)
+	msgs := s.tailMessages(s.cfg.AssemblyBudget - fixedTok)
 	s.mu.Unlock()
 
 	msgs = append(msgs, backend.ProviderMessage{Role: "user", Content: userMsg})
@@ -515,13 +527,29 @@ func (s *Session) glossary() map[string]string {
 
 // ---- transcript tail + persistence ----
 
-func (s *Session) tailMessages() []backend.ProviderMessage {
+func approxTokens(s string) int { return len(s)/4 + 1 }
+
+// tailMessages returns the newest tail turns that fit both the TailTurns cap
+// and the token budget, dropping oldest first.
+func (s *Session) tailMessages(budget int) []backend.ProviderMessage {
 	start := len(s.transcript) - s.cfg.TailTurns
 	if start < 0 {
 		start = 0
 	}
+	// walk backward from newest, accumulating within budget
+	kept := 0
+	spend := 0
+	for i := len(s.transcript) - 1; i >= start; i-- {
+		t := s.transcript[i]
+		cost := approxTokens(t.User) + approxTokens(t.Assistant)
+		if spend+cost > budget {
+			break
+		}
+		spend += cost
+		kept++
+	}
 	var msgs []backend.ProviderMessage
-	for _, t := range s.transcript[start:] {
+	for _, t := range s.transcript[len(s.transcript)-kept:] {
 		msgs = append(msgs, backend.ProviderMessage{Role: "user", Content: t.User})
 		msgs = append(msgs, backend.ProviderMessage{Role: "assistant", Content: t.Assistant})
 	}
