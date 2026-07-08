@@ -1,6 +1,6 @@
 {
  "id": "multihop-10-overflow",
- "version": 1,
+ "version": 2,
  "pressure_tier": "overflow",
  "turns": [
   {
@@ -12,7 +12,7 @@
    "pad_to": 18000
   },
   {
-   "message": "decision: the belief field write pass moves to the compute queue called aurora-queue.",
+   "message": "decision: the belief field write pass moves to the compute queue called aurora-queue. separately, the water sim pressure pass moves to the queue called cinder-queue.",
    "pad_to": 18000
   },
   {
@@ -52,7 +52,7 @@
    "pad_to": 18000
   },
   {
-   "message": "another decision: everything on aurora-queue gets profiled by the tool called glimmer.",
+   "message": "another decision: everything on aurora-queue gets profiled by the tool called glimmer, and everything on cinder-queue gets profiled by the tool called lumen.",
    "pad_to": 18000
   },
   {
@@ -60,10 +60,17 @@
    "pad_to": 18000
   },
   {
-   "message": "so which profiler ends up covering the belief field write pass? think it through.",
+   "message": "so which profiler ends up covering the belief field write pass - glimmer or lumen? think it through and name exactly one.",
    "probe": {
     "type": "contains",
     "want": "glimmer"
+   }
+  },
+  {
+   "message": "and which profiler covers the water sim pressure pass? name exactly one.",
+   "probe": {
+    "type": "contains",
+    "want": "lumen"
    }
   }
  ]
