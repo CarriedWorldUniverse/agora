@@ -156,7 +156,7 @@ func TestMapOffAblation(t *testing.T) {
 		t.Fatal("map-off must not offer tools")
 	}
 	s.WaitExtraction()
-	if facts, _ := st.QueryText("should not", 5); len(facts) != 0 {
+	if facts, _ := st.QueryText("should not", 5, ""); len(facts) != 0 {
 		t.Fatal("map-off must not extract facts")
 	}
 }
@@ -178,7 +178,7 @@ func TestDedupAndOperatorCorrection(t *testing.T) {
 	}
 	s.Turn(context.Background(), "as noted, sqlite for bench")
 	s.WaitExtraction()
-	all, _ := st.QueryEntity("bench-db", 10)
+	all, _ := st.QueryEntity("bench-db", 10, "")
 	if len(all) != 1 {
 		t.Fatalf("dedup failed: %d facts for bench-db", len(all))
 	}
@@ -189,7 +189,7 @@ func TestDedupAndOperatorCorrection(t *testing.T) {
 	fp.script = []backend.ProviderResult{{FinalText: "c"}}
 	s.Turn(context.Background(), "correction: postgres")
 	s.WaitExtraction()
-	all, _ = st.QueryEntity("bench-db", 10)
+	all, _ = st.QueryEntity("bench-db", 10, "")
 	live := 0
 	for _, f := range all {
 		if f.Status != store.StatusRetracted {
@@ -294,7 +294,7 @@ func TestReconcilerV2JudgePath(t *testing.T) {
 	if len(ids) != 1 {
 		t.Fatalf("want 1 fact, got %d", len(ids))
 	}
-	embs, _ := st.Embeddings()
+	embs, _ := st.Embeddings("")
 	if len(embs) != 1 {
 		t.Fatalf("embedding not persisted: %d", len(embs))
 	}
@@ -303,7 +303,7 @@ func TestReconcilerV2JudgePath(t *testing.T) {
 	prop.out = []extractor.FactProposal{{Statement: "benchdb results are stored in postgres", Kind: "OBSERVED", Source: "assistant", Entities: []string{"bench-db"}}}
 	s.Turn(context.Background(), "correction incoming")
 	s.WaitExtraction()
-	all, _ := st.QueryEntity("bench-db", 10)
+	all, _ := st.QueryEntity("bench-db", 10, "")
 	if len(all) != 2 {
 		t.Fatalf("want 2 facts, got %d", len(all))
 	}
@@ -324,7 +324,7 @@ func TestReconcilerV2JudgePath(t *testing.T) {
 	prop.out = []extractor.FactProposal{{Statement: "benchdb results are stored in postgres now", Kind: "OBSERVED", Source: "assistant", Entities: []string{"bench-db"}}}
 	s.Turn(context.Background(), "same again")
 	s.WaitExtraction()
-	all, _ = st.QueryEntity("bench-db", 10)
+	all, _ = st.QueryEntity("bench-db", 10, "")
 	if len(all) != 2 {
 		t.Fatalf("SAME verdict must dedup: want 2 facts, got %d", len(all))
 	}

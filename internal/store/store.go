@@ -332,11 +332,17 @@ func (s *Store) Get(id string) (*Fact, error) {
 	return f, rows.Err()
 }
 
+// Session visibility (spec: per-project store, per-session working set):
+// VERIFIED facts are project-wide; PROPOSED facts are visible only to the
+// session that asserted them. sessionID "" = no scoping (admin/control view).
+const sessionScope = ` AND (status=? OR session_id=? OR ?='')`
+
 // QueryText: LIKE-based retrieval fallback until the embedder lands.
-func (s *Store) QueryText(q string, limit int) ([]*Fact, error) {
+// sessionID scopes visibility; pass "" for the unscoped admin view.
+func (s *Store) QueryText(q string, limit int, sessionID string) ([]*Fact, error) {
 	rows, err := s.db.Query(`SELECT id,statement,kind,status,stale,pinned,trust,confidence,entities,parents,session_id,created,last_confirmed,render_turns
-		FROM facts WHERE status!=? AND statement LIKE ? ORDER BY last_confirmed DESC LIMIT ?`,
-		string(StatusRetracted), "%"+q+"%", limit)
+		FROM facts WHERE status!=? AND statement LIKE ?`+sessionScope+` ORDER BY last_confirmed DESC LIMIT ?`,
+		string(StatusRetracted), "%"+q+"%", string(StatusVerified), sessionID, sessionID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -344,10 +350,10 @@ func (s *Store) QueryText(q string, limit int) ([]*Fact, error) {
 	return scanFacts(rows)
 }
 
-func (s *Store) QueryEntity(slug string, limit int) ([]*Fact, error) {
+func (s *Store) QueryEntity(slug string, limit int, sessionID string) ([]*Fact, error) {
 	rows, err := s.db.Query(`SELECT id,statement,kind,status,stale,pinned,trust,confidence,entities,parents,session_id,created,last_confirmed,render_turns
-		FROM facts WHERE status!=? AND entities LIKE ? ORDER BY last_confirmed DESC LIMIT ?`,
-		string(StatusRetracted), `%"`+slug+`"%`, limit)
+		FROM facts WHERE status!=? AND entities LIKE ?`+sessionScope+` ORDER BY last_confirmed DESC LIMIT ?`,
+		string(StatusRetracted), `%"`+slug+`"%`, string(StatusVerified), sessionID, sessionID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -424,11 +430,13 @@ func (s *Store) SetEmbedding(id string, vec []float32) error {
 	return execErr(res, err, id)
 }
 
-// Embeddings returns id -> vector for all non-retracted facts that have one.
+// Embeddings returns id -> vector for non-retracted facts visible to the
+// session (VERIFIED project-wide + own PROPOSED; "" = all).
 // Brute-force cosine over this map is the v0 nearest-neighbor path (a session
 // store holds tens-to-hundreds of facts; sqlite-vec deferred until size demands).
-func (s *Store) Embeddings() (map[string][]float32, error) {
-	rows, err := s.db.Query(`SELECT id, embedding FROM facts WHERE status!=? AND embedding IS NOT NULL`, string(StatusRetracted))
+func (s *Store) Embeddings(sessionID string) (map[string][]float32, error) {
+	rows, err := s.db.Query(`SELECT id, embedding FROM facts WHERE status!=? AND embedding IS NOT NULL`+sessionScope,
+		string(StatusRetracted), string(StatusVerified), sessionID, sessionID)
 	if err != nil {
 		return nil, err
 	}

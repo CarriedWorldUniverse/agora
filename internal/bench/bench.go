@@ -241,7 +241,7 @@ func Run(ctx context.Context, w *Workload, fp Fingerprint, rep int, mk SessionFa
 	}
 	rec.WallSeconds = time.Since(t0).Seconds()
 
-	if all, err := st.QueryText("", 100000); err == nil {
+	if all, err := st.QueryText("", 100000, ""); err == nil {
 		rec.FactCount = len(all)
 	}
 	pass := 0
@@ -286,7 +286,7 @@ func evalProbe(p *Probe, answer string, st *store.Store) ProbeResult {
 			pr.Detail = truncate(answer, 160)
 		}
 	case "fact_in_store":
-		facts, _ := st.QueryText("", 100000)
+		facts, _ := st.QueryText("", 100000, "")
 		for _, f := range facts {
 			if f.Status != store.StatusRetracted && overlapF1(p.Want, f.Statement) >= 0.5 {
 				pr.Pass = true

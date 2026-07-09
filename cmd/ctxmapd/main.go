@@ -149,7 +149,7 @@ func toolList() []map[string]any {
 	}
 	return []map[string]any{
 		{"name": "session_start", "description": "Start a harness session. map_enabled=false is the ablation/standard-comparator mode. Returns session_id.",
-			"inputSchema": obj(`{"model":{"type":"string","description":"backend model id, default ornith"},"map_enabled":{"type":"boolean","default":true},"tail_turns":{"type":"integer","description":"raw transcript tail length; large value approximates a standard full-history harness"},"system_prompt":{"type":"string"}}`)},
+			"inputSchema": obj(`{"model":{"type":"string","description":"backend model id, default ornith"},"map_enabled":{"type":"boolean","default":true},"tail_turns":{"type":"integer","description":"raw transcript tail length; large value approximates a standard full-history harness"},"system_prompt":{"type":"string"},"project":{"type":"string","description":"shared per-project store: VERIFIED facts inherit across sessions; empty = isolated per-session store"}}`)},
 		{"name": "prompt", "description": "Run one full turn through the harness. Returns answer plus the map's side effects (facts extracted, notices, tokens, recall calls).",
 			"inputSchema": obj(`{"session_id":{"type":"string"},"message":{"type":"string"},"wait_extraction":{"type":"boolean","default":true,"description":"block until async extraction lands (bench probes need a settled store)"}}`)},
 		{"name": "map_query", "description": "Query the session's fact store by text or entity slug.",
@@ -220,6 +220,7 @@ func (s *server) call(name string, raw json.RawMessage) (string, error) {
 		TailTurns      int    `json:"tail_turns"`
 		SystemPrompt   string `json:"system_prompt"`
 		WaitExtraction *bool  `json:"wait_extraction"`
+		Project        string `json:"project"`
 		Query          string `json:"query"`
 		Entity         string `json:"entity"`
 		FactID         string `json:"fact_id"`
@@ -247,10 +248,16 @@ func (s *server) call(name string, raw json.RawMessage) (string, error) {
 			prop = lp
 		}
 		prov := openai.NewWithBaseURL(env("CTXMAP_API_KEY", "dummy"), env("CTXMAP_BASE_URL", "http://100.92.111.3:4000/v1"))
-		// each session gets its own store file + transcript (bench isolation)
+		// default: fresh per-session store (bench isolation). With project set:
+		// a SHARED per-project store — VERIFIED facts inherit across sessions,
+		// PROPOSED stay session-local (spec cross-session rule).
 		tmpID := fmt.Sprintf("s%d", len(s.sessions)+1)
 		stPath := filepath.Join(s.dataDir, tmpID+".db")
-		os.Remove(stPath)
+		if a.Project != "" {
+			stPath = filepath.Join(s.dataDir, "project-"+a.Project+".db")
+		} else {
+			os.Remove(stPath)
+		}
 		st, err := store.Open(stPath)
 		if err != nil {
 			return "", err
@@ -310,9 +317,9 @@ func (s *server) call(name string, raw json.RawMessage) (string, error) {
 		}
 		var facts []*store.Fact
 		if a.Entity != "" {
-			facts, err = e.st.QueryEntity(a.Entity, 20)
+			facts, err = e.st.QueryEntity(a.Entity, 20, "")
 		} else {
-			facts, err = e.st.QueryText(a.Query, 20)
+			facts, err = e.st.QueryText(a.Query, 20, "")
 		}
 		if err != nil {
 			return "", err
@@ -349,7 +356,7 @@ func (s *server) call(name string, raw json.RawMessage) (string, error) {
 			return "", err
 		}
 		counts := map[string]int{}
-		all, _ := e.st.QueryText("", 100000)
+		all, _ := e.st.QueryText("", 100000, "")
 		for _, f := range all {
 			counts[string(f.Status)]++
 			counts["kind:"+string(f.Kind)]++

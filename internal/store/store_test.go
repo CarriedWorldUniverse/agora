@@ -163,11 +163,11 @@ func TestQueryAndNeighbors(t *testing.T) {
 	s := openTest(t)
 	a, _ := s.AssertFact(Fact{Statement: "ornith runs vllm behind litellm", Kind: KindObserved, Trust: TrustModelObserved, Provenance: span(), Entities: []string{"ornith", "vllm", "litellm"}})
 	b, _ := s.AssertFact(Fact{Statement: "so the bottleneck is litellm routing", Kind: KindDerived, Trust: TrustModelDerived, Provenance: span(), Parents: []string{a}, Entities: []string{"litellm"}})
-	got, _ := s.QueryText("vllm", 10)
+	got, _ := s.QueryText("vllm", 10, "")
 	if len(got) != 1 || got[0].ID != a {
 		t.Fatalf("QueryText miss: %d", len(got))
 	}
-	got, _ = s.QueryEntity("litellm", 10)
+	got, _ = s.QueryEntity("litellm", 10, "")
 	if len(got) != 2 {
 		t.Fatalf("QueryEntity want 2, got %d", len(got))
 	}
@@ -175,4 +175,28 @@ func TestQueryAndNeighbors(t *testing.T) {
 	if len(nbrs) != 1 || nbrs[0].ID != b {
 		t.Fatalf("Neighbors want child, got %d", len(nbrs))
 	}
+}
+
+func TestCrossSessionVisibility(t *testing.T) {
+	s := openTest(t)
+	// session A: one VERIFIED (operator) + one PROPOSED (model) fact
+	va, _ := s.AssertFact(Fact{Statement: "the broker moved to li1 for good", Kind: KindObserved, Trust: TrustOperatorStated, SessionID: "sessA", Provenance: span(), Entities: []string{"broker"}})
+	pa, _ := s.AssertFact(Fact{Statement: "the broker port is probably 7888", Kind: KindObserved, Trust: TrustModelObserved, SessionID: "sessA", Provenance: span(), Entities: []string{"broker"}})
+
+	// session B sees A's VERIFIED fact, not A's PROPOSED
+	got, _ := s.QueryEntity("broker", 10, "sessB")
+	if len(got) != 1 || got[0].ID != va {
+		t.Fatalf("session B should inherit only VERIFIED: got %d facts", len(got))
+	}
+	// session A still sees both of its own
+	got, _ = s.QueryEntity("broker", 10, "sessA")
+	if len(got) != 2 {
+		t.Fatalf("session A should see its own PROPOSED too: got %d", len(got))
+	}
+	// unscoped admin view sees everything
+	got, _ = s.QueryEntity("broker", 10, "")
+	if len(got) != 2 {
+		t.Fatalf("admin view should see all: got %d", len(got))
+	}
+	_ = pa
 }

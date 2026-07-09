@@ -319,10 +319,10 @@ func (s *Session) retrieve(msg string) []*store.Fact {
 	}
 	words := wordRe.FindAllString(text, 12)
 	for _, w := range words {
-		if fs, err := s.st.QueryText(w, 3); err == nil {
+		if fs, err := s.st.QueryText(w, 3, s.sessionID); err == nil {
 			add(fs)
 		}
-		if fs, err := s.st.QueryEntity(strings.ToLower(w), 3); err == nil {
+		if fs, err := s.st.QueryEntity(strings.ToLower(w), 3, s.sessionID); err == nil {
 			add(fs)
 		}
 	}
@@ -574,7 +574,7 @@ func (s *Session) reconcileScan(statement string, entities []string) (string, st
 	if err != nil {
 		return s.reconcileScanTokens(statement, entities)
 	}
-	all, err := s.st.Embeddings()
+	all, err := s.st.Embeddings(s.sessionID)
 	if err != nil {
 		return s.reconcileScanTokens(statement, entities)
 	}
@@ -631,7 +631,7 @@ func (s *Session) reconcileScanTokens(statement string, entities []string) (stri
 	seen := map[string]bool{}
 	var cands []*store.Fact
 	for _, e := range entities {
-		if fs, err := s.st.QueryEntity(e, 8); err == nil {
+		if fs, err := s.st.QueryEntity(e, 8, s.sessionID); err == nil {
 			for _, f := range fs {
 				if !seen[f.ID] {
 					seen[f.ID] = true
@@ -654,7 +654,7 @@ func (s *Session) reconcileScanTokens(statement string, entities []string) (stri
 
 func (s *Session) recentEntityFact(entities []string) string {
 	for _, e := range entities {
-		if fs, err := s.st.QueryEntity(e, 1); err == nil && len(fs) > 0 {
+		if fs, err := s.st.QueryEntity(e, 1, s.sessionID); err == nil && len(fs) > 0 {
 			return fs[0].ID
 		}
 	}
