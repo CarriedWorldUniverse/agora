@@ -95,7 +95,12 @@ func main() {
 	prov := openai.NewWithBaseURL(env("CTXMAP_API_KEY", "dummy"), env("CTXMAP_BASE_URL", "http://100.92.111.3:4000/v1"))
 
 	mk := func() (*harness.Session, *store.Store, func(), error) {
-		st, err := store.Open(":memory:")
+		stPath := ":memory:"
+		if dbg := os.Getenv("CTXMAP_DEBUG_STORE"); dbg != "" {
+			os.Remove(dbg)
+			stPath = dbg
+		}
+		st, err := store.Open(stPath)
 		if err != nil {
 			return nil, nil, nil, err
 		}

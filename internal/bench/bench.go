@@ -233,8 +233,13 @@ func Run(ctx context.Context, w *Workload, fp Fingerprint, rep int, mk SessionFa
 			WallSeconds:  time.Since(tTurn).Seconds(), Padded: wt.PadTo > 0, Probe: wt.Probe != nil,
 		}) // res token counts are per-turn (TurnResult resets each Turn call)
 
+		// drain extraction every turn: in real interactive use, think-time
+		// between operator turns dwarfs extraction, so facts from turn N are
+		// settled before turn N+1. The bench must model that, else it measures
+		// an async race (the constraint may not be stored before a later turn
+		// assembles) rather than the designed behavior.
+		sess.WaitExtraction()
 		if wt.Probe != nil {
-			sess.WaitExtraction() // probes see a settled store
 			pr := evalProbe(wt.Probe, res.Answer, st)
 			pr.Turn = i + 1
 			rec.Probes = append(rec.Probes, pr)

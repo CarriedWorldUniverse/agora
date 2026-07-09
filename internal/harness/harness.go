@@ -163,6 +163,17 @@ func (s *Session) Turn(ctx context.Context, userMsg string) (*TurnResult, error)
 		}
 	}
 
+	if dump := os.Getenv("CTXMAP_DEBUG_PROMPT"); dump != "" {
+		f, err := os.OpenFile(dump, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err == nil {
+			fmt.Fprintf(f, "=== turn %d ===\nSYSTEM:\n%s\n", turnN, req.AppendSystemPrompt)
+			for i, m := range req.Messages {
+				fmt.Fprintf(f, "MSG[%d] %s: %.300s\n", i, m.Role, m.Content)
+			}
+			f.Close()
+		}
+	}
+
 	res := &TurnResult{TurnN: turnN, Notices: notices}
 	var finalText string
 	exhausted := true
