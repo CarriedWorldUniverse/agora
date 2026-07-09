@@ -263,8 +263,13 @@ func extractResult(completion *openai.ChatCompletion, streamReasoning string) (b
 		FinalText: finalText,
 		ToolCalls: toolCalls,
 		Usage: backend.Usage{
-			InputTokens:  int(completion.Usage.PromptTokens),
-			OutputTokens: int(completion.Usage.CompletionTokens),
+			// ctxmap deviation from bridle semantics: InputTokens here is the
+			// TOTAL prompt (bench history comparability); CacheReadInputTokens
+			// is the cached subset (vLLM APC / OpenAI prompt caching report it
+			// via prompt_tokens_details.cached_tokens). hit% = cached/total.
+			InputTokens:          int(completion.Usage.PromptTokens),
+			OutputTokens:         int(completion.Usage.CompletionTokens),
+			CacheReadInputTokens: int(completion.Usage.PromptTokensDetails.CachedTokens),
 		},
 		StopReason:       stopReason,
 		ResolvedModel:    completion.Model,

@@ -299,7 +299,8 @@ func (s *server) call(name string, raw json.RawMessage) (string, error) {
 		return jsonOut(map[string]any{
 			"answer": res.Answer, "turn": res.TurnN, "facts_extracted": extracted,
 			"notices": res.Notices, "input_tokens": res.InputTokens,
-			"output_tokens": res.OutputTokens, "recall_calls": res.RecallCalls,
+			"output_tokens": res.OutputTokens, "cached_tokens": res.CachedTokens,
+			"recall_calls": res.RecallCalls,
 		}), nil
 
 	case "map_query":

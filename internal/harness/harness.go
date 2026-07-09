@@ -80,6 +80,7 @@ type TurnResult struct {
 	Notices        []string
 	InputTokens    int
 	OutputTokens   int
+	CachedTokens   int // subset of InputTokens served from prefix cache
 	RecallCalls    int
 }
 
@@ -239,6 +240,7 @@ func (s *Session) Turn(ctx context.Context, userMsg string) (*TurnResult, error)
 		}
 		res.InputTokens += pr.Usage.InputTokens
 		res.OutputTokens += pr.Usage.OutputTokens
+		res.CachedTokens += pr.Usage.CacheReadInputTokens
 		if len(pr.ToolCalls) == 0 {
 			finalText = pr.FinalText
 			exhausted = false
@@ -265,6 +267,7 @@ func (s *Session) Turn(ctx context.Context, userMsg string) (*TurnResult, error)
 			finalText = pr.FinalText
 			res.InputTokens += pr.Usage.InputTokens
 			res.OutputTokens += pr.Usage.OutputTokens
+			res.CachedTokens += pr.Usage.CacheReadInputTokens
 		}
 	}
 

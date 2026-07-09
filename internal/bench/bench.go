@@ -101,6 +101,7 @@ type TurnStat struct {
 	Turn         int     `json:"turn"`
 	InputTokens  int     `json:"in"`
 	OutputTokens int     `json:"out"`
+	CachedTokens int     `json:"cached"` // prefix-cache hits within InputTokens
 	WallSeconds  float64 `json:"s"`
 	Padded       bool    `json:"padded,omitempty"`
 	Probe        bool    `json:"probe,omitempty"`
@@ -116,6 +117,7 @@ type RunRecord struct {
 	PassRate     float64       `json:"pass_rate"`
 	InputTokens  int           `json:"input_tokens"`
 	OutputTokens int           `json:"output_tokens"`
+	CachedTokens int           `json:"cached_tokens"`
 	RecallCalls  int           `json:"recall_calls"`
 	FactCount    int           `json:"fact_count"`
 	WallSeconds  float64       `json:"wall_seconds"`
@@ -137,14 +139,15 @@ func OpenDB(path string) (*DB, error) {
 		probes TEXT, pass_rate REAL,
 		input_tokens INTEGER, output_tokens INTEGER,
 		recall_calls INTEGER, fact_count INTEGER, wall_seconds REAL,
-		created TEXT, turn_stats TEXT
+		created TEXT, turn_stats TEXT, cached_tokens INTEGER
 	)`)
 	if err != nil {
 		db.Close()
 		return nil, err
 	}
-	// migration for pre-turn-stats DBs; harmless if the column exists
+	// migrations for older DBs; harmless if the columns exist
 	db.Exec(`ALTER TABLE runs ADD COLUMN turn_stats TEXT`)
+	db.Exec(`ALTER TABLE runs ADD COLUMN cached_tokens INTEGER`)
 	return &DB{db: db}, nil
 }
 
@@ -153,11 +156,11 @@ func (d *DB) Close() error { return d.db.Close() }
 func (d *DB) Append(r RunRecord) error {
 	probes, _ := json.Marshal(r.Probes)
 	ts, _ := json.Marshal(r.TurnStats)
-	_, err := d.db.Exec(`INSERT INTO runs (bench_version,workload_id,rep,fingerprint,fingerprint_json,probes,pass_rate,input_tokens,output_tokens,recall_calls,fact_count,wall_seconds,created,turn_stats)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := d.db.Exec(`INSERT INTO runs (bench_version,workload_id,rep,fingerprint,fingerprint_json,probes,pass_rate,input_tokens,output_tokens,recall_calls,fact_count,wall_seconds,created,turn_stats,cached_tokens)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		r.BenchVersion, r.WorkloadID, r.Rep, r.Fingerprint, r.FingerprintJSON, string(probes),
 		r.PassRate, r.InputTokens, r.OutputTokens, r.RecallCalls, r.FactCount, r.WallSeconds,
-		time.Now().UTC().Format(time.RFC3339), string(ts))
+		time.Now().UTC().Format(time.RFC3339), string(ts), r.CachedTokens)
 	return err
 }
 
@@ -221,10 +224,12 @@ func Run(ctx context.Context, w *Workload, fp Fingerprint, rep int, mk SessionFa
 		}
 		rec.InputTokens += res.InputTokens
 		rec.OutputTokens += res.OutputTokens
+		rec.CachedTokens += res.CachedTokens
 		rec.RecallCalls += res.RecallCalls
 		rec.TurnStats = append(rec.TurnStats, TurnStat{
 			Turn: i + 1, InputTokens: res.InputTokens, OutputTokens: res.OutputTokens,
-			WallSeconds: time.Since(tTurn).Seconds(), Padded: wt.PadTo > 0, Probe: wt.Probe != nil,
+			CachedTokens: res.CachedTokens,
+			WallSeconds:  time.Since(tTurn).Seconds(), Padded: wt.PadTo > 0, Probe: wt.Probe != nil,
 		}) // res token counts are per-turn (TurnResult resets each Turn call)
 
 		if wt.Probe != nil {

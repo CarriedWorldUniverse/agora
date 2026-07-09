@@ -130,7 +130,7 @@ SOURCE — who ASSERTED the fact:
 - "assistant": the fact's substance was introduced by the assistant (its own observations, conclusions, plans).
 
 WHAT COUNTS AS ONE FACT:
-- One real-world fact = ONE entry. Merge clauses about the same thing into a single complete statement. NEVER split one fact across two entries.
+- One real-world fact = ONE entry: merge clauses about the SAME thing into one complete statement; decisions about DIFFERENT things are separate entries. Never split one fact, never fuse two.
 - When the assistant merely restates, confirms, or acknowledges what the user said, that is the SAME fact — extract it once, not twice.
 - General knowledge explanations (how something works in general) are NOT durable session facts. A turn that is question + textbook answer => [].
 - Transient chit-chat, greetings, scheduling small-talk => [].

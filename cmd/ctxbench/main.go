@@ -130,9 +130,13 @@ func main() {
 				probeIn = append(probeIn, fmt.Sprintf("t%d:in=%d", ts.Turn, ts.InputTokens))
 			}
 		}
-		fmt.Printf("rep %d: pass=%.0f%% %s tokens(in=%d out=%d) probe-prompts[%s] recalls=%d facts=%d %.0fs\n",
+		cachePct := 0.0
+		if rec.InputTokens > 0 {
+			cachePct = float64(rec.CachedTokens) / float64(rec.InputTokens) * 100
+		}
+		fmt.Printf("rep %d: pass=%.0f%% %s tokens(in=%d out=%d cache-hit=%.0f%%) probe-prompts[%s] recalls=%d facts=%d %.0fs\n",
 			rep, rec.PassRate*100, strings.Join(probeSummary, " "), rec.InputTokens, rec.OutputTokens,
-			strings.Join(probeIn, " "), rec.RecallCalls, rec.FactCount, rec.WallSeconds)
+			cachePct, strings.Join(probeIn, " "), rec.RecallCalls, rec.FactCount, rec.WallSeconds)
 	}
 	rates, _ := db.PassRates(w.ID)
 	fmt.Printf("\nhistorical pass rates for %s by fingerprint:\n", w.ID)
