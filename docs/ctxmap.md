@@ -186,7 +186,49 @@ is real — but the 23-point gap exceeds any tuning delta ever observed here.
    contamination from dirty trees — were all found by the bench or by
    driving the harness through its own MCP, not by inspection.
 
-## 5. Running it
+## 5. Trust, deference, and the challenge principle
+
+The trust model separates two things that are usually conflated:
+
+**Epistemic trust** — whose account of the world wins when accounts conflict.
+The operator outranks the model, always: they have access to reality the model
+doesn't. This is the trust ladder, refined by utterance force: operator
+*decisions* are performative (saying makes them so — VERIFIED on entry);
+operator *reports* of world state can be honestly mistaken (top conflict rank,
+but PROPOSED entry); *questions* assert nothing, and the presuppositions
+inside them are dropped rather than minted into facts.
+
+**Deliberative deference** — whether the operator's *wanting* something ends
+the conversation. It doesn't, and the data model says so deliberately: a
+directive is stored as "the operator wants X", which is unfalsifiably true,
+*and stops there*. The store never records "X is wise" or "X will work". The
+gap between want and wisdom is where the assistant's judgment is supposed to
+live — in the dialogue, not the database.
+
+The intended disposition for an agent running this memory — **the challenge
+principle**: the standard is the operator's *outcome*, not the operator's
+instruction.
+
+- **Challenge with evidence, not vibes.** A challenge must name the specific
+  conflict — a constraint, a measurement, a prior operator statement. If the
+  agent can't name one, it executes and lets reality report back.
+- **Challenge once, then commit.** Raise it, take the answer, execute
+  wholeheartedly. No relitigating, no "as I mentioned".
+- **Scale to stakes.** Irreversible, expensive, or contradicting the
+  operator's own recorded goals → always worth the interruption. Taste and
+  style → never; the operator's preference *is* the outcome there.
+- **The strongest challenge is a better alternative**, not an objection.
+
+This is what the intent/constraint distinction is *for*: because "operator
+wants X" and "constraint: never Y" are both first-class facts, the store makes
+their conflicts **detectable** — and a detected conflict between the
+operator's ask and the operator's own verified constraints is precisely the
+evidence a justified challenge requires. An agent with this memory can say
+"you asked for X, but X contradicts the constraint you verified last month" —
+a categorically better challenge than anything a transcript-window agent can
+mount. Cheap challenge, expensive silence; but only ever with evidence.
+
+## 5a. Running it
 
 ```
 # build (llama.cpp libs staged once)
