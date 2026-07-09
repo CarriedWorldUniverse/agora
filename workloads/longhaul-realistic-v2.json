@@ -1,0 +1,100 @@
+{
+ "id": "longhaul-realistic-v2",
+ "version": 2,
+ "pressure_tier": "overflow",
+ "notes": "v2: 18 padded turns (~320k) so plant A (turn 3) is provably outside a 200k budget for the standard comparator (v1 was too shallow \u2014 standard kept the plant and passed legitimately). New id: results must not mix with v1.",
+ "turns": [
+  {
+   "message": "how's the mesh pipeline looking?",
+   "pad_to": 18000
+  },
+  {
+   "message": "any news on the water sim?",
+   "pad_to": 18000
+  },
+  {
+   "message": "decision: the belief field write pass moves to the compute queue called aurora-queue. separately, the water sim pressure pass moves to the queue called cinder-queue.",
+   "pad_to": 18000
+  },
+  {
+   "message": "how's the biome blending pass?",
+   "pad_to": 18000
+  },
+  {
+   "message": "did the pathfinding rework land?",
+   "pad_to": 18000
+  },
+  {
+   "message": "any regressions in the save system?",
+   "pad_to": 18000
+  },
+  {
+   "message": "how's the LOD transition looking?",
+   "pad_to": 18000
+  },
+  {
+   "message": "did the audio occlusion fix hold?",
+   "pad_to": 18000
+  },
+  {
+   "message": "what's the state of the river carving?",
+   "pad_to": 18000
+  },
+  {
+   "message": "what's the status of the belief field pass?",
+   "pad_to": 18000
+  },
+  {
+   "message": "did the nightly render finish?",
+   "pad_to": 18000
+  },
+  {
+   "message": "how are the npc brains behaving?",
+   "pad_to": 18000
+  },
+  {
+   "message": "anything odd in the chunk streamer?",
+   "pad_to": 18000
+  },
+  {
+   "message": "how's the economy readout?",
+   "pad_to": 18000
+  },
+  {
+   "message": "did the settlement gen run clean?",
+   "pad_to": 18000
+  },
+  {
+   "message": "any drift in the CA kernel?",
+   "pad_to": 18000
+  },
+  {
+   "message": "how's the road network pass?",
+   "pad_to": 18000
+  },
+  {
+   "message": "another decision: everything on aurora-queue gets profiled by the tool called glimmer, and everything on cinder-queue gets profiled by the tool called lumen.",
+   "pad_to": 18000
+  },
+  {
+   "message": "thanks. quick sanity check on the build before we wrap up?"
+  },
+  {
+   "message": "good. one more thing before the probe questions."
+  },
+  {
+   "message": "so which profiler ends up covering the belief field write pass - glimmer or lumen? name exactly one.",
+   "probe": {
+    "type": "contains",
+    "want": "glimmer"
+   }
+  },
+  {
+   "message": "and which profiler covers the water sim pressure pass? name exactly one.",
+   "probe": {
+    "type": "contains",
+    "want": "lumen"
+   }
+  }
+ ]
+}
