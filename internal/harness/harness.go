@@ -64,10 +64,10 @@ type TurnRecord struct {
 	User      string `json:"user"`
 	Assistant string `json:"assistant"`
 	// Injected is the working-memory subgraph block that was inserted before
-	// this turn's user message. It is REPLAYED verbatim in the tail so every
-	// request is byte-identical to the previous request plus a suffix —
-	// prefix-cache stability (spec invariant 4). Churn lives at the END of
-	// the prompt, never in the system block.
+	// this turn's user message. Recorded for audit/ground-truth; NOT replayed
+	// in later prompts (cross-turn cache stability is a non-goal — see
+	// tailMessages). Within a turn, churn still sits at the prompt END so the
+	// tool loop appends monotonically.
 	Injected string `json:"injected,omitempty"`
 	Time     string `json:"time"`
 }
@@ -182,6 +182,13 @@ func (s *Session) Turn(ctx context.Context, userMsg string) (*TurnResult, error)
 	var notices []string
 	injected := ""
 	if s.cfg.MapEnabled {
+		// auto-consolidation at the turn boundary: cache stability is a
+		// WITHIN-turn property (tool-loop steps). Between operator turns a
+		// reseed is cheap — human think-time dwarfs it, and TTL-style caches
+		// are cold by then anyway. So re-epoch whenever the core went stale.
+		if stale, err := s.rend.CoreStale(); err == nil && stale {
+			s.rend.NewEpoch()
+		}
 		// memory framing: the model must treat working memory as AUTOMATIC and
 		// invisible. Without this it reads recall/inspect as "the only memory
 		// tools I have", fixates on being unable to "save" facts, and burns
@@ -357,7 +364,7 @@ func (s *Session) runTool(tc backend.ToolInvocation) string {
 	case "recall":
 		s.mu.Lock()
 		seeds := s.retrieve(args.Query)
-		text, ids := s.rend.RenderSubgraph(seeds)
+		text, ids := s.rend.RenderRecall(seeds)
 		turn := len(s.transcript) + 1
 		for _, id := range ids {
 			s.st.RecordRender(id, turn)
@@ -688,18 +695,21 @@ func (s *Session) tailMessages(budget int) []backend.ProviderMessage {
 	spend := 0
 	for i := len(s.transcript) - 1; i >= start; i-- {
 		t := s.transcript[i]
-		cost := approxTokens(t.User) + approxTokens(t.Assistant) + approxTokens(t.Injected)
+		cost := approxTokens(t.User) + approxTokens(t.Assistant)
 		if spend+cost > budget {
 			break
 		}
 		spend += cost
 		kept++
 	}
+	// Injected subgraph blocks are NOT replayed (operator insight 2026-07-09):
+	// byte-identical replay only bought cross-turn cache stability, which is a
+	// non-goal — stability matters WITHIN a turn's tool loop, and between
+	// operator turns a reseed is cheap. Dropping replay saves the injected
+	// blocks' tokens every subsequent turn. TurnRecord.Injected is kept for
+	// audit/transcript-ground-truth only.
 	var msgs []backend.ProviderMessage
 	for _, t := range s.transcript[len(s.transcript)-kept:] {
-		if t.Injected != "" {
-			msgs = append(msgs, backend.ProviderMessage{Role: "user", Content: t.Injected})
-		}
 		msgs = append(msgs, backend.ProviderMessage{Role: "user", Content: t.User})
 		msgs = append(msgs, backend.ProviderMessage{Role: "assistant", Content: t.Assistant})
 	}

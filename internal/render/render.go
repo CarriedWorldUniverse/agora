@@ -56,6 +56,26 @@ func (r *Renderer) NewEpoch() error {
 
 func (r *Renderer) Epoch() int { return r.epoch }
 
+// CoreStale reports whether the live VERIFIED set differs from the frozen
+// epoch set — i.e. a consolidation at the next turn boundary would change the
+// core block. Cache reseeds are cheap BETWEEN operator turns (operator
+// insight 2026-07-09): stability is a within-turn property.
+func (r *Renderer) CoreStale() (bool, error) {
+	core, err := r.st.Core()
+	if err != nil {
+		return false, err
+	}
+	if len(core) != len(r.coreIDs) {
+		return true, nil
+	}
+	for _, f := range core {
+		if !r.coreIDs[f.ID] {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // RenderCore returns the frozen core block. Byte-identical within an epoch.
 func (r *Renderer) RenderCore() string { return r.coreText }
 
@@ -63,9 +83,23 @@ func (r *Renderer) RenderCore() string { return r.coreText }
 // neighbors, deduped against the core (core facts are already in context),
 // plus contradiction notices for anything touching core/pinned facts.
 func (r *Renderer) RenderSubgraph(seeds []*store.Fact) (string, []string) {
+	return r.renderSubgraph(seeds, true)
+}
+
+// RenderRecall is the pull-tool variant: NO core dedup — a model calling
+// recall gets the fact even if it sits in the core block (it asked because
+// it missed it there).
+func (r *Renderer) RenderRecall(seeds []*store.Fact) (string, []string) {
+	return r.renderSubgraph(seeds, false)
+}
+
+func (r *Renderer) renderSubgraph(seeds []*store.Fact, dedupCore bool) (string, []string) {
 	// dedup against the FROZEN core set: a fact verified mid-epoch is not in
 	// the frozen core block, so it must still surface via subgraph/recall.
 	coreIDs := r.coreIDs
+	if !dedupCore {
+		coreIDs = map[string]bool{}
+	}
 	seen := map[string]bool{}
 	var facts []*store.Fact
 	add := func(f *store.Fact) {
