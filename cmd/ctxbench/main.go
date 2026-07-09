@@ -124,9 +124,15 @@ func main() {
 			}
 			probeSummary = append(probeSummary, fmt.Sprintf("t%d:%s=%s", p.Turn, p.Type, mark))
 		}
-		fmt.Printf("rep %d: pass=%.0f%% %s tokens(in=%d out=%d) recalls=%d facts=%d %.0fs\n",
+		var probeIn []string
+		for _, ts := range rec.TurnStats {
+			if ts.Probe {
+				probeIn = append(probeIn, fmt.Sprintf("t%d:in=%d", ts.Turn, ts.InputTokens))
+			}
+		}
+		fmt.Printf("rep %d: pass=%.0f%% %s tokens(in=%d out=%d) probe-prompts[%s] recalls=%d facts=%d %.0fs\n",
 			rep, rec.PassRate*100, strings.Join(probeSummary, " "), rec.InputTokens, rec.OutputTokens,
-			rec.RecallCalls, rec.FactCount, rec.WallSeconds)
+			strings.Join(probeIn, " "), rec.RecallCalls, rec.FactCount, rec.WallSeconds)
 	}
 	rates, _ := db.PassRates(w.ID)
 	fmt.Printf("\nhistorical pass rates for %s by fingerprint:\n", w.ID)
