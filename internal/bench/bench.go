@@ -190,9 +190,13 @@ func Run(ctx context.Context, w *Workload, fp Fingerprint, rep int, mk SessionFa
 		// Per-turn timeout + one retry: a single dropped backend response must
 		// fail the rep, never wedge the campaign (learned the hard way —
 		// campaign 1 hung 2h on one stalled stream with no client timeout).
-		res, err := turnWithTimeout(ctx, sess, msg, turnTimeout(wt.PadTo))
+		// Timeout scales with the WORKLOAD tier, not the current turn's padding:
+		// an unpadded probe turn still prefills the whole padded history (a
+		// 5-min budget on a 20-min prefill cost longhaul rep 0).
+		d := turnTimeout(w.PressureTier)
+		res, err := turnWithTimeout(ctx, sess, msg, d)
 		if err != nil {
-			res, err = turnWithTimeout(ctx, sess, msg, turnTimeout(wt.PadTo))
+			res, err = turnWithTimeout(ctx, sess, msg, d)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("turn %d: %w", i+1, err)
@@ -225,14 +229,14 @@ func Run(ctx context.Context, w *Workload, fp Fingerprint, rep int, mk SessionFa
 	return rec, nil
 }
 
-// turnTimeout scales with padding: overflow-tier prefills are legitimately
-// slow (cold ~200k-token prefill can take minutes on the GB10).
-func turnTimeout(padTokens int) time.Duration {
-	base := 5 * time.Minute
-	if padTokens > 4000 {
-		base = 20 * time.Minute
+// turnTimeout scales with the workload's pressure tier: overflow-tier
+// prefills are legitimately slow (cold ~200k-token prefill takes minutes on
+// the GB10), and EVERY turn of an overflow workload carries that history.
+func turnTimeout(tier string) time.Duration {
+	if tier == "overflow" {
+		return 20 * time.Minute
 	}
-	return base
+	return 5 * time.Minute
 }
 
 func turnWithTimeout(ctx context.Context, sess *harness.Session, msg string, d time.Duration) (*harness.TurnResult, error) {
