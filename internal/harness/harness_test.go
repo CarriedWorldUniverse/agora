@@ -329,3 +329,42 @@ func TestReconcilerV2JudgePath(t *testing.T) {
 		t.Fatalf("SAME verdict must dedup: want 2 facts, got %d", len(all))
 	}
 }
+
+func TestToolBudgetExhaustionStillAnswers(t *testing.T) {
+	// provider always returns a tool call until tools are withheld
+	fp := &toolLoopProvider{}
+	st, err0 := store.Open(":memory:")
+	if err0 != nil {
+		t.Fatal(err0)
+	}
+	rend, err0 := render.New(st)
+	if err0 != nil {
+		t.Fatal(err0)
+	}
+	s := NewSession(Config{Model: "fake", MapEnabled: true}, fp, st, rend, &fakeProposer{})
+	t.Cleanup(func() { s.Close(); st.Close() })
+	res, err := s.Turn(context.Background(), "keep digging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(res.Answer) == "" {
+		t.Fatal("exhausted tool budget must still produce an answer")
+	}
+	if res.Answer != "forced final answer" {
+		t.Fatalf("want forced final answer, got %q", res.Answer)
+	}
+}
+
+type toolLoopProvider struct{ calls int }
+
+func (p *toolLoopProvider) Name() backend.ProviderID { return "fake" }
+func (p *toolLoopProvider) Capabilities() backend.ProviderCapabilities {
+	return backend.ProviderCapabilities{Category: backend.CategoryDirectAPI, SupportsCustomTools: true}
+}
+func (p *toolLoopProvider) RunTurn(_ context.Context, req backend.ProviderRequest, _ backend.EventSink) (backend.ProviderResult, error) {
+	p.calls++
+	if len(req.Tools) == 0 {
+		return backend.ProviderResult{FinalText: "forced final answer"}, nil
+	}
+	return backend.ProviderResult{ToolCalls: []backend.ToolInvocation{{ID: "x", Name: "recall", Args: json.RawMessage(`{"query":"more"}`)}}}, nil
+}

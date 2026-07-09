@@ -224,6 +224,7 @@ func (s *Session) Turn(ctx context.Context, userMsg string) (*TurnResult, error)
 	}
 	res := &TurnResult{TurnN: turnN, Notices: notices}
 	var finalText string
+	exhausted := true
 	for step := 0; step < s.cfg.MaxSteps; step++ {
 		pr, err := s.provider.RunTurn(ctx, req, discardSink{})
 		if err != nil {
@@ -233,6 +234,7 @@ func (s *Session) Turn(ctx context.Context, userMsg string) (*TurnResult, error)
 		res.OutputTokens += pr.Usage.OutputTokens
 		if len(pr.ToolCalls) == 0 {
 			finalText = pr.FinalText
+			exhausted = false
 			break
 		}
 		// execute recall/inspect against the store, append, continue
@@ -244,6 +246,18 @@ func (s *Session) Turn(ctx context.Context, userMsg string) (*TurnResult, error)
 			req.Messages = append(req.Messages, backend.ProviderMessage{
 				Role: "tool_result", ToolCallID: tc.ID, ToolName: tc.Name, Content: out,
 			})
+		}
+	}
+
+	// tool-budget exhaustion must still yield an answer: one final call with
+	// tools withheld forces the model to answer from accumulated context
+	// (the rederive empty-answer bug — the loop used to end with finalText "").
+	if exhausted && strings.TrimSpace(finalText) == "" {
+		req.Tools = nil
+		if pr, err := s.provider.RunTurn(ctx, req, discardSink{}); err == nil {
+			finalText = pr.FinalText
+			res.InputTokens += pr.Usage.InputTokens
+			res.OutputTokens += pr.Usage.OutputTokens
 		}
 	}
 
