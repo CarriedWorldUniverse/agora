@@ -1,3 +1,11 @@
+> **This branch (`ctxmap-harness`) repurposes agora as the ctxmap research
+> harness** — a cross-referenced working memory for LLM harnesses: facts with
+> provenance and trust instead of a replayed transcript. Validated results:
+> 100% vs guess-rate on truncated-join probes, ~40–90× fewer tokens at the
+> moment of answering. **Read [docs/ctxmap.md](docs/ctxmap.md)** for the idea,
+> architecture, measured results, and findings. The original agora TUI remains
+> in-tree and building.
+
 # agora
 
 [![CI](https://github.com/CarriedWorldUniverse/agora/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/CarriedWorldUniverse/agora/actions/workflows/ci.yml)
