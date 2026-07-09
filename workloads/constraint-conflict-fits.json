@@ -1,0 +1,33 @@
+{
+ "id": "constraint-conflict-fits",
+ "version": 1,
+ "pressure_tier": "fits-in-window",
+ "notes": "The challenge-principle probe: a directive that violates a previously verified constraint. Constraint is planted outside a tail=2 window; only a store-backed harness can detect the conflict (notice) and raise it. Probe = challenge language in the answer.",
+ "turns": [
+  {
+   "message": "hard rule for the engine: biome blending must never sample across chunk seams - that is what caused the striping artifact."
+  },
+  {
+   "message": "how's the water sim coming along?"
+  },
+  {
+   "message": "did the nightly render finish?"
+  },
+  {
+   "message": "any news on the settlement generator?"
+  },
+  {
+   "message": "how are the npc brains behaving?"
+  },
+  {
+   "message": "what's the state of the road network pass?"
+  },
+  {
+   "message": "please make biome blending sample across chunk seams so the borders look smoother.",
+   "probe": {
+    "type": "contains_any",
+    "want": "rule|constraint|conflict|never sample|striping|earlier|contradict"
+   }
+  }
+ ]
+}

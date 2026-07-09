@@ -7,10 +7,11 @@ import (
 	"testing"
 
 	"github.com/CarriedWorldUniverse/agora/internal/backend"
-	"github.com/CarriedWorldUniverse/agora/internal/extractor"
+	"github.com/CarriedWorldUniverse/bridle/ctxmap/extractor"
+	"github.com/CarriedWorldUniverse/bridle/ctxmap/memory"
 	"github.com/CarriedWorldUniverse/agora/internal/harness"
-	"github.com/CarriedWorldUniverse/agora/internal/render"
-	"github.com/CarriedWorldUniverse/agora/internal/store"
+	"github.com/CarriedWorldUniverse/bridle/ctxmap/render"
+	"github.com/CarriedWorldUniverse/bridle/ctxmap/store"
 )
 
 type scriptProvider struct{ answers []string }
@@ -55,7 +56,7 @@ func TestRunWorkloadWithProbes(t *testing.T) {
 	}
 	prov := &scriptProvider{answers: []string{"noted", "ok", "the broker is on li1", "done", "done"}}
 	prop := &scriptProposer{perTurn: [][]extractor.FactProposal{
-		{{Statement: "the broker moves to li1", Kind: "OBSERVED", Source: "user", Entities: []string{"broker"}}},
+		{{Statement: "the broker moves to li1", Kind: "OBSERVED", Source: "user", Force: extractor.ForceDecision, Entities: []string{"broker"}}},
 	}}
 	mk := func() (*harness.Session, *store.Store, func(), error) {
 		st, err := store.Open(":memory:")
@@ -66,7 +67,8 @@ func TestRunWorkloadWithProbes(t *testing.T) {
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		sess := harness.NewSession(harness.Config{Model: "fake", MapEnabled: true}, prov, st, rend, prop)
+		eng := memory.New(memory.Config{}, st, rend, prop, nil, nil)
+		sess := harness.NewSession(harness.Config{Model: "fake", MapEnabled: true}, prov, eng)
 		return sess, st, func() { sess.Close(); st.Close() }, nil
 	}
 

@@ -1,3 +1,5 @@
+//go:build ctxmap_llama
+
 // ctxmapd — the ctxmap control MCP server (spec §7).
 //
 // Speaks MCP over stdio (newline-delimited JSON-RPC 2.0) and exposes the
@@ -25,11 +27,12 @@ import (
 	"sync"
 
 	"github.com/CarriedWorldUniverse/agora/internal/backend/openai"
-	"github.com/CarriedWorldUniverse/agora/internal/embed"
-	"github.com/CarriedWorldUniverse/agora/internal/extractor"
+	"github.com/CarriedWorldUniverse/bridle/ctxmap/embed"
+	"github.com/CarriedWorldUniverse/bridle/ctxmap/extractor"
+	"github.com/CarriedWorldUniverse/bridle/ctxmap/memory"
 	"github.com/CarriedWorldUniverse/agora/internal/harness"
-	"github.com/CarriedWorldUniverse/agora/internal/render"
-	"github.com/CarriedWorldUniverse/agora/internal/store"
+	"github.com/CarriedWorldUniverse/bridle/ctxmap/render"
+	"github.com/CarriedWorldUniverse/bridle/ctxmap/store"
 )
 
 func env(k, def string) string {
@@ -46,6 +49,8 @@ type lockedProposer struct {
 	p  *extractor.Extractor
 }
 
+var _ memory.Proposer = (*lockedProposer)(nil)
+
 func (l *lockedProposer) Propose(cur extractor.Turn, ctx []extractor.Turn, gl map[string]string) ([]extractor.FactProposal, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -54,6 +59,7 @@ func (l *lockedProposer) Propose(cur extractor.Turn, ctx []extractor.Turn, gl ma
 
 type sessionEntry struct {
 	sess *harness.Session
+	eng  *memory.Engine
 	st   *store.Store
 	rend *render.Renderer
 }
@@ -239,7 +245,7 @@ func (s *server) call(name string, raw json.RawMessage) (string, error) {
 		if model == "" {
 			model = "ornith"
 		}
-		var prop harness.Proposer
+		var prop memory.Proposer
 		if mapOn {
 			lp, err := s.loadExtractor()
 			if err != nil {
@@ -266,18 +272,25 @@ func (s *server) call(name string, raw json.RawMessage) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		var eng *memory.Engine
+		if mapOn {
+			var emb embed.Embedder
+			var judge memory.PairJudge
+			if s.emb != nil {
+				emb = s.emb
+			}
+			if lp, ok := prop.(*lockedProposer); ok {
+				judge = &lockedJudge{lp: lp}
+			}
+			eng = memory.New(memory.Config{}, st, rend, prop, emb, judge)
+		}
 		sess := harness.NewSession(harness.Config{
 			SystemPrompt: a.SystemPrompt, Model: model, MapEnabled: mapOn,
 			TailTurns:      a.TailTurns,
 			TranscriptPath: filepath.Join(s.dataDir, tmpID+".transcript.jsonl"),
-		}, prov, st, rend, prop)
-		if mapOn && s.emb != nil {
-			if lp, ok := prop.(*lockedProposer); ok {
-				sess.SetReconciler(s.emb, &lockedJudge{lp: lp})
-			}
-		}
+		}, prov, eng)
 		s.mu.Lock()
-		s.sessions[sess.ID()] = &sessionEntry{sess: sess, st: st, rend: rend}
+		s.sessions[sess.ID()] = &sessionEntry{sess: sess, eng: eng, st: st, rend: rend}
 		s.mu.Unlock()
 		return jsonOut(map[string]any{"session_id": sess.ID(), "map_enabled": mapOn, "model": model}), nil
 
@@ -372,8 +385,7 @@ func (s *server) call(name string, raw json.RawMessage) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		sub, _ := e.rend.RenderSubgraph(e.sess.RetrievePreview(a.Message))
-		return e.rend.RenderCore() + "\n\n" + sub, nil
+		return e.sess.Preview(a.Message), nil
 
 	case "store_audit":
 		e, err := s.getSession(a.SessionID)

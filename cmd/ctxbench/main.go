@@ -1,3 +1,5 @@
+//go:build ctxmap_llama
+
 // ctxbench — run a ctxmap workload against a live backend and append to bench.db.
 //
 //	ctxbench -workload workloads/correction-fits.json -reps 3 -map=true [-tail 8]
@@ -16,11 +18,12 @@ import (
 
 	"github.com/CarriedWorldUniverse/agora/internal/backend/openai"
 	"github.com/CarriedWorldUniverse/agora/internal/bench"
-	"github.com/CarriedWorldUniverse/agora/internal/embed"
-	"github.com/CarriedWorldUniverse/agora/internal/extractor"
+	"github.com/CarriedWorldUniverse/bridle/ctxmap/embed"
+	"github.com/CarriedWorldUniverse/bridle/ctxmap/memory"
+	"github.com/CarriedWorldUniverse/bridle/ctxmap/extractor"
 	"github.com/CarriedWorldUniverse/agora/internal/harness"
-	"github.com/CarriedWorldUniverse/agora/internal/render"
-	"github.com/CarriedWorldUniverse/agora/internal/store"
+	"github.com/CarriedWorldUniverse/bridle/ctxmap/render"
+	"github.com/CarriedWorldUniverse/bridle/ctxmap/store"
 )
 
 func env(k, def string) string {
@@ -71,9 +74,9 @@ func main() {
 		BackendModel: *model, MapEnabled: *mapOn, TailTurns: *tail, AssemblyBudget: *budget,
 	}
 
-	var prop harness.Proposer
-	var emb *embed.Llama
-	var judge harness.PairJudge
+	var prop memory.Proposer
+	var emb embed.Embedder
+	var judge memory.PairJudge
 	if *mapOn {
 		ex, err := extractor.New(extractor.Config{ExtractModelPath: exPath, KindModelPath: kindPath, Threads: 12})
 		if err != nil {
@@ -100,10 +103,11 @@ func main() {
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		sess := harness.NewSession(harness.Config{Model: *model, MapEnabled: *mapOn, TailTurns: *tail, AssemblyBudget: *budget}, prov, st, rend, prop)
-		if emb != nil && judge != nil {
-			sess.SetReconciler(emb, judge)
+		var eng *memory.Engine
+		if *mapOn {
+			eng = memory.New(memory.Config{}, st, rend, prop, emb, judge)
 		}
+		sess := harness.NewSession(harness.Config{Model: *model, MapEnabled: *mapOn, TailTurns: *tail, AssemblyBudget: *budget}, prov, eng)
 		return sess, st, func() { sess.Close(); st.Close() }, nil
 	}
 

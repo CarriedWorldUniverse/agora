@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"github.com/CarriedWorldUniverse/agora/internal/harness"
-	"github.com/CarriedWorldUniverse/agora/internal/store"
+	"github.com/CarriedWorldUniverse/bridle/ctxmap/store"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -29,6 +29,7 @@ import (
 
 type Probe struct {
 	// Type: "contains" (answer must contain Want, case-insensitive),
+	// "contains_any" (Want is a |-separated list; any match passes),
 	// "not_contains", "fact_in_store" (a fact matching Want by token overlap
 	// exists, non-retracted), "no_live_contradiction" (store audit finds no
 	// live core contradiction).
@@ -277,6 +278,18 @@ func evalProbe(p *Probe, answer string, st *store.Store) ProbeResult {
 	switch p.Type {
 	case "contains":
 		pr.Pass = strings.Contains(strings.ToLower(answer), strings.ToLower(p.Want))
+		if !pr.Pass {
+			pr.Detail = truncate(answer, 160)
+		}
+	case "contains_any":
+		low := strings.ToLower(answer)
+		for _, w := range strings.Split(p.Want, "|") {
+			if strings.Contains(low, strings.ToLower(strings.TrimSpace(w))) {
+				pr.Pass = true
+				pr.Detail = w
+				break
+			}
+		}
 		if !pr.Pass {
 			pr.Detail = truncate(answer, 160)
 		}
