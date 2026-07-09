@@ -1,0 +1,76 @@
+{
+ "id": "longhaul-realistic",
+ "version": 1,
+ "pressure_tier": "overflow",
+ "notes": "bulk in HISTORY (turns 1-12 padded 18k), probe-adjacent turns short \u2014 measures the uncapped token ratio of small-tail map-on vs budget-truncating standard",
+ "turns": [
+  {
+   "message": "how's the mesh pipeline looking?",
+   "pad_to": 18000
+  },
+  {
+   "message": "any news on the water sim?",
+   "pad_to": 18000
+  },
+  {
+   "message": "decision: the belief field write pass moves to the compute queue called aurora-queue. separately, the water sim pressure pass moves to the queue called cinder-queue.",
+   "pad_to": 18000
+  },
+  {
+   "message": "what's the status of the belief field pass?",
+   "pad_to": 18000
+  },
+  {
+   "message": "did the nightly render finish?",
+   "pad_to": 18000
+  },
+  {
+   "message": "how are the npc brains behaving?",
+   "pad_to": 18000
+  },
+  {
+   "message": "anything odd in the chunk streamer?",
+   "pad_to": 18000
+  },
+  {
+   "message": "how's the economy readout?",
+   "pad_to": 18000
+  },
+  {
+   "message": "did the settlement gen run clean?",
+   "pad_to": 18000
+  },
+  {
+   "message": "any drift in the CA kernel?",
+   "pad_to": 18000
+  },
+  {
+   "message": "how's the road network pass?",
+   "pad_to": 18000
+  },
+  {
+   "message": "another decision: everything on aurora-queue gets profiled by the tool called glimmer, and everything on cinder-queue gets profiled by the tool called lumen.",
+   "pad_to": 18000
+  },
+  {
+   "message": "thanks. quick sanity check on the build before we wrap up?"
+  },
+  {
+   "message": "good. one more thing before the probe questions."
+  },
+  {
+   "message": "so which profiler ends up covering the belief field write pass - glimmer or lumen? name exactly one.",
+   "probe": {
+    "type": "contains",
+    "want": "glimmer"
+   }
+  },
+  {
+   "message": "and which profiler covers the water sim pressure pass? name exactly one.",
+   "probe": {
+    "type": "contains",
+    "want": "lumen"
+   }
+  }
+ ]
+}
