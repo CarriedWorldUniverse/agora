@@ -1,9 +1,11 @@
 # ctxmap — a cross-referenced working memory for LLM harnesses
 
 *Research write-up, 2026-07-09. Status: v0 built and validated on this branch
-(`ctxmap-harness`); migration into the runtime harness (bridle) is planned but
-not started. All numbers below come from recorded runs in `bench.db` and the
-frozen golden-set scorer — nothing is projected.*
+(`ctxmap-harness`); migration into the runtime harness is underway — bridle
+PR #76 carries the system as `bridle/ctxmap/` packages, attached via existing
+hook seams (zero bridle core changes). Agora remains the research harness and
+evaluation bench. All numbers below come from recorded runs in `bench.db` and
+the frozen golden-set scorer — nothing is projected.*
 
 ## 1. The idea
 
@@ -51,8 +53,11 @@ prompt    ← RENDERER: [system + memory-framing + epoch-frozen core]
             + recall/inspect tools served to the model
 ```
 
-**Fact lifecycle.** Facts enter `PROPOSED`, except operator-stated facts
-(grounded in the user's words) which enter `VERIFIED`. Promotion paths:
+**Fact lifecycle.** Facts enter `PROPOSED`, except operator-stated
+*performatives* — decisions, rules, namings, stated intents, where saying
+makes it so — which enter `VERIFIED` (grounded in the user's words, and
+force-classified: operator *reports* of world state enter PROPOSED, and
+question presuppositions are dropped — see §5). Promotion paths:
 operator pin, or reuse-confirmation — rendered into context in ≥3 distinct
 turns without acquiring a contradiction. Trust ranks
 `OPERATOR_STATED > MODEL_OBSERVED > MODEL_DERIVED`; a newer fact from a
