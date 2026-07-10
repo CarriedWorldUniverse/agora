@@ -1,3 +1,5 @@
 bin/
 vendor-llama/
 ctxmapd-bin
+/ctxagent
+tasks/*/__pycache__/
