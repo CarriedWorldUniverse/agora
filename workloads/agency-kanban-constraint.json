@@ -1,0 +1,47 @@
+{
+ "id": "agency-kanban-constraint",
+ "version": 1,
+ "pressure_tier": "fits-in-window",
+ "notes": "Adapted from Luke's Dev Lab kanban agency task. A hard WIP-limit constraint and a non-default column set are planted early, then filler, then build. tail=2 truncates them; only memory carries the rule into the build.",
+ "turns": [
+  {
+   "message": "building a kanban board (vanilla HTML/CSS/JS, localStorage). hard rule: the 'In Progress' column has a WIP limit of 3 \u2014 block adding a 4th card, never allow it."
+  },
+  {
+   "message": "columns are: Backlog, In Progress, Review, Done \u2014 not the usual three."
+  },
+  {
+   "message": "how's the water sim coming along?"
+  },
+  {
+   "message": "any news on the settlement generator?"
+  },
+  {
+   "message": "did the nightly render finish?"
+  },
+  {
+   "message": "how are the npc brains behaving?"
+  },
+  {
+   "message": "remind me \u2014 what's the WIP limit rule we set for In Progress?",
+   "probe": {
+    "type": "contains",
+    "want": "3"
+   }
+  },
+  {
+   "message": "and list the exact column names we're using.",
+   "probe": {
+    "type": "contains",
+    "want": "Backlog"
+   }
+  },
+  {
+   "message": "now build the board honoring everything above.",
+   "probe": {
+    "type": "contains_any",
+    "want": "limit|WIP|max|3"
+   }
+  }
+ ]
+}

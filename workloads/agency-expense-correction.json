@@ -1,0 +1,53 @@
+{
+ "id": "agency-expense-correction",
+ "version": 1,
+ "pressure_tier": "fits-in-window",
+ "notes": "Adapted from Luke's Dev Lab expense-tracker agency task. Tests correction/contradiction across a session: a category is planted then corrected; tail=2 truncates both. Probe checks the correction survived and the retracted value is gone.",
+ "turns": [
+  {
+   "message": "building a personal expense tracker (vanilla HTML/CSS/JS, localStorage). currency is NZD."
+  },
+  {
+   "message": "categories: rent, food, koha, transport, power."
+  },
+  {
+   "message": "how's the water sim coming along?"
+  },
+  {
+   "message": "any news on the settlement generator?"
+  },
+  {
+   "message": "correction: drop 'koha' as a category \u2014 use 'donations' instead. currency stays NZD."
+  },
+  {
+   "message": "did the nightly render finish?"
+  },
+  {
+   "message": "how are the npc brains behaving?"
+  },
+  {
+   "message": "what's the state of the road network pass?"
+  },
+  {
+   "message": "list the final set of expense categories we settled on.",
+   "probe": {
+    "type": "contains",
+    "want": "donations"
+   }
+  },
+  {
+   "message": "just to be sure we're not carrying the old label anywhere.",
+   "probe": {
+    "type": "not_contains",
+    "want": "koha"
+   }
+  },
+  {
+   "message": "and confirm the currency for the tracker.",
+   "probe": {
+    "type": "contains",
+    "want": "NZD"
+   }
+  }
+ ]
+}

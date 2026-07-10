@@ -1,0 +1,59 @@
+{
+ "id": "agency-memory-match",
+ "version": 1,
+ "pressure_tier": "fits-in-window",
+ "notes": "Adapted from Luke's Dev Lab memory-match agency task. Requirements accrete across turns with filler between; tail=2 truncates them. Non-default values (6x6 not 4x4, 450ms, specific theme) so a correct answer requires memory, not a model's default choice.",
+ "turns": [
+  {
+   "message": "we're building the memory-match card game (vanilla HTML/CSS/JS). first spec: use a 6x6 grid with 18 pairs, NOT the usual 4x4."
+  },
+  {
+   "message": "card faces: use planet and space emojis for the theme."
+  },
+  {
+   "message": "how's the water sim coming along?"
+  },
+  {
+   "message": "any news on the settlement generator?"
+  },
+  {
+   "message": "important detail: the mismatch flip-back delay must be exactly 450ms."
+  },
+  {
+   "message": "did the nightly render finish?"
+  },
+  {
+   "message": "how are the npc brains behaving?"
+  },
+  {
+   "message": "the win screen must show both the move count and the elapsed seconds."
+  },
+  {
+   "message": "what's the state of the road network pass?"
+  },
+  {
+   "message": "any drift in the CA kernel?"
+  },
+  {
+   "message": "ok, before you write any code \u2014 remind me what grid dimensions we locked in.",
+   "probe": {
+    "type": "contains_any",
+    "want": "6x6|6\u00d76|6 by 6|6 x 6|36"
+   }
+  },
+  {
+   "message": "and the exact mismatch flip-back delay?",
+   "probe": {
+    "type": "contains",
+    "want": "450"
+   }
+  },
+  {
+   "message": "and what must the win screen display?",
+   "probe": {
+    "type": "contains_any",
+    "want": "move|elapsed|seconds"
+   }
+  }
+ ]
+}
