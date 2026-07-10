@@ -113,6 +113,41 @@ since fixed) was an honest *"I don't know — working memory has no fact about
 that"* after three recall attempts. A memory harness changes not just the
 accuracy but the *character* of failure.
 
+### Cross-model: does model size substitute for the store?
+
+The same memory test (three parallel invented-token chains — no world knowledge
+can help, guess floor ~1/3 per probe — planted early and truncated out of a
+2-turn tail) run across a 10× size range, map-on vs map-off, 9 probe-passes/cell:
+
+| model | map-on | map-off |
+|---|---|---|
+| Ornith ~35B | 67% | **0%** |
+| GLM-4.6 ~355B | 56% | **0%** |
+| DeepSeek-V4 | **100%** | 56%¹ |
+
+Two findings, one of them the most important result in this document:
+
+1. **Size does not substitute for the store.** Without memory, a 355B model
+   confabulates a fact from six turns ago exactly as confidently as a 35B one —
+   both invented profiler names on *every* map-off probe (Quill, Prophet, Atlas,
+   Torch, wayfarer…). Not one of the three models, at any scale, said "I don't
+   know" without the store. You cannot attend to what isn't in the window, and
+   more parameters don't change that.
+2. **The store's deepest value is honesty, not just accuracy.** GLM's one map-on
+   "miss" was it stating *"working memory records this routes to aurora-queue,
+   but not which profiler — I don't have that"* — an honest abstention citing
+   the store, where the *same model* invented a name every time map-off. The map
+   converts confident confabulation into grounded uncertainty. For agentic
+   reliability that matters more than the accuracy delta.
+
+Caveats, recorded not smoothed: map-on is not a clean 100% for the smaller
+models because it now rides on **extraction reliability** (whether the local
+Qwen hybrid captured the fact) plus recall-tool use — not the big model;
+DeepSeek hit 100% by using recall best. This is the binding constraint the
+project already knew, and exactly what a trained in-harness model would target.
+¹ DeepSeek's map-off passed the first probe 3/3 — "glimmer" is likely the most
+guessable invented name; randomizing name↔chain would remove the residual. n=3.
+
 ### Token economics: what the model reads at the moment of answering
 
 On the bulk-in-history workload (18 padded turns ≈ 324k tokens of history,
