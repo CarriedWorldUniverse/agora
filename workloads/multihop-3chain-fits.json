@@ -1,0 +1,56 @@
+{
+ "id": "multihop-3chain-fits",
+ "version": 1,
+ "pressure_tier": "fits-in-window",
+ "notes": "CLEAN 3-chain tail=2 memory test. Three invented-token chains (belief->aurora->glimmer, watersim->cinder->lumen, road->basalt->quill); 3 fillers after the last plant so tail=2 truncates BOTH plant turns. THREE distinct profilers => guess rate ~1/3 per probe and a lucky guess cannot cascade via elimination (the artifact that inflated the 2-chain map-off to 75%).",
+ "turns": [
+  {
+   "message": "how's the water sim?"
+  },
+  {
+   "message": "any news on the settlement generator?"
+  },
+  {
+   "message": "three routing decisions: the belief field write pass goes to aurora-queue, the water sim pressure pass goes to cinder-queue, and the road network pass goes to basalt-queue."
+  },
+  {
+   "message": "did the nightly render finish?"
+  },
+  {
+   "message": "how are the npc brains?"
+  },
+  {
+   "message": "and the profiler assignments: aurora-queue is profiled by glimmer, cinder-queue by lumen, and basalt-queue by quill."
+  },
+  {
+   "message": "any drift in the CA kernel?"
+  },
+  {
+   "message": "how's biome blending?"
+  },
+  {
+   "message": "did pathfinding land?"
+  },
+  {
+   "message": "which profiler covers the belief field write pass? name exactly one.",
+   "probe": {
+    "type": "contains",
+    "want": "glimmer"
+   }
+  },
+  {
+   "message": "which profiler covers the water sim pressure pass? name exactly one.",
+   "probe": {
+    "type": "contains",
+    "want": "lumen"
+   }
+  },
+  {
+   "message": "which profiler covers the road network pass? name exactly one.",
+   "probe": {
+    "type": "contains",
+    "want": "quill"
+   }
+  }
+ ]
+}

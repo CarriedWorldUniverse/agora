@@ -1,0 +1,52 @@
+{
+ "id": "multihop-clean-fits",
+ "version": 1,
+ "pressure_tier": "fits-in-window",
+ "notes": "CLEAN tail=2 memory test, no padding. Two invented-token chains (belief->aurora->glimmer, watersim->cinder->lumen); 3 fillers after the last plant so tail=2 truncates BOTH plants. Two-chain probe unguessable (50/50 without the join).",
+ "turns": [
+  {
+   "message": "how's the water sim?"
+  },
+  {
+   "message": "any news on the settlement generator?"
+  },
+  {
+   "message": "decision: the belief field write pass moves to the queue called aurora-queue; separately the water sim pressure pass moves to the queue called cinder-queue."
+  },
+  {
+   "message": "did the nightly render finish?"
+  },
+  {
+   "message": "how are the npc brains?"
+  },
+  {
+   "message": "state of the road network pass?"
+  },
+  {
+   "message": "another decision: everything on aurora-queue gets profiled by the tool glimmer, and everything on cinder-queue gets profiled by the tool lumen."
+  },
+  {
+   "message": "any drift in the CA kernel?"
+  },
+  {
+   "message": "how's biome blending?"
+  },
+  {
+   "message": "did pathfinding land?"
+  },
+  {
+   "message": "so which profiler ends up covering the belief field write pass - glimmer or lumen? name exactly one.",
+   "probe": {
+    "type": "contains",
+    "want": "glimmer"
+   }
+  },
+  {
+   "message": "and which profiler covers the water sim pressure pass? name exactly one.",
+   "probe": {
+    "type": "contains",
+    "want": "lumen"
+   }
+  }
+ ]
+}
