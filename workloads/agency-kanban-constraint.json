@@ -1,8 +1,8 @@
 {
  "id": "agency-kanban-constraint",
- "version": 1,
+ "version": 2,
  "pressure_tier": "fits-in-window",
- "notes": "Adapted from Luke's Dev Lab kanban agency task. A hard WIP-limit constraint and a non-default column set are planted early, then filler, then build. tail=2 truncates them; only memory carries the rule into the build.",
+ "notes": "Adapted from Luke's Dev Lab kanban agency task. A hard WIP-limit constraint and a non-default column set are planted early, then filler, then build. tail=2 truncates them; only memory carries the rule into the build. v2: 'contains 3' too weak (map-off echoed 3); tightened to require the In-Progress+limit phrasing; column probe now contains_any over the two non-default names (Backlog|Review).",
  "turns": [
   {
    "message": "building a kanban board (vanilla HTML/CSS/JS, localStorage). hard rule: the 'In Progress' column has a WIP limit of 3 \u2014 block adding a 4th card, never allow it."
@@ -23,17 +23,17 @@
    "message": "how are the npc brains behaving?"
   },
   {
-   "message": "remind me \u2014 what's the WIP limit rule we set for In Progress?",
+   "message": "state the WIP limit rule for In Progress \u2014 the column name and the exact number.",
    "probe": {
-    "type": "contains",
-    "want": "3"
+    "type": "contains_any",
+    "want": "in progress.*3|3.*in progress|limit of 3|max 3|wip limit"
    }
   },
   {
    "message": "and list the exact column names we're using.",
    "probe": {
-    "type": "contains",
-    "want": "Backlog"
+    "type": "contains_any",
+    "want": "Backlog|Review"
    }
   },
   {

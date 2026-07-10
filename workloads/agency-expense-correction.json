@@ -1,8 +1,8 @@
 {
  "id": "agency-expense-correction",
- "version": 1,
+ "version": 2,
  "pressure_tier": "fits-in-window",
- "notes": "Adapted from Luke's Dev Lab expense-tracker agency task. Tests correction/contradiction across a session: a category is planted then corrected; tail=2 truncates both. Probe checks the correction survived and the retracted value is gone.",
+ "notes": "Adapted from Luke's Dev Lab expense-tracker agency task. Tests correction/contradiction across a session: a category is planted then corrected; tail=2 truncates both. Probe checks the correction survived and the retracted value is gone. v2: moved the koha-absence check onto a BUILD-output turn (asking 'confirm koha is dropped' made the model echo 'koha' \u2014 probe self-defeat).",
  "turns": [
   {
    "message": "building a personal expense tracker (vanilla HTML/CSS/JS, localStorage). currency is NZD."
@@ -36,7 +36,7 @@
    }
   },
   {
-   "message": "just to be sure we're not carrying the old label anywhere.",
+   "message": "build a quick category dropdown snippet using our final categories.",
    "probe": {
     "type": "not_contains",
     "want": "koha"
