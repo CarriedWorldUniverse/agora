@@ -113,12 +113,19 @@ type sink struct{}
 func (sink) Emit(bridle.Event) {}
 
 type result struct {
-	config          string
-	passed          bool
-	steps           int
-	inTok, outTok   int
-	toolResultChars int // raw chars the backend WOULD have seen without distilling (map-off) / did (map-off)
-	wallSec         float64
+	config        string
+	passed        bool
+	steps         int
+	inTok, outTok int // BACKEND (remote model) tokens only — the paid bill
+	wallSec       float64
+	// internal AI (local Qwen extractor/judge/distiller) — invisible to the
+	// backend token counters; metered separately so cost = backend + internal.
+	intCalls    int
+	intOutTok   int
+	intInTokEst int
+	intWallSec  float64
+	distCalls   int     // distiller calls specifically (the synchronous tax)
+	distWallSec float64
 }
 
 func setupSandbox(taskDir string) string {
@@ -127,13 +134,27 @@ func setupSandbox(taskDir string) string {
 	return tmp
 }
 
+// restorePristineTests overwrites the sandbox tests/ from the pristine task dir
+// before scoring, so a PASS can only come from src/ actually matching the spec —
+// never from the agent editing the tests or golden fixtures (the task forbids
+// it, but the harness must not TRUST that; verify the artifact, not the
+// narrative). The bugs live only in src/, so the ground-truth tests are safe to
+// reset wholesale.
+func restorePristineTests(dir, taskDir string) {
+	if _, err := os.Stat(filepath.Join(taskDir, "tests")); err != nil {
+		return
+	}
+	os.RemoveAll(filepath.Join(dir, "tests"))
+	exec.Command("cp", "-r", filepath.Join(taskDir, "tests"), filepath.Join(dir, "tests")).Run()
+}
+
 func score(dir, testCmd string) bool {
 	cmd := exec.Command("bash", "-lc", testCmd)
 	cmd.Dir = dir
 	return cmd.Run() == nil // exit 0 = all pass
 }
 
-func runConfig(name, model string, mapOn bool, taskDir, taskPrompt, testCmd string, maxSteps int) result {
+func runConfig(name, model string, mapOn, within bool, taskDir, taskPrompt, testCmd string, maxSteps int) result {
 	dir := setupSandbox(taskDir)
 	defer os.RemoveAll(dir)
 
@@ -141,8 +162,11 @@ func runConfig(name, model string, mapOn bool, taskDir, taskPrompt, testCmd stri
 	h := bridle.NewHarness(prov)
 
 	var eng *memory.Engine
+	var ex *extractor.Extractor
+	var detach func()
 	if mapOn {
-		ex, err := extractor.New(extractor.Config{
+		var err error
+		ex, err = extractor.New(extractor.Config{
 			ExtractModelPath: env("CTXMAP_EXTRACT_MODEL", filepath.Join(os.Getenv("HOME"), "models/Qwen3-1.7B-Q8_0.gguf")),
 			KindModelPath:    env("CTXMAP_KIND_MODEL", filepath.Join(os.Getenv("HOME"), "models/Qwen3-4B-Q8_0.gguf")),
 			Threads:          12,
@@ -151,7 +175,6 @@ func runConfig(name, model string, mapOn bool, taskDir, taskPrompt, testCmd stri
 			fmt.Println("extractor:", err)
 			os.Exit(1)
 		}
-		defer ex.Close()
 		st, _ := store.Open(":memory:")
 		rend, _ := render.New(st)
 		var emb embed.Embedder
@@ -160,10 +183,13 @@ func runConfig(name, model string, mapOn bool, taskDir, taskPrompt, testCmd stri
 			defer e.Close()
 		}
 		eng = memory.New(memory.Config{SessionID: name}, st, rend, ex, emb, ex)
-		eng.SetDistiller(distill.New(ex, 1500))
-		defer eng.Close()
-		detach := adapter.Attach(h, eng)
-		defer detach()
+		d := distill.New(ex, 1500)
+		d.SkipTools("read_file", "list_files") // step 2: never distill file/dir reads (lossy on source, ~5% gain, full model call)
+		eng.SetDistiller(d)
+		if within {
+			eng.EnableWithinTurn() // step 3: mine tool results + refresh block each step
+		}
+		detach = adapter.Attach(h, eng)
 	}
 
 	t0 := time.Now()
@@ -175,13 +201,32 @@ func runConfig(name, model string, mapOn bool, taskDir, taskPrompt, testCmd stri
 		UserMessage: taskPrompt, Tools: hostTools(),
 	}, &sandboxRunner{dir: dir}, sink{})
 	res.wallSec = time.Since(t0).Seconds()
-	if err != nil {
+	if err == nil {
+		res.steps = tr.StepCount
+		res.inTok = int(tr.Usage.InputTokens)
+		res.outTok = int(tr.Usage.OutputTokens)
+	} else {
 		fmt.Printf("  %s: RunTurn error: %v\n", name, err)
+	}
+
+	// Tear down the engine and capture the internal-AI meter. eng.Close() drains
+	// the async extraction worker, so the meter reflects ALL internal work
+	// (extraction included), not just the synchronous distiller calls.
+	if mapOn {
+		detach()
+		eng.Close()
+		rep := ex.Report()
+		tot := rep.Total()
+		res.intCalls, res.intOutTok, res.intInTokEst = tot.Calls, tot.OutTokens, tot.InTokensEst
+		res.intWallSec = tot.Wall.Seconds()
+		res.distCalls, res.distWallSec = rep.Distill.Calls, rep.Distill.Wall.Seconds()
+		ex.Close()
+	}
+
+	if err != nil {
 		return res
 	}
-	res.steps = tr.StepCount
-	res.inTok = int(tr.Usage.InputTokens)
-	res.outTok = int(tr.Usage.OutputTokens)
+	restorePristineTests(dir, taskDir) // step 4: score only src/, never trust the agent left tests/ intact
 	res.passed = score(dir, testCmd)
 	return res
 }
@@ -193,10 +238,17 @@ func main() {
 	small := flag.String("small", "ornith", "small model")
 	big := flag.String("big", "deepseek-v4-pro", "big model")
 	only := flag.String("only", "", "run only this config (small-on|small-off|big-on|big-off)")
+	within := flag.Bool("within", false, "within-turn mode: ingest tool results + refresh block each step (map-on configs)")
 	flag.Parse()
 
 	prompt, _ := os.ReadFile(filepath.Join(*taskDir, "README-task.md"))
+	// Per-task test command: <taskDir>/test-cmd if present, else the kvstore default.
 	testCmd := "python3 tests/test_kv.py"
+	if b, err := os.ReadFile(filepath.Join(*taskDir, "test-cmd")); err == nil {
+		if s := strings.TrimSpace(string(b)); s != "" {
+			testCmd = s
+		}
+	}
 	taskPrompt := string(prompt) + "\n\nUse the tools to explore, fix the code, and run the tests until they pass. When all tests pass, stop."
 
 	configs := []struct {
@@ -214,13 +266,18 @@ func main() {
 			continue
 		}
 		for r := 0; r < *reps; r++ {
-			res := runConfig(c.name, c.model, c.mapOn, *taskDir, taskPrompt, testCmd, *maxSteps)
+			res := runConfig(c.name, c.model, c.mapOn, *within, *taskDir, taskPrompt, testCmd, *maxSteps)
 			status := "FAIL"
 			if res.passed {
 				status = "PASS"
 			}
-			fmt.Printf("[%s r%d] %s  steps=%d in=%d out=%d %.0fs\n",
-				res.config, r, status, res.steps, res.inTok, res.outTok, res.wallSec)
+			// backend = paid remote tokens; internal = local Qwen (extractor/
+			// judge/distiller), invisible to the backend counter. Report both so
+			// cost is total, not just the remote bill.
+			fmt.Printf("[%s r%d] %s  steps=%d backend[in=%d out=%d] internal[calls=%d out=%d inEst=%d %.0fs; distill=%dcalls/%.0fs] wall=%.0fs\n",
+				res.config, r, status, res.steps, res.inTok, res.outTok,
+				res.intCalls, res.intOutTok, res.intInTokEst, res.intWallSec,
+				res.distCalls, res.distWallSec, res.wallSec)
 		}
 	}
 }
