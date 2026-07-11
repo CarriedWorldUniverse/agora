@@ -1,0 +1,9 @@
+[
+  {"statement": "Every multi-byte integer in the CWLOG format is big-endian (network byte order); little-endian is never used anywhere in the format.", "kind": "CONSTRAINT", "entities": ["cwlog", "endianness"]},
+  {"statement": "The CWLOG frame CRC32 is computed over the PAYLOAD bytes only — it does not cover the header (magic, version, type, payload_len) and does not cover itself — and is stored as an unsigned 32-bit big-endian value after the payload.", "kind": "CONSTRAINT", "entities": ["cwlog", "crc32", "framing-py"]},
+  {"statement": "The CWLOG frame layout is: MAGIC 'CWL0' (4 bytes), VERSION (1 byte), TYPE (1 byte), PAYLOAD_LEN (u32 big-endian), PAYLOAD, CRC32 (u32 big-endian).", "kind": "CONSTRAINT", "entities": ["cwlog", "frame-layout", "framing-py"]},
+  {"statement": "The CWLOG format version is 2; a reader must reject any other version as a format error.", "kind": "CONSTRAINT", "entities": ["cwlog", "version", "const-py"]},
+  {"statement": "The CWLOG record type codes are PUT=0x01, DELETE=0x02, CHECKPOINT=0x03; 0x00 and 0x04+ are reserved and must not be emitted.", "kind": "CONSTRAINT", "entities": ["cwlog", "type-codes", "const-py"]},
+  {"statement": "The PUT record payload field order is: timestamp (u64 big-endian), key_len (u16 big-endian), key bytes, value_len (u32 big-endian), value bytes — the key comes before the value.", "kind": "CONSTRAINT", "entities": ["cwlog", "put-record", "records-py"]},
+  {"statement": "All CWLOG timestamps are milliseconds since the Unix epoch carried as u64 big-endian — never seconds and never 32-bit.", "kind": "CONSTRAINT", "entities": ["cwlog", "timestamps"]}
+]
