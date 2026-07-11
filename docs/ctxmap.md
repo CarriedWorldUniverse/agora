@@ -1,11 +1,13 @@
 # ctxmap — a cross-referenced working memory for LLM harnesses
 
-*Research write-up, 2026-07-09. Status: v0 built and validated on this branch
-(`ctxmap-harness`); migration into the runtime harness is underway — bridle
-PR #76 carries the system as `bridle/ctxmap/` packages, attached via existing
-hook seams (zero bridle core changes). Agora remains the research harness and
-evaluation bench. All numbers below come from recorded runs in `bench.db` and
-the frozen golden-set scorer — nothing is projected.*
+*Research write-up, updated 2026-07-11. Status: v0 built and validated on this
+branch (`ctxmap-harness`); migration into the runtime harness is underway —
+bridle PR #76 carries the system as `bridle/ctxmap/` packages, attached via
+existing hook seams (zero bridle core changes). Agora remains the research
+harness and evaluation bench. The dialogue results (§3) are strong and settled;
+the agentic-coding arm (§3, "The agentic-coding test") is a deliberately honest
+negative result that redraws the road map. All numbers come from recorded runs
+— nothing is projected; single-rep cells are labelled as such.*
 
 ## 1. The idea
 
@@ -177,6 +179,108 @@ benched as the planned alternative and rejected: P 55 / R 71 / entity 68 and
 The caveat is recorded — our prompts are Qwen-tuned and prompt-model coupling
 is real — but the 23-point gap exceeds any tuning delta ever observed here.
 
+### The agentic-coding test: does memory carry a long tool loop?
+
+The dialogue results above are strong where the map was designed to apply:
+multi-turn conversations where a fact scrolls out between turns. The harder,
+more valuable question is agentic coding — the operator's own diagnosis was
+that most agentic-coding failure is *slow context degradation*: tool output
+buries the structure (APIs, signatures, the spec) the model needs later. We
+built a real experiment to test it, and it is the most instructive negative
+result in the project.
+
+**Setup.** `ctxagent` drives bridle's production tool loop over a sandbox
+(read/write/run/list scoped to a temp dir), scoring by whether the task's test
+suite passes. Two tasks were built: a 3-bug kv-store (too easy — every config
+passed in ~4 steps, context never degraded) and then `cwlog`, a hardened
+long-horizon task: an 11-file binary codec with 5 bugs whose *rules live only
+in a SPEC.md*, checked against opaque golden fixtures so self-consistent-but-
+wrong code passes its own round-trip but fails ground truth. Fixing it requires
+recalling the spec across a long tool loop.
+
+**First finding — a regime mismatch, found by instrumentation.** At full 256K
+window every config passed `cwlog`, map on or off, at both 35B and frontier
+scale. The map made no difference because it made no *appearance*: the engine
+is a **between-turn** memory (assemble at turn start, extract at turn end), but
+an agentic task is **one turn with dozens of internal tool steps**. A content
+dump showed the injected block was assembled once, empty (`core=61 chars`), and
+frozen for the whole loop. The map was architecturally inert inside the work it
+was meant to help. This is why the dialogue wins did not transfer for free.
+
+We built **within-turn mode** to close it: mine durable facts from tool results
+as they stream, and keep a working-memory block in the (never-scrolled) system
+prompt, refreshed only when it changes. It works mechanically — the block
+populates from tool output — but surfaced the next constraint immediately: the
+local extractor running *concurrently* with the loop starves it (12 threads on
+a 16-core box drove steps from ~10s to ~130s). Between-turn extraction is free
+because it runs after the turn; within-turn extraction competes. The in-harness
+model needs its own compute, not shared cores — a hardware finding, not a design
+flaw.
+
+**Forcing the failure regime.** At full window nothing degrades, so we added an
+eviction cap (`-keep N`): keep the last *N* tool results verbatim, replace older
+ones with a stub. Structure is preserved (no API pairing errors) — only the
+information is removed, which is exactly what a real long session does to early
+tool output. The protocol was the operator's: **push map-off to reliable failure
+first, then hold everything constant and intervene.**
+
+| config @ eviction cap | keep=2 | keep=4 |
+|---|---|---|
+| Ornith 35B, no memory | FAIL | FAIL ×2 (40st/1.17M tok · 31st/689k) |
+| DeepSeek, no memory | FAIL ×2 | — |
+| Ornith 35B, **seeded** memory¹ | 1 PASS / 3 FAIL | FAIL ×2 (quit early: 20st, 17st) |
+
+¹ *Seeded* = the 7 true spec facts asserted as verified, no extractor at all —
+the **upper bound**: "if extraction were perfect, does the rest of the chain
+deliver?" It isolates injection/use from extraction quality (and from the CPU
+contention above).
+
+**What it shows, stated honestly:**
+
+1. **No-memory is robustly dead under eviction: 0/7 across both models**, at
+   keep=2 and keep=4, with failures costing 0.3–1.2M tokens each. A frontier
+   model with its context degraded fails a task it solves in 7 steps intact —
+   the same "size doesn't substitute for the store" result as the dialogue
+   test, now on real coding. That half is solid.
+2. **Durable facts alone do not rescue the session.** The seeded upper bound
+   passed once in four completed reps, and the keep=4 dose-response came back
+   *inverted* — gentler pressure did not make facts more sufficient. Perfect
+   spec knowledge in the prompt was not enough.
+3. **Working state is the co-binding constraint.** The failure signature is
+   consistent: the model has the spec (rendered every step, confirmed in the
+   dumps) but loses its own *progress* — the test output it just saw, which
+   files it already rewrote — every few calls, then rewrites wholesale, wanders
+   to hallucinated paths, and quits early. A memory of durable facts is only
+   half of short-term memory; the other half is a compact "where am I" (current
+   test status, files touched, hypotheses ruled out), which the map does not yet
+   model.
+4. **The live-extraction run confirmed extraction is the binding link.** With
+   the real 1.7B mining tool output, the injected block held vacuous facts
+   ("uses the CRC32 checksum rule" — missing the load-bearing *payload-only*
+   detail), an unreconciled contradiction ("version is 2" and "version is 1"
+   side by side), and a confabulated one ("the encode/decode functions are
+   correct" — they hold two bugs). The keel lesson reproduced *inside* the
+   extractor. Seeded runs exist precisely to factor this out.
+
+**Method note (an incident, kept not smoothed).** A flailing agent escaped the
+sandbox through `run_command` — `read_file`/`write_file` were path-jailed but
+`bash` was not — and overwrote the *pristine* task mid-campaign, silently
+invalidating a repeat batch (caught by a file-mtime that matched a rep's end to
+the second). `run_command` now runs in an unprivileged mount namespace with
+`$HOME` read-only, every command is audit-logged, and a post-rep integrity gate
+aborts the campaign if the task dir is ever dirtied. A benchmark harness must be
+adversarial about its own ground truth; "the agent won't touch that" is not a
+guarantee.
+
+**The honest scope limit.** `keep=N` is a *cliff*, not gradual decay: by the
+time the model has read five files, file one is already gone. A real 256K window
+holds ~50 intact results and degrades smoothly. So the proven claim is the
+sharp one — *durable facts alone cannot carry a session with near-zero working
+memory* — which is genuine and points squarely at the next unit, but is harsher
+than the production question. Token-budget eviction (evict oldest past a byte
+budget) is the realistic regime, and the question there becomes "does the map
+beat plain truncation at equal budget."
+
 ## 4. Findings (the transferable ones)
 
 1. **Embeddings detect topic, not truth.** Calibration on labeled pairs:
@@ -225,6 +329,29 @@ is real — but the 23-point gap exceeds any tuning delta ever observed here.
    client timeout, a cache-layout violation of our own spec, fingerprint
    contamination from dirty trees — were all found by the bench or by
    driving the harness through its own MCP, not by inspection.
+10. **A working memory is two memories.** Durable facts (the spec, an API, a
+    decision) and working state (what I just tried, what the test said, what I
+    already changed) are different kinds and degrade differently. A store of
+    durable facts — even a *perfect* one — does not carry an agentic session
+    that keeps losing its own progress. The dialogue wins ride on durable
+    facts; the coding regime exposes that working state is a separate, co-equal
+    unit the map does not yet model.
+11. **Token counters are one-sided; meter both ends.** A host's backend token
+    count is remote-only — the local extractor/judge/distiller never pass
+    through a provider, so their cost is invisible to it. Every "N× fewer
+    tokens" claim is the *remote bill*; the sovereign-compute side is
+    unmetered until you add it. Once metered: internal work is large but async
+    and off the turn's critical path in between-turn mode, whereas the
+    synchronous distiller was the entire map-on latency tax.
+12. **Distilling code is the wrong tool.** Summarizing a file the model must
+    edit byte-exact is lossy on the load-bearing bytes; measured ~5%
+    compression for a full local-model call — pure latency for no saving.
+    Distillation pays only on report-shaped output (logs, command results),
+    never on source. Gate it by tool, not by size alone.
+13. **A benchmark harness must guard its own ground truth.** An agent with a
+    shell will, when lost, find and corrupt the pristine task if nothing stops
+    it. Jail the tools, audit every command, and gate integrity after each rep
+    — silent corruption produces invalid comparisons that look like data.
 
 ## 5. Trust, deference, and the challenge principle
 
@@ -299,6 +426,27 @@ model likely clears the see-saw), reconciler extraction cost on junk-heavy
 turns (never blocks a turn; visible in bench waits), statistical weight on
 the overflow results (n=2–3 per cell), and prefix caching's return on the
 local backend (cache-hit% instrumentation is already wired and honest).
+
+The agentic-coding arm (§3) is where the open work now concentrates, ranked
+by the evidence:
+
+1. **Working-state block.** The coding failures point here directly: render a
+   compact "where am I" — current test status, files touched, hypotheses
+   ruled out — from data the harness already observes (it sees every tool
+   call and result), no extraction required. This is the co-equal half of
+   short-term memory the seeded upper bound proved facts alone cannot supply.
+   Rerun seeded+state at keep=4: if it passes reliably where seeded-only
+   failed, working state is confirmed as the missing unit.
+2. **Token-budget eviction.** `keep=N` is a cliff; evicting oldest past a byte
+   budget is the realistic degradation regime. The question there is the
+   production one: does the map beat plain truncation at equal budget? Worth
+   running only after the working-state layer exists to test against it.
+3. **Extraction on its own compute.** Within-turn extraction is correct in
+   design but starves the loop on shared CPU, and the 1.7B mines tool output
+   sparsely and sometimes wrongly. Both point at a stronger extractor on a
+   dedicated device (GPU) — which also unblocks running within-turn mode at a
+   usable speed. The training spike (teacher-labeled tool-result extraction)
+   is the same target, now evidence-justified rather than speculative.
 
 Migration target: the runtime harness (bridle). The store/renderer/extractor
 trio lifts out — the research turn loop here was always scaffolding (it is
