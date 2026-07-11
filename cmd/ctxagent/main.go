@@ -44,6 +44,43 @@ type sandboxRunner struct{ dir string }
 
 var sandboxDbg = os.Getenv("CTXMAP_DEBUG") != ""
 
+// jailAvailable: can we run commands in an unprivileged user+mount namespace?
+// Probed once at startup; without it we run unjailed with a loud warning.
+var jailAvailable = func() bool {
+	if err := exec.Command("unshare", "-Umr", "true").Run(); err != nil {
+		fmt.Fprintln(os.Stderr, "WARNING: unshare userns unavailable — run_command is UNJAILED (pristine task dirs are writable by escaped commands)")
+		return false
+	}
+	return true
+}()
+
+// auditCommand appends every run_command to a persistent audit log —
+// the incident post-mortem was blinded by a driver script's 2>/dev/null;
+// the audit trail must not depend on how a run was launched.
+func auditCommand(command string) {
+	f, err := os.OpenFile(filepath.Join(os.Getenv("HOME"), ".ctxmap", "cmd-audit.log"),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s | %s\n", time.Now().UTC().Format(time.RFC3339), command)
+}
+
+// taskIntegrityCheck verifies the pristine task dir is git-clean. Runs after
+// every rep: if an agent ever corrupts the benchmark again, the campaign
+// aborts loudly instead of silently producing invalid comparisons.
+func taskIntegrityCheck(taskDir string) error {
+	out, err := exec.Command("git", "-C", taskDir, "status", "--porcelain", "--", ".").CombinedOutput()
+	if err != nil {
+		return nil // not a git repo (external task dir) — gate not applicable
+	}
+	if s := strings.TrimSpace(string(out)); s != "" {
+		return fmt.Errorf("PRISTINE TASK DIR DIRTY after rep:\n%s", s)
+	}
+	return nil
+}
+
 func (r *sandboxRunner) Run(_ context.Context, call bridle.ToolCall) (json.RawMessage, error) {
 	var a struct {
 		Path, Content, Command string
@@ -85,10 +122,27 @@ func (r *sandboxRunner) Run(_ context.Context, call bridle.ToolCall) (json.RawMe
 		}
 		return out("OK wrote " + a.Path)
 	case "run_command":
+		auditCommand(a.Command)
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "bash", "-lc", a.Command)
-		cmd.Dir = r.dir
+		// JAIL (incident 2026-07-11): a flailing agent escaped via run_command
+		// (bash is not path-jailed like read/write_file) and corrupted the
+		// PRISTINE task dir mid-campaign, invalidating a rep batch. Commands now
+		// run in their own mount namespace with ALL of $HOME read-only; only the
+		// sandbox (under /tmp) is writable. Reads outside the sandbox remain
+		// possible (full hiding needs a pivot_root jail) — the audit log makes
+		// them visible, and the post-rep integrity gate catches anything missed.
+		var cmd *exec.Cmd
+		if jailAvailable {
+			// inner shell is NON-login: .bashrc writes to ~/.cache, which is now
+			// read-only — a login shell would prepend a spurious "Read-only file
+			// system" warning to every tool result the model sees
+			jail := `mount --bind "$HOME" "$HOME" && mount -o remount,bind,ro "$HOME" && cd "$1" && exec bash -c "$2"`
+			cmd = exec.CommandContext(ctx, "unshare", "-Umr", "bash", "-c", jail, "jail", r.dir, a.Command)
+		} else {
+			cmd = exec.CommandContext(ctx, "bash", "-lc", a.Command)
+			cmd.Dir = r.dir
+		}
 		b, _ := cmd.CombinedOutput()
 		s := string(b)
 		if len(s) > 8000 {
@@ -398,6 +452,10 @@ func main() {
 				res.config, r, status, res.steps, res.inTok, res.outTok,
 				res.intCalls, res.intOutTok, res.intInTokEst, res.intWallSec,
 				res.distCalls, res.distWallSec, res.wallSec)
+			if err := taskIntegrityCheck(*taskDir); err != nil {
+				fmt.Println("ABORT:", err)
+				os.Exit(2)
+			}
 		}
 	}
 }
