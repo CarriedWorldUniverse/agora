@@ -6,8 +6,10 @@ bridle PR #76 carries the system as `bridle/ctxmap/` packages, attached via
 existing hook seams (zero bridle core changes). Agora remains the research
 harness and evaluation bench. The dialogue results (§3) are strong and settled;
 the agentic-coding arm (§3, "The agentic-coding test") is a deliberately honest
-negative result that redraws the road map. All numbers come from recorded runs
-— nothing is projected; single-rep cells are labelled as such.*
+negative result — memory rescues a *dialogue* context because a truncated fact
+is gone, but a *coding* context is disk-recoverable, so eviction cannot force
+the same loss, and no correctness rescue survived n=5. All numbers come from
+recorded runs — nothing is projected; small-n cells are labelled as such.*
 
 ## 1. The idea
 
@@ -224,43 +226,79 @@ information is removed, which is exactly what a real long session does to early
 tool output. The protocol was the operator's: **push map-off to reliable failure
 first, then hold everything constant and intervene.**
 
-| config @ eviction cap | keep=2 | keep=4 |
+We tested two memory conditions against no-memory: **seeded facts** (the 7 true
+spec facts asserted as verified, no extractor — the *upper bound*, "if
+extraction were perfect does the rest of the chain deliver?") and **seed +
+working-state** (facts plus a second, deterministic memory — see below).
+
+| model / memory | keep=2 | keep=4 |
 |---|---|---|
-| Ornith 35B, no memory | FAIL | FAIL ×2 (40st/1.17M tok · 31st/689k) |
-| DeepSeek, no memory | FAIL ×2 | — |
-| Ornith 35B, **seeded** memory¹ | 1 PASS / 3 FAIL | FAIL ×2 (quit early: 20st, 17st) |
+| Ornith 35B, none | FAIL | FAIL ×2 |
+| Ornith, seed facts | 1 PASS / 3 FAIL | 0 / 2 |
+| Ornith, seed + working-state | 1 PASS / 1 FAIL | 0 / 3 |
+| DeepSeek, none | 3 PASS / 2 FAIL (n=5) | 2 PASS (n=2)¹ |
+| DeepSeek, seed + working-state | 4 PASS / 1 FAIL (n=5) | 2 PASS (n=2) |
 
-¹ *Seeded* = the 7 true spec facts asserted as verified, no extractor at all —
-the **upper bound**: "if extraction were perfect, does the rest of the chain
-deliver?" It isolates injection/use from extraction quality (and from the CPU
-contention above).
+¹ one of the two DeepSeek keep=4 no-memory passes cost **2.03M tokens** (a brute
+re-read grind); the other 184k.
 
-**What it shows, stated honestly:**
+**We built the second memory the failures pointed at, and it did not help.** The
+Ornith failure signature was consistent — it had the spec every step (confirmed
+in block dumps) but lost its own *progress*: which files it had edited, what the
+test last said. So we added **working state**: a deterministic "where am I" block
+(files edited with counts, the last command's output, recent steps) built purely
+from observing tool calls — no model, no extraction, always fresh. It rendered
+correctly (it even surfaced a self-inflicted `ImportError` back to the model),
+but the pass rate did not move: Ornith seed+state stayed ~1/5, keep=4 stayed 0/3.
+A perfect *second* memory changed nothing. That falsified the "working state is
+the missing half" hypothesis and pointed the diagnosis elsewhere.
 
-1. **No-memory is robustly dead under eviction: 0/7 across both models**, at
-   keep=2 and keep=4, with failures costing 0.3–1.2M tokens each. A frontier
-   model with its context degraded fails a task it solves in 7 steps intact —
-   the same "size doesn't substitute for the store" result as the dialogue
-   test, now on real coding. That half is solid.
-2. **Durable facts alone do not rescue the session.** The seeded upper bound
-   passed once in four completed reps, and the keep=4 dose-response came back
-   *inverted* — gentler pressure did not make facts more sufficient. Perfect
-   spec knowledge in the prompt was not enough.
-3. **Working state is the co-binding constraint.** The failure signature is
-   consistent: the model has the spec (rendered every step, confirmed in the
-   dumps) but loses its own *progress* — the test output it just saw, which
-   files it already rewrote — every few calls, then rewrites wholesale, wanders
-   to hallucinated paths, and quits early. A memory of durable facts is only
-   half of short-term memory; the other half is a compact "where am I" (current
-   test status, files touched, hypotheses ruled out), which the map does not yet
-   model.
-4. **The live-extraction run confirmed extraction is the binding link.** With
-   the real 1.7B mining tool output, the injected block held vacuous facts
-   ("uses the CRC32 checksum rule" — missing the load-bearing *payload-only*
-   detail), an unreconciled contradiction ("version is 2" and "version is 1"
-   side by side), and a confabulated one ("the encode/decode functions are
-   correct" — they hold two bugs). The keel lesson reproduced *inside* the
-   extractor. Seeded runs exist precisely to factor this out.
+**Then the capability test collapsed the rescue itself.** The obvious next
+question — is the ceiling the memory or the model? — sent us to DeepSeek with the
+best memory we had, under the same eviction. The first two reps looked decisive
+(no-memory 0/2 → memory 2/2). They were noise: at n=5 it is **3/5 vs 4/5**.
+There is no correctness rescue on this task. (This is why single-rep cells are
+labelled throughout — Ornith and DeepSeek both swing wildly here, and a clean
+2/2 that does not survive n=5 is exactly the trap.)
+
+**Why it collapsed — the load-bearing finding.** The dialogue benches worked
+because a truncated fact is *gone*: unrecoverable, so the store is the only path
+to it. **Coding ground truth lives on disk.** Evicting tool *results* from the
+context does not destroy the information — `SPEC.md` and the source files still
+exist, and a capable model simply **re-reads them**. Eviction on a coding task
+is not information loss; it is a re-read *tax*. A stable model pays the tax and
+passes with or without memory; that is exactly what DeepSeek does (3–4/5 either
+way), and the one keep=4 no-memory pass that cost 2.03M tokens *is* the tax made
+visible. **The correctness-rescue thesis proven for dialogue does not transfer
+to coding, for a structural reason: you cannot evict what the model can
+reconstruct from disk.** The right metric for coding memory is therefore
+**token-efficiency at matched success** (the cheapest passes were all
+with-memory — 9–14 steps / 42–64k vs no-memory's 31–37 steps / 207–813k — but at
+n=5 this is suggestive, not established), or a task whose lost information is
+genuinely unrecoverable (a nondeterministic result, an external observation).
+Pass/fail under disk-recoverable eviction measures the model's re-read stamina,
+not its memory.
+
+**And the local model fails for a different reason than information.** Ornith's
+0/7 no-memory record is real, but the capability test shows *why* it is not the
+"size doesn't substitute for the store" result the dialogue benches showed:
+DeepSeek with the *same* degraded context mostly passes. Ornith fails from
+**behavioral instability** — multi-minute thinking-crawls, 1–2M-token spirals,
+premature quits — not from missing context (it had perfect context in the seeded
+runs and still failed). For the sovereignty goal this is the sharp finding: the
+blocker to a local <60B model doing real agentic work is the model's *stability
+under load*, not the memory harness. A better-behaved small model plus this
+memory is the path; more memory machinery is not.
+
+**A note on the live extractor, kept for completeness.** Before the seeded runs
+factored it out, the real 1.7B mining tool output produced a block of vacuous
+facts ("uses the CRC32 checksum rule" — missing the load-bearing *payload-only*
+detail), an unreconciled contradiction ("version is 2" and "version is 1" side
+by side), and a confabulation ("the encode/decode functions are correct" — they
+hold two bugs). The keel lesson reproduced *inside* the extractor. This is a real
+weakness of the fact-extraction path — but the seeded upper bound shows fixing it
+would not have changed the coding outcome, because the outcome was not
+extraction-bound.
 
 **Method note (an incident, kept not smoothed).** A flailing agent escaped the
 sandbox through `run_command` — `read_file`/`write_file` were path-jailed but
@@ -272,14 +310,13 @@ aborts the campaign if the task dir is ever dirtied. A benchmark harness must be
 adversarial about its own ground truth; "the agent won't touch that" is not a
 guarantee.
 
-**The honest scope limit.** `keep=N` is a *cliff*, not gradual decay: by the
-time the model has read five files, file one is already gone. A real 256K window
-holds ~50 intact results and degrades smoothly. So the proven claim is the
-sharp one — *durable facts alone cannot carry a session with near-zero working
-memory* — which is genuine and points squarely at the next unit, but is harsher
-than the production question. Token-budget eviction (evict oldest past a byte
-budget) is the realistic regime, and the question there becomes "does the map
-beat plain truncation at equal budget."
+**The honest scope limit.** `keep=N` is a *cliff*, not gradual decay, and — the
+larger point — it is the *wrong instrument for coding* regardless of severity,
+because disk-recoverable ground truth means eviction never forces the
+irrecoverable loss it does for dialogue. The transferable result is the
+diagnosis, not a rescue number: **memory's value in coding is efficiency and
+model-stability support, not correctness rescue; the correctness-rescue result
+belongs to the dialogue regime, where the lost fact is truly gone.**
 
 ## 4. Findings (the transferable ones)
 
@@ -329,26 +366,35 @@ beat plain truncation at equal budget."
    client timeout, a cache-layout violation of our own spec, fingerprint
    contamination from dirty trees — were all found by the bench or by
    driving the harness through its own MCP, not by inspection.
-10. **A working memory is two memories.** Durable facts (the spec, an API, a
-    decision) and working state (what I just tried, what the test said, what I
-    already changed) are different kinds and degrade differently. A store of
-    durable facts — even a *perfect* one — does not carry an agentic session
-    that keeps losing its own progress. The dialogue wins ride on durable
-    facts; the coding regime exposes that working state is a separate, co-equal
-    unit the map does not yet model.
-11. **Token counters are one-sided; meter both ends.** A host's backend token
+10. **You cannot evict what the model can re-read.** The correctness-rescue
+    result is real for dialogue because a truncated fact is *unrecoverable*.
+    Coding ground truth persists on disk, so evicting tool results from context
+    is a re-read tax, not information loss — and a capable model just pays it.
+    A memory-rescue benchmark is only valid where the lost information cannot be
+    reconstructed. For coding, measure token-efficiency at matched success, or
+    make the lost information genuinely unrecoverable. We learned this the hard
+    way: a clean 2/2-vs-0/2 rescue evaporated to 4/5-vs-3/5 at n=5.
+11. **Memory does not fix a model that can't act on it.** Given a *perfect*
+    working memory (seeded facts + deterministic working-state), a brittle 35B
+    still failed ~4/5 under eviction — thinking-crawls, million-token spirals,
+    early quits — while a capable model with the *same* context mostly passed.
+    The bottleneck for local agentic work is model stability under load, not the
+    memory harness. Two independent memory interventions (facts, then facts +
+    working-state) both left the pass rate flat: the constraint was never the
+    context.
+12. **Token counters are one-sided; meter both ends.** A host's backend token
     count is remote-only — the local extractor/judge/distiller never pass
     through a provider, so their cost is invisible to it. Every "N× fewer
     tokens" claim is the *remote bill*; the sovereign-compute side is
     unmetered until you add it. Once metered: internal work is large but async
     and off the turn's critical path in between-turn mode, whereas the
     synchronous distiller was the entire map-on latency tax.
-12. **Distilling code is the wrong tool.** Summarizing a file the model must
+13. **Distilling code is the wrong tool.** Summarizing a file the model must
     edit byte-exact is lossy on the load-bearing bytes; measured ~5%
     compression for a full local-model call — pure latency for no saving.
     Distillation pays only on report-shaped output (logs, command results),
     never on source. Gate it by tool, not by size alone.
-13. **A benchmark harness must guard its own ground truth.** An agent with a
+14. **A benchmark harness must guard its own ground truth.** An agent with a
     shell will, when lost, find and corrupt the pristine task if nothing stops
     it. Jail the tools, audit every command, and gate integrity after each rep
     — silent corruption produces invalid comparisons that look like data.
@@ -427,26 +473,32 @@ turns (never blocks a turn; visible in bench waits), statistical weight on
 the overflow results (n=2–3 per cell), and prefix caching's return on the
 local backend (cache-hit% instrumentation is already wired and honest).
 
-The agentic-coding arm (§3) is where the open work now concentrates, ranked
-by the evidence:
+The agentic-coding arm (§3) closed as a negative result; the open work it
+leaves, ranked by the evidence:
 
-1. **Working-state block.** The coding failures point here directly: render a
-   compact "where am I" — current test status, files touched, hypotheses
-   ruled out — from data the harness already observes (it sees every tool
-   call and result), no extraction required. This is the co-equal half of
-   short-term memory the seeded upper bound proved facts alone cannot supply.
-   Rerun seeded+state at keep=4: if it passes reliably where seeded-only
-   failed, working state is confirmed as the missing unit.
-2. **Token-budget eviction.** `keep=N` is a cliff; evicting oldest past a byte
-   budget is the realistic degradation regime. The question there is the
-   production one: does the map beat plain truncation at equal budget? Worth
-   running only after the working-state layer exists to test against it.
-3. **Extraction on its own compute.** Within-turn extraction is correct in
-   design but starves the loop on shared CPU, and the 1.7B mines tool output
-   sparsely and sometimes wrongly. Both point at a stronger extractor on a
-   dedicated device (GPU) — which also unblocks running within-turn mode at a
-   usable speed. The training spike (teacher-labeled tool-result extraction)
-   is the same target, now evidence-justified rather than speculative.
+1. **The right coding metric is efficiency, not pass/fail.** Because coding
+   ground truth is disk-recoverable, the correctness question is ill-posed
+   under eviction — the model just re-reads. The valid experiment measures
+   **tokens/steps to matched success**: does the memory make the model solve
+   it *cheaper*? The n=5 data is suggestive (with-memory passes were 9–14
+   steps vs 31–37 without) but noisy; a proper efficiency run with error bars
+   would settle it. Both the working-state block and the fact store are built
+   and ready to measure this way.
+2. **Model stability, not memory, is the local-agentic blocker.** A perfect
+   memory did not rescue Ornith (thinking-crawls, token spirals, early quits)
+   where the same context carried DeepSeek. The sovereignty path runs through
+   a better-behaved small model — or guardrails on the pathology (thinking-
+   budget caps, loop detection) — not more memory machinery. This reframes the
+   whole local-model effort.
+3. **A genuinely-unrecoverable-loss task** would let the coding rescue thesis
+   be tested at all: information that cannot be re-read (a nondeterministic
+   result, an external API response, a one-time computation). Until then the
+   correctness-rescue claim stays scoped to dialogue, where it is proven.
+
+The two component memories are worth keeping regardless: the working-state
+block is cheap, deterministic, and correct instrumentation; the fact store is
+the proven dialogue win. Neither is invalidated — the coding *rescue* framing
+was.
 
 Migration target: the runtime harness (bridle). The store/renderer/extractor
 trio lifts out — the research turn loop here was always scaffolding (it is
