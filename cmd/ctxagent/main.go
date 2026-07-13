@@ -293,7 +293,7 @@ func seedStore(st *store.Store, sessionID, path string) (int, error) {
 	return n, nil
 }
 
-func runConfig(name, model string, mapOn, within bool, keep int, seedFile, taskDir, taskPrompt, testCmd string, maxSteps int) result {
+func runConfig(name, model string, mapOn, within, state bool, keep int, seedFile, taskDir, taskPrompt, testCmd string, maxSteps int) result {
 	dir := setupSandbox(taskDir)
 	defer os.RemoveAll(dir)
 
@@ -341,6 +341,9 @@ func runConfig(name, model string, mapOn, within bool, keep int, seedFile, taskD
 		}
 		if within {
 			eng.EnableWithinTurn() // step 3: mine tool results + refresh block each step
+		}
+		if state {
+			eng.EnableWorkingState() // the second memory: deterministic progress tracking
 		}
 		detach = adapter.Attach(h, eng)
 	}
@@ -413,6 +416,7 @@ func main() {
 	within := flag.Bool("within", false, "within-turn mode: ingest tool results + refresh block each step (map-on configs)")
 	keep := flag.Int("keep", 0, "evict tool results older than the last N (0 = no eviction) — forces the context-degradation regime")
 	seed := flag.String("seed", "", "seed file of verified facts (upper-bound mode: no extractor; isolates injection from extraction)")
+	state := flag.Bool("state", false, "working-state block: deterministic progress tracking (files edited, last test result, recent steps)")
 	flag.Parse()
 
 	prompt, _ := os.ReadFile(filepath.Join(*taskDir, "README-task.md"))
@@ -440,7 +444,7 @@ func main() {
 			continue
 		}
 		for r := 0; r < *reps; r++ {
-			res := runConfig(c.name, c.model, c.mapOn, *within, *keep, *seed, *taskDir, taskPrompt, testCmd, *maxSteps)
+			res := runConfig(c.name, c.model, c.mapOn, *within, *state, *keep, *seed, *taskDir, taskPrompt, testCmd, *maxSteps)
 			status := "FAIL"
 			if res.passed {
 				status = "PASS"
