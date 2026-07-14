@@ -5,11 +5,13 @@ branch (`ctxmap-harness`); migration into the runtime harness is underway —
 bridle PR #76 carries the system as `bridle/ctxmap/` packages, attached via
 existing hook seams (zero bridle core changes). Agora remains the research
 harness and evaluation bench. The dialogue results (§3) are strong and settled;
-the agentic-coding arm (§3, "The agentic-coding test") is a deliberately honest
+the agentic-coding arm (§3, "The agentic-coding test") is a closed, honest
 negative result — memory rescues a *dialogue* context because a truncated fact
-is gone, but a *coding* context is disk-recoverable, so eviction cannot force
-the same loss, and no correctness rescue survived n=5. All numbers come from
-recorded runs — nothing is projected; small-n cells are labelled as such.*
+is gone, but a *coding* context is disk-recoverable, so eviction forces neither
+a correctness failure memory can rescue (n=5) nor an efficiency cost memory can
+recover (n=6); what coding wants is working-set retention, a different mechanism.
+All numbers come from recorded runs — nothing is projected; small-n cells are
+labelled as such.*
 
 ## 1. The idea
 
@@ -300,6 +302,37 @@ weakness of the fact-extraction path — but the seeded upper bound shows fixing
 would not have changed the coding outcome, because the outcome was not
 extraction-bound.
 
+**The efficiency test — the metric the diagnosis says is the right one.** If
+correctness is ill-posed under disk-recoverable eviction, the honest question is
+cost: does memory make the model solve it *cheaper*? Three arms on DeepSeek, six
+reps each, measuring steps and tokens among the *passing* runs (matched
+success):
+
+| arm | pass | median steps | median tokens | token range (passes) |
+|---|---|---|---|---|
+| A — full window, no memory | 6/6 | **7** | **~40k** | 33–59k |
+| B — keep=2, no memory | 2/6 | 35.5 | ~383k | 343–423k |
+| C — keep=2, seed + working-state | 4/6 | 30.5 | ~294k | 267–561k |
+
+Two things, and the second is the answer. First, **eviction is catastrophic for
+efficiency**: the full-window floor is 7 steps / 40k tokens; degrade the context
+and the *same* PASS costs 4–5× the steps and 7–9× the tokens — the re-read tax,
+measured. Second, **memory does not recover it.** With perfect seeded facts *and*
+working-state, arm C is 30.5 steps / 294k — a ~15–25% shave on B, well inside the
+noise (the passing-token ranges overlap; C has a 561k pass worse than any B
+pass), and nowhere near A's 7 / 40k. Memory closes a small sliver of a large gap.
+
+**Why memory can't close it — and what a coding memory would actually have to
+be.** The dominant cost under eviction is not recalling the spec (injected,
+cheap) or tracking progress (working-state handles it) — it is that with a
+2-result window the model must **keep re-reading the source files to edit them**.
+That live file content is not a durable fact and not session progress; it is the
+*working set*, and a fact/state store neither holds it nor should. The thing that
+would help is keeping (or cheaply re-serving) the files under active edit — a
+smarter eviction policy that never drops the working set, which is "don't evict
+what you're using", not "extract a memory from it". A fact store is a dialogue
+instrument; it does not map onto the coding cost structure.
+
 **Method note (an incident, kept not smoothed).** A flailing agent escaped the
 sandbox through `run_command` — `read_file`/`write_file` were path-jailed but
 `bash` was not — and overwrote the *pristine* task mid-campaign, silently
@@ -310,13 +343,16 @@ aborts the campaign if the task dir is ever dirtied. A benchmark harness must be
 adversarial about its own ground truth; "the agent won't touch that" is not a
 guarantee.
 
-**The honest scope limit.** `keep=N` is a *cliff*, not gradual decay, and — the
-larger point — it is the *wrong instrument for coding* regardless of severity,
-because disk-recoverable ground truth means eviction never forces the
-irrecoverable loss it does for dialogue. The transferable result is the
-diagnosis, not a rescue number: **memory's value in coding is efficiency and
-model-stability support, not correctness rescue; the correctness-rescue result
-belongs to the dialogue regime, where the lost fact is truly gone.**
+**The coding arm, closed.** Three results, each with a mechanism: no correctness
+rescue (ground truth is disk-recoverable, n=5); no meaningful efficiency recovery
+(~20% of a 7× tax, within noise, n=6); and the reason for both — the coding
+working set is *live file content*, which a durable-fact/working-state memory
+structurally does not hold. Memory's proven, valuable home is **dialogue**, where
+a truncated fact is genuinely gone: there it rescues correctness, is
+size-independent, and converts confabulation into honest abstention. Its coding
+value is marginal, and what agentic coding actually wants — working-set retention
+— is a different mechanism than the one this project built. That is the honest
+end of the coding investigation.
 
 ## 4. Findings (the transferable ones)
 
@@ -473,32 +509,35 @@ turns (never blocks a turn; visible in bench waits), statistical weight on
 the overflow results (n=2–3 per cell), and prefix caching's return on the
 local backend (cache-hit% instrumentation is already wired and honest).
 
-The agentic-coding arm (§3) closed as a negative result; the open work it
-leaves, ranked by the evidence:
+The agentic-coding arm (§3) is **closed** — both the correctness and the
+efficiency questions were run to conclusion, both negative with a mechanism. The
+directions it leaves are not "finish the coding memory"; they are the pointers it
+produced:
 
-1. **The right coding metric is efficiency, not pass/fail.** Because coding
-   ground truth is disk-recoverable, the correctness question is ill-posed
-   under eviction — the model just re-reads. The valid experiment measures
-   **tokens/steps to matched success**: does the memory make the model solve
-   it *cheaper*? The n=5 data is suggestive (with-memory passes were 9–14
-   steps vs 31–37 without) but noisy; a proper efficiency run with error bars
-   would settle it. Both the working-state block and the fact store are built
-   and ready to measure this way.
+1. **If coding memory is ever revisited, it must retain the working set, not
+   extract from it.** The efficiency test showed the dominant eviction cost is
+   re-reading live file content — not facts, not progress. The lever is a
+   working-set-aware eviction/retention policy (never drop the file under active
+   edit), which is a harness scheduling feature, not a memory store. The fact
+   store does not map onto the coding cost structure and should not be forced
+   onto it.
 2. **Model stability, not memory, is the local-agentic blocker.** A perfect
    memory did not rescue Ornith (thinking-crawls, token spirals, early quits)
    where the same context carried DeepSeek. The sovereignty path runs through
    a better-behaved small model — or guardrails on the pathology (thinking-
-   budget caps, loop detection) — not more memory machinery. This reframes the
-   whole local-model effort.
-3. **A genuinely-unrecoverable-loss task** would let the coding rescue thesis
-   be tested at all: information that cannot be re-read (a nondeterministic
-   result, an external API response, a one-time computation). Until then the
-   correctness-rescue claim stays scoped to dialogue, where it is proven.
+   budget caps, loop detection) — not more memory machinery. This is the real
+   reframing of the local-model effort, and it is independent of ctxmap.
+3. **The correctness-rescue claim stays scoped to dialogue**, where the lost
+   fact is genuinely unrecoverable and the result is proven. Testing it in an
+   agentic setting would need a task whose lost information cannot be re-read (a
+   nondeterministic result, an external observation) — a different task, not a
+   different memory.
 
-The two component memories are worth keeping regardless: the working-state
-block is cheap, deterministic, and correct instrumentation; the fact store is
-the proven dialogue win. Neither is invalidated — the coding *rescue* framing
-was.
+Both component memories survive the close: the working-state block is cheap,
+deterministic, correct instrumentation (useful for any agentic harness,
+independent of the rescue question), and the fact store is the proven dialogue
+win. Neither is invalidated — only the coding *rescue* framing was, and it is now
+retired.
 
 Migration target: the runtime harness (bridle). The store/renderer/extractor
 trio lifts out — the research turn loop here was always scaffolding (it is
