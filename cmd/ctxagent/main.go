@@ -19,9 +19,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
+	"github.com/CarriedWorldUniverse/bridle/codemap"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/adapter"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/distill"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/embed"
@@ -203,6 +205,181 @@ func (ev *evictor) hook(_ context.Context, in bridle.BeforeModelCallCtx) (bridle
 	return in, bridle.HookContinue, nil
 }
 
+// wsetEvictor is arm F: working-set retention — eviction that works WITH the
+// trained re-verify-via-tools tendency instead of against it (operator
+// direction, 2026-07-15). Policy:
+//   - read_file: the LATEST read of each distinct path is never evicted;
+//     older reads of the SAME path are stubbed as superseded (the model's
+//     instinct to re-check finds current truth already in context).
+//   - everything else (run_command, list_files): keep the last `keep`
+//     verbatim, stub older — history still ages out; only the working set
+//     is retained.
+//
+// Context therefore scales with the size of the working set (files touched),
+// not the length of the history — the property a real long session needs.
+// Deterministic, zero internal AI.
+type wsetEvictor struct {
+	keep int
+}
+
+func (ev *wsetEvictor) hook(_ context.Context, in bridle.BeforeModelCallCtx) (bridle.BeforeModelCallCtx, bridle.HookAction, error) {
+	msgs := in.Request.Messages
+	// map tool-call id -> (name, path) from assistant tool_use blocks
+	type callMeta struct{ name, path string }
+	calls := map[string]callMeta{}
+	for _, m := range msgs {
+		for _, tc := range m.ToolCalls {
+			var args struct {
+				Path string `json:"path"`
+			}
+			json.Unmarshal(tc.Args, &args)
+			calls[tc.ID] = callMeta{tc.Name, args.Path}
+		}
+	}
+	// newest read per path wins; find it in one reverse pass
+	latestRead := map[string]int{} // path -> newest msg index holding a live read
+	var otherIdx []int             // non-read_file live results, in order
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
+		if m.Role != "tool_result" || strings.HasPrefix(m.Content, "[tool result") {
+			continue
+		}
+		c := calls[m.ToolCallID]
+		if c.name == "read_file" && c.path != "" {
+			if _, seen := latestRead[c.path]; !seen {
+				latestRead[c.path] = i
+			}
+		}
+	}
+	for i, m := range msgs {
+		if m.Role != "tool_result" || strings.HasPrefix(m.Content, "[tool result") {
+			continue
+		}
+		c := calls[m.ToolCallID]
+		if c.name == "read_file" && c.path != "" {
+			if latestRead[c.path] != i {
+				msgs[i].Content = fmt.Sprintf("[tool result superseded: a newer read of %s appears later in context; %d chars dropped]", c.path, len(m.Content))
+			}
+			continue
+		}
+		otherIdx = append(otherIdx, i)
+	}
+	for n := 0; n < len(otherIdx)-ev.keep; n++ {
+		i := otherIdx[n]
+		msgs[i].Content = fmt.Sprintf(evictStub, len(msgs[i].Content))
+	}
+	return in, bridle.HookContinue, nil
+}
+
+// journal is arm E: a GCC-shaped decision journal. The model checkpoints
+// decisions/findings/rejected hypotheses via journal_commit; entries render
+// into a system-prompt block that survives eviction — the only durable channel
+// in the run. Zero internal AI: the model authors, the harness only persists.
+// The disk-recoverable objection (arms B/C/D) does not apply here: the journey
+// is the one part of a coding session that is NOT on disk.
+type journal struct {
+	mu      sync.Mutex
+	entries []string
+	baseSys string // host AppendSystemPrompt captured at step 0 (Request persists across steps; append-per-call would compound duplicates — the ctxmap adapter pattern)
+}
+
+const journalCap = 30 // 40-step runs never legitimately need more
+
+func (j *journal) commit(milestone, notes string) string {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if len(j.entries) >= journalCap {
+		return "journal full — stop committing and finish the task"
+	}
+	e := strings.TrimSpace(milestone)
+	if n := strings.TrimSpace(notes); n != "" {
+		e += " — " + n
+	}
+	if len(e) > 700 {
+		e = e[:700] + "…"
+	}
+	j.entries = append(j.entries, e)
+	if dbg := os.Getenv("CTXMAP_DEBUG"); dbg != "" {
+		fmt.Fprintf(os.Stderr, "[journal] commit %d: %s\n", len(j.entries), e)
+	}
+	return fmt.Sprintf("committed entry %d (journal persists across context eviction)", len(j.entries))
+}
+
+// block renders the protocol + entries. The protocol is ALWAYS present: the
+// smoke rep showed a tool description alone gets zero uptake — the model needs
+// a standing system-prompt instruction (the GCC paper wires its commands the
+// same way).
+func (j *journal) block() string {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	var b strings.Builder
+	b.WriteString("\n\n## Decision journal — MANDATORY protocol\n" +
+		"Your context is aggressively evicted: older tool results become stubs and their information is GONE. " +
+		"The journal below is the ONLY thing that survives. Therefore:\n" +
+		"- IMMEDIATELY after fixing a bug, running the tests, or rejecting a hypothesis, call journal_commit (one line: what/where/outcome).\n" +
+		"- BEFORE re-reading or re-investigating anything, check the journal — never redo work it already records.\n")
+	if len(j.entries) == 0 {
+		b.WriteString("\nJournal: (empty — nothing checkpointed yet)\n")
+		return b.String()
+	}
+	b.WriteString("\nJournal:\n")
+	for i, e := range j.entries {
+		fmt.Fprintf(&b, "%d. %s\n", i+1, e)
+	}
+	return b.String()
+}
+
+func (j *journal) attach(h *bridle.Harness) {
+	h.RegisterBeforeModelCall(func(_ context.Context, in bridle.BeforeModelCallCtx) (bridle.BeforeModelCallCtx, bridle.HookAction, error) {
+		if in.Step == 0 {
+			j.baseSys = in.Request.AppendSystemPrompt
+			in.Request.Tools = append(in.Request.Tools, bridle.ToolDef{
+				Name: "journal_commit",
+				Description: "Checkpoint your investigation into a journal that SURVIVES context eviction (nothing else does). Call after every meaningful step: a bug found (file, symbol, what was wrong, the fix applied), a hypothesis REJECTED (so you never retry it), a test result. milestone = one line; notes = key details.",
+				InputSchema: json.RawMessage(`{"type":"object","properties":{"milestone":{"type":"string"},"notes":{"type":"string"}},"required":["milestone"]}`),
+			})
+		}
+		in.Request.AppendSystemPrompt = j.baseSys + j.block()
+		if os.Getenv("CTXMAP_DEBUG") != "" && in.Step == 0 {
+			fmt.Fprintf(os.Stderr, "[journal] attached: %d tools, sysappend=%dch\n", len(in.Request.Tools), len(in.Request.AppendSystemPrompt))
+		}
+		return in, bridle.HookContinue, nil
+	})
+	h.RegisterBeforeToolCall(func(_ context.Context, in bridle.BeforeToolCallCtx) (bridle.BeforeToolCallCtx, bridle.HookAction, error) {
+		if in.Call.Name != "journal_commit" {
+			return in, bridle.HookContinue, nil
+		}
+		var args struct{ Milestone, Notes string }
+		json.Unmarshal(in.Call.Args, &args)
+		res, _ := json.Marshal(j.commit(args.Milestone, args.Notes))
+		in.Deny = true
+		in.Result = res
+		return in, bridle.HookContinue, nil
+	})
+	// Smoke reps 1-3: DeepSeek never calls a bookkeeping tool from a system-
+	// prompt protocol alone (0 commits / 40 steps, wiring verified). The
+	// pi-brain lesson: don't rely on the model reading the manual — put the
+	// nudge where the model is looking. Append a reminder to every
+	// run_command result (the natural checkpoint moment).
+	h.RegisterAfterToolCall(func(_ context.Context, in bridle.AfterToolCallCtx) (bridle.AfterToolCallCtx, bridle.HookAction, error) {
+		if in.Call.Name != "run_command" || in.Result.Err != "" {
+			return in, bridle.HookContinue, nil
+		}
+		var cur string
+		if json.Unmarshal(in.Result.Result, &cur) != nil {
+			cur = string(in.Result.Result)
+		}
+		cur += "\n\n[journal reminder: this output will be EVICTED soon. journal_commit your conclusions from it NOW (bugs found/fixed, hypotheses rejected, test status).]"
+		b, _ := json.Marshal(cur)
+		in.Result.Result = b
+		return in, bridle.HookContinue, nil
+	})
+}
+
+// journalTaskProtocol is appended to the USER task prompt when -journal is on:
+// smoke reps showed the system-prompt protocol alone gets zero uptake.
+const journalTaskProtocol = "\n\nIMPORTANT — your context is aggressively evicted (older tool results become stubs). The journal_commit tool is the ONLY way to preserve what you learn. After EVERY bug fix, test run, or rejected hypothesis, call journal_commit before doing anything else. The journal is shown in your system prompt and survives eviction; never re-investigate what it already records."
+
 func hostTools() []bridle.ToolDef {
 	obj := func(p string) json.RawMessage { return json.RawMessage(`{"type":"object","properties":` + p + `}`) }
 	return []bridle.ToolDef{
@@ -293,7 +470,7 @@ func seedStore(st *store.Store, sessionID, path string) (int, error) {
 	return n, nil
 }
 
-func runConfig(name, model string, mapOn, within, state bool, keep int, seedFile, taskDir, taskPrompt, testCmd string, maxSteps int) result {
+func runConfig(name, model string, mapOn, within, state, useCodemap, useJournal, wset bool, keep int, seedFile, taskDir, taskPrompt, testCmd string, maxSteps int) result {
 	dir := setupSandbox(taskDir)
 	defer os.RemoveAll(dir)
 
@@ -352,8 +529,28 @@ func runConfig(name, model string, mapOn, within, state bool, keep int, seedFile
 	// (both map-on and map-off — the cap is the experimental pressure; the map
 	// is the intervention)
 	if keep > 0 {
-		ev := &evictor{keep: keep, eng: eng, focus: taskPrompt}
-		h.RegisterBeforeModelCall(ev.hook)
+		if wset {
+			h.RegisterBeforeModelCall((&wsetEvictor{keep: keep}).hook)
+		} else {
+			ev := &evictor{keep: keep, eng: eng, focus: taskPrompt}
+			h.RegisterBeforeModelCall(ev.hook)
+		}
+	}
+
+	// codemap (arm D): the in-harness symbol server over the sandbox — code_*
+	// tools + drift reports on mutation. Independent of ctxmap (deterministic,
+	// no local models), so it composes with any config.
+	if useCodemap {
+		cm := codemap.New(dir, codemap.PyIndexer{})
+		detachCM := codemap.Attach(h, cm)
+		defer detachCM()
+	}
+
+	// decision journal (arm E): agent-authored milestone/rejected-hypothesis
+	// checkpoints in an eviction-proof system-prompt block. Independent of
+	// ctxmap (no models, no store), composes with any config.
+	if useJournal {
+		(&journal{}).attach(h)
 	}
 
 	t0 := time.Now()
@@ -417,6 +614,9 @@ func main() {
 	keep := flag.Int("keep", 0, "evict tool results older than the last N (0 = no eviction) — forces the context-degradation regime")
 	seed := flag.String("seed", "", "seed file of verified facts (upper-bound mode: no extractor; isolates injection from extraction)")
 	state := flag.Bool("state", false, "working-state block: deterministic progress tracking (files edited, last test result, recent steps)")
+	useCodemap := flag.Bool("codemap", false, "attach the codemap symbol server (code_* tools + drift reports) over the sandbox")
+	useJournal := flag.Bool("journal", false, "decision journal (arm E): journal_commit tool + eviction-proof system-prompt block")
+	wset := flag.Bool("wset", false, "working-set retention (arm F): latest read of each file never evicted; command outputs keep last N")
 	flag.Parse()
 
 	prompt, _ := os.ReadFile(filepath.Join(*taskDir, "README-task.md"))
@@ -428,6 +628,9 @@ func main() {
 		}
 	}
 	taskPrompt := string(prompt) + "\n\nUse the tools to explore, fix the code, and run the tests until they pass. When all tests pass, stop."
+	if *useJournal {
+		taskPrompt += journalTaskProtocol
+	}
 
 	configs := []struct {
 		name, model string
@@ -444,7 +647,7 @@ func main() {
 			continue
 		}
 		for r := 0; r < *reps; r++ {
-			res := runConfig(c.name, c.model, c.mapOn, *within, *state, *keep, *seed, *taskDir, taskPrompt, testCmd, *maxSteps)
+			res := runConfig(c.name, c.model, c.mapOn, *within, *state, *useCodemap, *useJournal, *wset, *keep, *seed, *taskDir, taskPrompt, testCmd, *maxSteps)
 			status := "FAIL"
 			if res.passed {
 				status = "PASS"

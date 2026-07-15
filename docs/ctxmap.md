@@ -354,6 +354,110 @@ value is marginal, and what agentic coding actually wants — working-set retent
 — is a different mechanism than the one this project built. That is the honest
 end of the coding investigation.
 
+**Arm D — the codemap symbol server (negative, and it sharpened the diagnosis).**
+The working-set finding suggested a third memory tier: an in-harness *symbol
+server* (deterministic structural index — signatures, refs, imports — served in
+tens of tokens, with a drift report after every mutation; the IDE analogy;
+spec `~/codemap-spec.md`, spike `bridle/codemap`). Prediction: keep=2 + codemap
+lands ≤15 steps / ≤100k median. Result: **killed.** Batch of six (DeepSeek,
+keep=2): **1/6 pass** — worse than C (4/6) and even bare B (2/6); the one pass
+cost 35 steps / 246k. Two pre-batch smoke passes (11 steps / 42k — near the
+full-window floor — and 32/320k) turned out to be the lucky tail of a
+high-variance distribution. Decisive detail: **tool uptake did not correlate
+with success** — the heaviest codemap users (11–18 `code_*` calls) still died at
+the step cap. Mechanism: under uniform eviction the map's tiny answers are
+evicted exactly like `read_file` results, so a cheap-to-re-ask cache has no
+retention advantage, and every re-ask still burns a step. And the failures were
+*step-cap* failures, not token failures: what the flailing agents lost was not
+code structure but **the thread of the investigation** — which bugs were already
+fixed, which hypotheses already rejected (failing transcripts show re-trying
+rejected fixes). Content-shaped memory of any kind (facts, working state,
+symbols) cannot hold that, because it is not content: it is *decisions*.
+
+**The external cross-check — GCC / pi-brain.** Git-Context-Controller (arXiv
+2508.00031; pi-brain is a direct implementation for the pi harness) reaches the
+complementary conclusion from the positive direction: its memory stores
+**decisions, rationale, and rejected approaches** — its distiller prompt
+explicitly forbids implementation details ("the code captures 'what'") — as
+milestone commits with a rolling narrative summary, retrieved at chosen
+resolution. It claims SWE-bench-Lite 48.0% (Claude 3.5 Sonnet) and a
+self-replication study at 40.7% vs 11.7% without. Single-author preprint,
+2024-era baselines, hype-adjacent framing — but the *shape* of its store is
+precisely the tier arms B/C/D show is missing: the journey is the only part of
+a coding session that is **not disk-recoverable**.
+
+**Arm E — the decision journal (negative, killed on two model families).**
+Hypothesis: under eviction, a durable agent-authored decision journal
+(GCC-shaped) prevents re-trying rejected fixes, recovering pass rate at the
+step cap. Mechanism: one extra tool, `journal_commit(milestone, notes)`;
+entries render into a system-prompt block that survives eviction — the only
+durable channel in the run. Zero internal AI. Prediction: >2/6 vs B, ≥ C's
+4/6. Kill: ≤2/6 or passes at ≥ B's median cost. Result: **killed twice.**
+DeepSeek: 1/6 (and getting the model to call the tool at all took three
+escalations — the system-prompt protocol alone got ZERO uptake in 40 steps;
+only per-tool-result reminders provoked commits, and then only 1–4 per run,
+mostly end-of-run report-outs that protect nothing). Two DeepSeek reps burned
+2.6M and 3.0M input tokens — the reminders fed a longer flail. Sonnet 4.6
+(via the raw API, our harness owning the loop): journal 0/3 vs bare 1/3, with
+journal reps re-reading MORE (54–72 reads vs 8–9 bare). The GCC/SWE-bench
+result did not transfer to this regime on either family.
+
+**The reframe (operator, and it explains every arm).** Modern coding models
+are RL-trained to treat *tool results as the only truth* — re-verifying via
+tool calls IS the trained behavior, not a defect. Every failed arm fought that
+training: facts asked the model to believe a system prompt; codemap asked it
+to prefer a projection over the file; the journal asked it to author
+bookkeeping it is not trained to emit and then trust prose over
+re-verification — exactly what its training punishes. The uptake evidence
+agrees: information delivered *inside tool results* (codemap drift reports,
+journal reminders) provoked behavior; system-prompt blocks were ignored on
+every arm, by every model. The conclusion is not "add memory" but "work with
+the tendency": let the model re-verify freely — and make sure what it reaches
+for is still there.
+
+**Arm F — working-set retention (POSITIVE, three model families).** Replace
+"keep the last N tool results" with a content-aware policy, ~60 lines,
+deterministic, zero internal AI:
+
+- the **latest read of each distinct file is never evicted** (older reads of
+  the same file stub as "superseded by a newer read below");
+- everything else (command output, listings) keeps the last N (=2) verbatim
+  and ages out as before.
+
+Eviction pressure stays real on the noisy channel; only the model's ground
+truth is retained. Context scales with the *working set* (files touched), not
+history length. Prediction: ≥5/6 with passes under B's median. Result:
+
+| model, keep=2 | bare | wset |
+|---|---|---|
+| DeepSeek v4-pro | 2/6, 35.5 st / 383k median | **6/6, 13 st / 95k median** (best reps 6–7 st / 37–44k — AT the full-window floor of 7 st / 40k) |
+| GLM-5.2 | 1/3, 600–819k per run | **3/3, 5–7 st / 29–47k** |
+| Sonnet 4.6 | 1/3 (pass: 11 st / 56k) | **PASS 8 st / 56k** (n=1 clean; 2 cells lost to transient API flakes, rerun pending) |
+
+The token question answers itself emphatically: wset is not "more tokens for
+fewer steps" — it is **fewer tokens AND fewer steps** (GLM: ~20× fewer). The
+re-read tax was always paid in tokens too; every re-read pushes the same file
+content back through the window, just spread across more requests with flail
+between them. Per *success* (the real bill), bare keep=2 costs ~1.1–1.5M
+tokens per solved task once failures are amortized; wset costs ~40–95k. Two
+production notes: (1) retention is prefix-stable — it mutates history only
+when a file is actually re-read (rare, since the model no longer needs to), so
+a caching backend discounts the retained bulk, where sliding-window eviction
+churns the prefix every step and forfeits the cache; (2) one DeepSeek rep
+retained a 1.3M-token trajectory dominated by giant command outputs — capping
+retained command-output size is the obvious refinement.
+
+**What "smart about what we keep" means (the arm A–F synthesis).** (1) Keep
+the newest truth of anything the model re-verifies — latest read per file
+(2/6→6/6, 1/3→3/3, ~20× cheaper). (2) Age out noise aggressively — stale
+command output, superseded reads; the enemy was never eviction, it was
+indiscriminate eviction. (3) Deliver information where the model looks —
+inside tool results; system-prompt blocks are training-shadowed. (4) Never
+make the model do the bookkeeping — every protocol-following ask failed; the
+harness curates, the model codes. (5) Keep the prefix stable so caching pays
+for what you retain. All five are harness policy, not memory stores — the
+fact store keeps its proven dialogue home.
+
 ## 4. Findings (the transferable ones)
 
 1. **Embeddings detect topic, not truth.** Calibration on labeled pairs:
@@ -509,18 +613,18 @@ turns (never blocks a turn; visible in bench waits), statistical weight on
 the overflow results (n=2–3 per cell), and prefix caching's return on the
 local backend (cache-hit% instrumentation is already wired and honest).
 
-The agentic-coding arm (§3) is **closed** — both the correctness and the
-efficiency questions were run to conclusion, both negative with a mechanism. The
-directions it leaves are not "finish the coding memory"; they are the pointers it
-produced:
+The agentic-coding arm (§3) is **closed, with a positive ending**: memory
+stores of every shape (facts C, symbols D, journal E) failed with mechanisms,
+and the working-set retention policy (arm F) — harness curation, not memory —
+restored full-window behavior under eviction on three model families. The
+production landing is `bridle/wset` (hooks-only attachment, the ctxmap/codemap
+pattern). The remaining pointers:
 
-1. **If coding memory is ever revisited, it must retain the working set, not
-   extract from it.** The efficiency test showed the dominant eviction cost is
-   re-reading live file content — not facts, not progress. The lever is a
-   working-set-aware eviction/retention policy (never drop the file under active
-   edit), which is a harness scheduling feature, not a memory store. The fact
-   store does not map onto the coding cost structure and should not be forced
-   onto it.
+1. **Retain the working set, don't extract from it** — predicted by the
+   efficiency test, now PROVEN as arm F (see §3): the working-set retention
+   policy is the coding answer, and it is a harness scheduling feature, not a
+   memory store. The fact store does not map onto the coding cost structure
+   and should not be forced onto it.
 2. **Model stability, not memory, is the local-agentic blocker.** A perfect
    memory did not rescue Ornith (thinking-crawls, token spirals, early quits)
    where the same context carried DeepSeek. The sovereignty path runs through
