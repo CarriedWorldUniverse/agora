@@ -1,0 +1,6 @@
+# Normalize all text files to LF in the working tree on every platform.
+# Without this, the Windows CI runner (core.autocrlf) checks out golden
+# fixtures and the embedded core.md as CRLF, and the byte-exact compose golden
+# comparison fails while producing a CRLF system prompt (spec §3 requires
+# byte-stable LF output). Binary files are auto-detected and left untouched.
+* text=auto eol=lf

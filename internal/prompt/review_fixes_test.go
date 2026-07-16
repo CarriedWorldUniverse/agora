@@ -6,8 +6,10 @@ package prompt
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
 )
@@ -189,5 +191,146 @@ func TestBuiltin_RealCoreComposes(t *testing.T) {
 		if !strings.Contains(string(out), "## "+string(seg)) {
 			t.Fatalf("composed built-in core missing section header %q:\n%s", seg, out)
 		}
+	}
+}
+
+// --- Delta-review round 2 (Sonnet + DeepSeek-v4-pro on commit 4a2a39b) ---
+
+// Delta #1 (HIGH, both) — a symlinked segments/ (or renditions/) DIRECTORY must
+// not bypass the per-file symlink guard: os.ReadDir follows the dir symlink and
+// regular files under it would be read into the system prompt.
+func TestLoadPackage_RejectsSymlinkedSegmentsDir(t *testing.T) {
+	tmp := t.TempDir()
+	secretDir := filepath.Join(tmp, "secretdir")
+	if err := os.MkdirAll(secretDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secretDir, "security.md"), []byte("SECRET-DIR-LEAK"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pkg := filepath.Join(tmp, "pkg")
+	if err := os.MkdirAll(pkg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "manifest.toml"), []byte("name = \"x\"\nbase_version = \"1.0.0\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secretDir, filepath.Join(pkg, "segments")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	p, err := LoadPackage(pkg)
+	if err != nil {
+		return // rejecting the package is acceptable
+	}
+	for seg, body := range p.Segments {
+		if strings.Contains(body, "SECRET-DIR-LEAK") {
+			t.Fatalf("symlinked segments/ dir leaked %q into the core", seg)
+		}
+	}
+}
+
+// Delta #2 (HIGH, Sonnet) — a full override's gap-fill must fold from the
+// accumulated chain, not the pristine builtin, so a lower (system) layer's
+// section is not silently reverted by a higher (user) full override that omits
+// it. Spec §2a "overrides apply low-to-high".
+func TestResolve_StackedFullOverridesPreserveLowerLayer(t *testing.T) {
+	builtin := testBuiltin()
+	sysFull := Source{Layer: LayerSystem, Pkg: CorePackage{
+		Manifest: contracts.CoreManifest{Name: "sys", BaseVersion: "1.0.0"},
+		FullText: "## tool-discipline\n\nCONTRACT: SYS-TD custom.",
+	}}
+	userFull := Source{Layer: LayerUser, Pkg: CorePackage{
+		Manifest: contracts.CoreManifest{Name: "usr", BaseVersion: "1.0.0"},
+		FullText: "## approvals\n\nCONTRACT: USR-AP custom.",
+	}}
+	eff, err := Resolve(builtin, []Source{sysFull, userFull}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(eff.Sections[contracts.SecToolDiscipline], "SYS-TD") {
+		t.Fatalf("user full override reverted the system layer's tool-discipline: %q", eff.Sections[contracts.SecToolDiscipline])
+	}
+	if !strings.Contains(eff.Sections[contracts.SecApprovals], "USR-AP") {
+		t.Fatalf("user override's own approvals lost: %q", eff.Sections[contracts.SecApprovals])
+	}
+}
+
+// Delta #3 (MED, Sonnet) — New() must not write a manifest whose free-text
+// Notes carries control chars the parser then rejects, making the package
+// unloadable.
+func TestNew_MultiLineNotesStaysLoadable(t *testing.T) {
+	tmp := t.TempDir()
+	dest := filepath.Join(tmp, "c")
+	if err := New(dest, testBuiltin(), "1.0.0", NewOptions{Name: "c", Notes: "line one\nline two"}); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := LoadPackage(dest); err != nil {
+		t.Fatalf("package with multi-line Notes is unloadable: %v", err)
+	}
+}
+
+// Delta #4 (MED, Sonnet) — a New() that fails on a bad segment name must not
+// leave a partial manifest.toml that then bricks retry via the clobber guard.
+func TestNew_BadSegmentLeavesNoPartialPackage(t *testing.T) {
+	tmp := t.TempDir()
+	dest := filepath.Join(tmp, "c")
+	err := New(dest, testBuiltin(), "1.0.0", NewOptions{Name: "c", Segments: []contracts.Segment{"not-a-real-segment"}})
+	if err == nil {
+		t.Fatal("New with an unknown segment should error")
+	}
+	if _, serr := os.Stat(filepath.Join(dest, "manifest.toml")); serr == nil {
+		t.Fatal("failed New left a partial manifest.toml (bricks retry via the clobber guard)")
+	}
+}
+
+// Delta #6 (MED, both) — sanitizeKnobValue's length cap must be rune-safe (not a
+// byte slice that splits a multi-byte rune into invalid UTF-8).
+func TestSanitizeKnobValue_RuneSafeTruncation(t *testing.T) {
+	v := strings.Repeat("x", maxKnobValueLen-1) + "é" + strings.Repeat("y", 10)
+	got := sanitizeKnobValue(v)
+	if !utf8.ValidString(got) {
+		t.Fatalf("sanitizeKnobValue produced invalid UTF-8: %q", got)
+	}
+}
+
+// Delta #3 (DeepSeek, MED) — the CONTRACT: neutralization must catch case and
+// spacing variants (CONTRACT :, tab, etc.), not just the exact marker, so no
+// form ApplyDialect would treat as a contract marker survives at line start.
+func TestSanitizeKnobValue_NeutralizesContractVariants(t *testing.T) {
+	uppercaseMarker := regexp.MustCompile(`CONTRACT\s*:`)
+	for _, in := range []string{"CONTRACT: x", "CONTRACT : x", "CONTRACT\t: x"} {
+		got := sanitizeKnobValue(in)
+		if uppercaseMarker.MatchString(got) {
+			t.Fatalf("CONTRACT marker variant survived sanitize: %q -> %q", in, got)
+		}
+	}
+}
+
+// CRLF robustness — a core package authored with CRLF line endings (Windows)
+// must yield an LF-normalized core so the composed system prompt is byte-stable
+// across platforms (spec §3). Root of the Windows-CI golden mismatch.
+func TestLoadPackage_NormalizesCRLF(t *testing.T) {
+	tmp := t.TempDir()
+	pkg := filepath.Join(tmp, "pkg")
+	if err := os.MkdirAll(pkg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "manifest.toml"), []byte("name = \"x\"\nbase_version = \"1.0.0\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Multi-line body so an internal CRLF would survive TrimSpace's edge trim.
+	if err := os.WriteFile(filepath.Join(pkg, "core.md"), []byte("## output\r\n\r\nline one\r\nline two\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := LoadPackage(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secs, err := p.sections()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(secs[contracts.SecOutput], "\r") {
+		t.Fatalf("CRLF not normalized in loaded core section: %q", secs[contracts.SecOutput])
 	}
 }

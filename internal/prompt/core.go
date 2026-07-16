@@ -76,6 +76,10 @@ func (p CorePackage) sections() (map[contracts.Segment]string, error) {
 // section map. Text before the first header is discarded (front matter is
 // not a section).
 func splitCoreMD(text string) (map[contracts.Segment]string, error) {
+	// Normalize CRLF so a Windows-authored (or CRLF-checked-out) core.md yields
+	// a byte-stable LF composition on every platform (spec §3; the embedded
+	// core.md reaches here directly, bypassing readPackageFile).
+	text = strings.ReplaceAll(text, "\r\n", "\n")
 	locs := segmentHeaderRE.FindAllStringSubmatchIndex(text, -1)
 	if len(locs) == 0 {
 		return nil, fmt.Errorf("prompt: core.md has no \"## <segment>\" headers")
@@ -129,7 +133,9 @@ func readPackageFile(path string) ([]byte, error) {
 	if len(data) > MaxPackageFileBytes {
 		return nil, fmt.Errorf("prompt: package file %s exceeds the %d-byte cap", filepath.Base(path), MaxPackageFileBytes)
 	}
-	return data, nil
+	// Normalize CRLF so a Windows-authored package composes byte-identically to
+	// a Unix one (spec §3). Harmless for TOML (line-based, already TrimSpace'd).
+	return []byte(strings.ReplaceAll(string(data), "\r\n", "\n")), nil
 }
 
 // LoadPackage reads a core package directory: manifest.toml, core.md OR
@@ -163,6 +169,12 @@ func LoadPackage(dir string) (CorePackage, error) {
 	}
 
 	segDir := filepath.Join(dir, "segments")
+	if fi, lerr := os.Lstat(segDir); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+		// os.ReadDir would follow a symlinked segments/ dir, letting regular
+		// files under an attacker-chosen target be read into the core even
+		// though each file passes the per-file Lstat check (delta review, U4).
+		return CorePackage{}, fmt.Errorf("prompt: refusing symlinked segments/ directory")
+	}
 	if entries, err := os.ReadDir(segDir); err == nil {
 		if hasFullText {
 			return CorePackage{}, ErrPackageAmbiguous
@@ -209,6 +221,9 @@ func LoadPackage(dir string) (CorePackage, error) {
 	}
 
 	renDir := filepath.Join(dir, "renditions")
+	if fi, lerr := os.Lstat(renDir); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return CorePackage{}, fmt.Errorf("prompt: refusing symlinked renditions/ directory")
+	}
 	if entries, err := os.ReadDir(renDir); err == nil {
 		pkg.Renditions = map[string]Rendition{}
 		for _, e := range entries {

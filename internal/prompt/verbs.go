@@ -50,14 +50,26 @@ func New(destDir string, builtin CorePackage, builtinVersion string, opts NewOpt
 		return err
 	}
 
+	// Validate ALL requested segment names BEFORE writing anything, so a bad
+	// name fails cleanly rather than leaving a partial manifest.toml that then
+	// bricks retry via the clobber guard above (delta review, U4).
+	known := segmentSet(sections)
+	for _, seg := range opts.Segments {
+		if !known[seg] {
+			return fmt.Errorf("%w: %q", ErrUnknownSegment, seg)
+		}
+	}
+
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return err
 	}
 
+	// Collapse control chars in free-text manifest fields so the written
+	// manifest.toml round-trips (the parser rejects control bytes) (delta, U4).
 	manifestKV := map[string]string{
-		"name":         opts.Name,
+		"name":         collapseControlChars(opts.Name),
 		"base_version": builtinVersion,
-		"notes":        opts.Notes,
+		"notes":        collapseControlChars(opts.Notes),
 	}
 	if err := os.WriteFile(filepath.Join(destDir, "manifest.toml"), writeTOMLFlat(manifestKV), 0o644); err != nil {
 		return err
@@ -78,17 +90,28 @@ func New(destDir string, builtin CorePackage, builtinVersion string, opts NewOpt
 	if err := os.MkdirAll(segDir, 0o755); err != nil {
 		return err
 	}
-	known := segmentSet(sections)
+	// Segment names were validated up front (before any write).
 	for _, seg := range opts.Segments {
-		if !known[seg] {
-			return fmt.Errorf("%w: %q", ErrUnknownSegment, seg)
-		}
 		body := sections[seg] + "\n"
 		if err := os.WriteFile(filepath.Join(segDir, string(seg)+".md"), []byte(body), 0o644); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// collapseControlChars replaces control bytes (except tab) with spaces so a
+// free-text field can be written to a TOML value the parser will accept back.
+func collapseControlChars(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\t' {
+			return r
+		}
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
 }
 
 // ShowResult is Show's output (`agora prompt show`, §2a).

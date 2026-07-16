@@ -159,7 +159,11 @@ func Resolve(builtin CorePackage, overrides []Source, variant *Source) (Effectiv
 			if err := checkKnownSegments(builtin, full); err != nil {
 				return Effective{}, err
 			}
-			sections = fillMissingSections(full, base)
+			// Gap-fill from the accumulated chain (sections so far), NOT the
+			// pristine builtin base — else a higher-layer full override that
+			// omits a section silently reverts a lower layer's override of it
+			// (delta review, U4). Overrides apply low-to-high.
+			sections = fillMissingSections(full, sections)
 		} else if len(ov.Pkg.Segments) > 0 {
 			if err := checkKnownSegments(builtin, ov.Pkg.Segments); err != nil {
 				return Effective{}, err

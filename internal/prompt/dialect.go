@@ -1,11 +1,16 @@
 package prompt
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
 )
+
+// contractMarkerRE matches any CONTRACT-marker form (case- and space-
+// insensitive) so a knob value cannot forge a contract line, however spelled.
+var contractMarkerRE = regexp.MustCompile(`(?i)CONTRACT\s*:`)
 
 // contractLinePrefix marks a line as core contract text rather than
 // surrounding presentation prose. Dialect application must reproduce every
@@ -89,16 +94,34 @@ const maxKnobValueLen = 80
 // break. Collapse control chars to spaces, neutralize the contract marker, and
 // cap length. Security review (U4).
 func sanitizeKnobValue(v string) string {
+	// Collapse ASCII control chars AND the Unicode line/paragraph separators
+	// (U+0085/U+2028/U+2029) to spaces, so a knob value can never become its
+	// own line in the composed prompt.
 	v = strings.Map(func(r rune) rune {
-		if r == '\t' || (r >= 0x20 && r != 0x7f) {
+		switch {
+		case r == '\t':
+			return r
+		case r < 0x20 || r == 0x7f || r == '\u0085' || r == '\u2028' || r == '\u2029':
+			return ' '
+		default:
 			return r
 		}
-		return ' '
 	}, v)
-	v = strings.ReplaceAll(v, contractLinePrefix, "contract:")
+	// Neutralize any CONTRACT: marker form (case/space variants), not just the
+	// exact literal.
+	v = contractMarkerRE.ReplaceAllString(v, "contract:")
 	v = strings.TrimSpace(v)
+	// Rune-safe length cap: a raw byte slice v[:n] could split a multi-byte
+	// rune into invalid UTF-8. Cut at the last rune boundary within the cap.
 	if len(v) > maxKnobValueLen {
-		v = strings.TrimSpace(v[:maxKnobValueLen])
+		end := 0
+		for i := range v {
+			if i > maxKnobValueLen {
+				break
+			}
+			end = i
+		}
+		v = strings.TrimSpace(v[:end])
 	}
 	return v
 }
