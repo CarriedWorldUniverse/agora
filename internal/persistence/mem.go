@@ -21,10 +21,11 @@ type MemStore struct {
 }
 
 type memThread struct {
-	meta     contracts.ThreadMeta
-	items    []contracts.ThreadItem
-	archived bool
-	lastSeq  int64
+	meta      contracts.ThreadMeta
+	items     []contracts.ThreadItem
+	archived  bool
+	lastSeq   int64
+	updatedAt time.Time // mirrors LocalStore's updated_at, for List ordering
 }
 
 // NewMemStore returns an empty MemStore.
@@ -37,8 +38,8 @@ var _ contracts.ThreadStore = (*MemStore)(nil)
 func (s *MemStore) Create(meta contracts.ThreadMeta) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if meta.ThreadID == "" {
-		return fmt.Errorf("persistence: create: empty thread id")
+	if err := validateThreadID(meta.ThreadID); err != nil {
+		return err
 	}
 	if _, ok := s.threads[meta.ThreadID]; ok {
 		return fmt.Errorf("%w: %s", ErrExists, meta.ThreadID)
@@ -47,7 +48,7 @@ func (s *MemStore) Create(meta contracts.ThreadMeta) error {
 	if meta.ForkOf != nil {
 		lastSeq = meta.ForkOf.Seq
 	}
-	s.threads[meta.ThreadID] = &memThread{meta: meta, lastSeq: lastSeq}
+	s.threads[meta.ThreadID] = &memThread{meta: meta, lastSeq: lastSeq, updatedAt: meta.CreatedAt}
 	return nil
 }
 
@@ -112,6 +113,9 @@ func (s *MemStore) Append(threadID string, items []contracts.ThreadItem) error {
 		if it.TS.IsZero() {
 			it.TS = time.Now().UTC()
 		}
+		if it.TS.After(t.updatedAt) {
+			t.updatedAt = it.TS
+		}
 		if it.Type == contracts.TIWDChanged {
 			if wd, pr, ok := decodeWDChanged(it.Payload); ok {
 				t.meta.WorkingDir = wd
@@ -145,7 +149,15 @@ func (s *MemStore) List(f contracts.ListFilter) ([]contracts.ThreadMeta, error) 
 		}
 		out = append(out, t.meta)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ThreadID < out[j].ThreadID })
+	// Match LocalStore's ORDER BY updated_at DESC, id ASC so the two stores
+	// return identical order for the shared behavioral suite.
+	sort.Slice(out, func(i, j int) bool {
+		ui, uj := s.threads[out[i].ThreadID].updatedAt, s.threads[out[j].ThreadID].updatedAt
+		if !ui.Equal(uj) {
+			return ui.After(uj)
+		}
+		return out[i].ThreadID < out[j].ThreadID
+	})
 	return out, nil
 }
 
@@ -193,7 +205,7 @@ func (s *MemStore) Fork(threadID string, seq int64) (contracts.ThreadMeta, error
 		ProjectRoot: parent.meta.ProjectRoot,
 		ForkOf:      &contracts.ForkRef{ThreadID: threadID, Seq: seq},
 	}
-	s.threads[childID] = &memThread{meta: childMeta, lastSeq: seq}
+	s.threads[childID] = &memThread{meta: childMeta, lastSeq: seq, updatedAt: childMeta.CreatedAt}
 	return childMeta, nil
 }
 

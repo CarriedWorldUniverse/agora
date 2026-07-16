@@ -64,12 +64,36 @@ func threadPath(root string, t time.Time, threadID string) string {
 	return filepath.Join(monthDir(root, t), threadID+".jsonl")
 }
 
-// archivedMarkerPath returns the sidecar marker file used to persist the
-// Archive flag outside the (rebuildable) SQLite mirror. See RebuildIndex
-// doc comment in sqlite.go for why this exists — a deliberate resolution
-// of a spec gap, not a spec requirement.
-func archivedMarkerPath(root string, t time.Time, threadID string) string {
-	return filepath.Join(monthDir(root, t), threadID+".archived")
+// validateThreadID rejects any id that could escape the store root when
+// joined into a filesystem path, or that isn't a clean single path element.
+// This is the storage-layer trust boundary: it must defend its own
+// invariant regardless of who calls Create/Fork (a future remote/TUI unit
+// may pass externally-influenced ids). Allowed: non-empty [A-Za-z0-9._-],
+// excluding "." and "..".
+func validateThreadID(id string) error {
+	if id == "" {
+		return fmt.Errorf("persistence: empty thread id")
+	}
+	if len(id) > 255 {
+		return fmt.Errorf("persistence: thread id too long")
+	}
+	if id == "." || id == ".." {
+		return fmt.Errorf("persistence: invalid thread id %q", id)
+	}
+	// filepath.Base collapses any separator/traversal to a single element;
+	// if the id isn't already that element it contains a separator or path
+	// trickery (rejects "a/b", "/abs", "a\\b", "../x", ...).
+	if filepath.Base(id) != id {
+		return fmt.Errorf("persistence: thread id %q contains a path separator", id)
+	}
+	for _, r := range id {
+		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-'
+		if !ok {
+			return fmt.Errorf("persistence: thread id %q contains an illegal character", id)
+		}
+	}
+	return nil
 }
 
 // newThreadID generates a fresh thread id, used by Fork (Create takes an

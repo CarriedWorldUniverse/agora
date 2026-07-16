@@ -22,15 +22,22 @@ import (
 //     text (spec calls the real FTS index "optional"; this is a minimal
 //     LIKE-queryable stand-in, not SQLite FTS5 — see List's Text filter).
 //
-// archived is a column here for query convenience, but it is NOT
-// rebuild-derived from archived alone: RebuildIndex additionally consults
-// the <thread_id>.archived sidecar marker file (see RebuildIndex doc) since
-// the frozen contracts.ThreadItemType enum has no "archived" marker item
-// and ThreadMeta (line 1) is never rewritten — the mirror alone would lose
-// the flag on a rebuild otherwise. That marker file is this unit's
-// resolution of a real spec gap (agora-spec-persistence.md §2 says the
-// mirror is "always derivable from the JSONL", but the JSONL item-type enum
-// has no way to encode "archived"); documented, not guessed silently.
+// PRIMARY vs derived state (spec §2): most columns are derived from the
+// JSONL and reconstructed by RebuildIndex. Two are PRIMARY daemon state,
+// held only in state.db and NOT derivable from the JSONL — exactly the
+// carve-out §2 names ("daemon state — enrollments, hook trust, session
+// grants — is primary, small, backed up with the identity dir"):
+//   - archived: the JSONL item-type enum has no way to encode "archived"
+//     and the meta line is never rewritten, so archived cannot be derived.
+//   - agent_edges: an edge's status (open/closed) is not derivable from any
+//     single thread's JSONL.
+//
+// RebuildIndex PRESERVES both in place (it rebuilds the derived columns
+// without wiping primary state), and prunes agent_edges that reference
+// threads no longer present. A total loss of state.db loses primary state
+// by design — back up state.db, not just the JSONL. (This replaced an
+// earlier <thread_id>.archived sidecar file — a fragile third on-disk
+// format; review PR #38.)
 const schemaDDL = `
 CREATE TABLE IF NOT EXISTS threads (
 	id             TEXT PRIMARY KEY,
@@ -285,6 +292,14 @@ func extractText(payload any) string {
 	return ""
 }
 
+// escapeLike escapes the LIKE metacharacters %, _ and the escape char
+// itself so a Text filter matches its literal string, not as a wildcard
+// pattern. Paired with ESCAPE '\' in the query.
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
+}
+
 // decodeWDChanged returns (workingDir, projectRoot, ok) for a wd_changed
 // item's payload.
 func decodeWDChanged(payload any) (string, string, bool) {
@@ -326,10 +341,12 @@ func listThreads(db *sql.DB, f contracts.ListFilter) ([]contracts.ThreadMeta, er
 		}
 	}
 	if f.Text != "" {
-		q.WriteString(" AND id IN (SELECT DISTINCT thread_id FROM items_fts WHERE text LIKE ?)")
-		args = append(args, "%"+f.Text+"%")
+		q.WriteString(` AND id IN (SELECT DISTINCT thread_id FROM items_fts WHERE text LIKE ? ESCAPE '\')`)
+		args = append(args, "%"+escapeLike(f.Text)+"%")
 	}
-	q.WriteString(" ORDER BY updated_at DESC")
+	// Deterministic order: recency first, then id as a stable tie-break so
+	// two threads with equal updated_at sort identically to MemStore.
+	q.WriteString(" ORDER BY updated_at DESC, id ASC")
 
 	rows, err := db.Query(q.String(), args...)
 	if err != nil {
@@ -356,25 +373,35 @@ func listThreads(db *sql.DB, f contracts.ListFilter) ([]contracts.ThreadMeta, er
 // exported on *LocalStore (see local.go); this is the walk+parse core.
 //
 // Rebuild-derived fields: everything in the threads table except archived,
-// which additionally consults the <thread_id>.archived sidecar marker file
-// (see the schemaDDL doc comment above for why that marker exists).
-func rebuildIndex(root string, db *sql.DB) error {
+// preserving PRIMARY state (archived, agent_edges — see the schemaDDL doc
+// comment). A single corrupt/unreadable thread file is skipped (logged via
+// the returned skipped list), not fatal — rebuild is the recovery path and
+// must not be defeated by one bad file. Returns the count of skipped files.
+func rebuildIndex(root string, db *sql.DB) (skipped []string, err error) {
+	// Snapshot PRIMARY state that is NOT derivable from the JSONL, so it
+	// survives the rebuild of the derived columns.
+	archivedIDs, err := archivedThreadIDs(db)
+	if err != nil {
+		return nil, err
+	}
+
 	if _, err := db.Exec(`DELETE FROM threads`); err != nil {
-		return fmt.Errorf("persistence: rebuild: clear threads: %w", err)
+		return nil, fmt.Errorf("persistence: rebuild: clear threads: %w", err)
 	}
 	if _, err := db.Exec(`DELETE FROM items_fts`); err != nil {
-		return fmt.Errorf("persistence: rebuild: clear fts: %w", err)
+		return nil, fmt.Errorf("persistence: rebuild: clear fts: %w", err)
 	}
 
 	threadsRoot := filepath.Join(root, "threads")
 	entries, err := os.ReadDir(threadsRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return nil, nil
 		}
-		return fmt.Errorf("persistence: rebuild: read threads root: %w", err)
+		return nil, fmt.Errorf("persistence: rebuild: read threads root: %w", err)
 	}
 
+	present := map[string]bool{}
 	for _, monthEnt := range entries {
 		if !monthEnt.IsDir() {
 			continue
@@ -382,7 +409,7 @@ func rebuildIndex(root string, db *sql.DB) error {
 		monthPath := filepath.Join(threadsRoot, monthEnt.Name())
 		files, err := os.ReadDir(monthPath)
 		if err != nil {
-			return fmt.Errorf("persistence: rebuild: read month dir: %w", err)
+			return nil, fmt.Errorf("persistence: rebuild: read month dir: %w", err)
 		}
 		for _, fEnt := range files {
 			if fEnt.IsDir() || filepath.Ext(fEnt.Name()) != ".jsonl" {
@@ -392,11 +419,14 @@ func rebuildIndex(root string, db *sql.DB) error {
 			path := filepath.Join(monthPath, fEnt.Name())
 			meta, items, err := readThreadFile(path)
 			if err != nil {
-				return fmt.Errorf("persistence: rebuild: %s: %w", threadID, err)
+				// Recovery must not be defeated by one bad file. Skip + record.
+				skipped = append(skipped, threadID)
+				continue
 			}
 			if err := insertThread(db, meta); err != nil {
-				return err
+				return skipped, err
 			}
+			present[threadID] = true
 			lastSeq := int64(0)
 			if meta.ForkOf != nil {
 				lastSeq = meta.ForkOf.Seq
@@ -418,17 +448,45 @@ func rebuildIndex(root string, db *sql.DB) error {
 				}
 			}
 			if err := updateThreadAfterAppend(db, threadID, lastSeq, updatedAt, wdPtr, rootPtr); err != nil {
-				return err
+				return skipped, err
 			}
 			if err := indexFTS(db, threadID, items); err != nil {
-				return err
+				return skipped, err
 			}
-			if _, err := os.Stat(archivedMarkerPath(root, meta.CreatedAt, threadID)); err == nil {
+			// Restore PRIMARY archived state for threads that still exist.
+			if archivedIDs[threadID] {
 				if err := setArchived(db, threadID, true); err != nil {
-					return err
+					return skipped, err
 				}
 			}
 		}
 	}
-	return nil
+
+	// Prune agent_edges referencing threads that no longer exist (idempotency
+	// of the primary edge table across rebuilds).
+	if _, err := db.Exec(`DELETE FROM agent_edges
+		WHERE parent_thread NOT IN (SELECT id FROM threads)
+		   OR child_thread  NOT IN (SELECT id FROM threads)`); err != nil {
+		return skipped, fmt.Errorf("persistence: rebuild: prune agent edges: %w", err)
+	}
+	return skipped, nil
+}
+
+// archivedThreadIDs returns the set of thread ids currently flagged
+// archived — PRIMARY state snapshotted before a rebuild clears the table.
+func archivedThreadIDs(db *sql.DB) (map[string]bool, error) {
+	rows, err := db.Query(`SELECT id FROM threads WHERE archived = 1`)
+	if err != nil {
+		return nil, fmt.Errorf("persistence: snapshot archived: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
 }

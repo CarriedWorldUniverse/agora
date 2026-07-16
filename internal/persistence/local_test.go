@@ -1,6 +1,7 @@
 package persistence
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
@@ -64,7 +65,7 @@ func TestRebuildIndexProperty(t *testing.T) {
 		t.Fatalf("reopen NewLocalStore: %v", err)
 	}
 	t.Cleanup(func() { _ = s2.Close() })
-	if err := s2.RebuildIndex(); err != nil {
+	if _, err := s2.RebuildIndex(); err != nil {
 		t.Fatalf("RebuildIndex: %v", err)
 	}
 
@@ -79,15 +80,50 @@ func TestRebuildIndexProperty(t *testing.T) {
 	afterItemsChild := resumeAll(t, s2, child.ThreadID)
 	assertItemsEqual(t, beforeItemsChild, afterItemsChild)
 
-	// Archive flag on th_rb_2 must have survived the rebuild via the
-	// sidecar marker file (see schemaDDL doc comment).
+	// archived is PRIMARY state (state.db only, NOT JSONL-derived). This test
+	// DELETED state.db entirely, so archived is legitimately lost — that's the
+	// spec §2 model (primary state is backed up with the db, not the JSONL).
+	// Preservation of archived across an IN-PLACE rebuild is covered by
+	// TestArchivedSurvivesInPlaceRebuild.
 	archivedFlag := true
 	archivedList, err := s2.List(contracts.ListFilter{Archived: &archivedFlag})
 	if err != nil {
 		t.Fatalf("List archived after rebuild: %v", err)
 	}
-	if len(archivedList) != 1 || archivedList[0].ThreadID != "th_rb_2" {
-		t.Fatalf("archived list after rebuild = %+v, want just th_rb_2", archivedList)
+	if len(archivedList) != 0 {
+		t.Fatalf("archived after full state.db loss = %+v, want none (primary state is not JSONL-derived)", archivedList)
+	}
+}
+
+// TestArchivedSurvivesInPlaceRebuild: archived is primary state held in
+// state.db; an IN-PLACE RebuildIndex (mirror index corruption recovery, the
+// db file still present) must preserve it while it rebuilds the derived
+// columns from the JSONL. Regression for the review finding that replaced
+// the fragile .archived sidecar file with a preserved primary column.
+func TestArchivedSurvivesInPlaceRebuild(t *testing.T) {
+	root := t.TempDir()
+	s, err := NewLocalStore(root, Config{})
+	if err != nil {
+		t.Fatalf("NewLocalStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	now := time.Date(2026, 7, 16, 9, 0, 0, 0, time.UTC)
+	mustCreate(t, s, contracts.ThreadMeta{ThreadID: "th_keep", CreatedAt: now, IdentityFP: "agora:x", Profile: "dev", WorkingDir: "/w"})
+	mustCreate(t, s, contracts.ThreadMeta{ThreadID: "th_arc", CreatedAt: now, IdentityFP: "agora:x", Profile: "dev", WorkingDir: "/w"})
+	if err := s.Archive("th_arc"); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+	// In-place rebuild (no db removal — the file survives).
+	if _, err := s.RebuildIndex(); err != nil {
+		t.Fatalf("RebuildIndex: %v", err)
+	}
+	yes := true
+	arc, err := s.List(contracts.ListFilter{Archived: &yes})
+	if err != nil {
+		t.Fatalf("List archived: %v", err)
+	}
+	if len(arc) != 1 || arc[0].ThreadID != "th_arc" {
+		t.Fatalf("archived after in-place rebuild = %+v, want just th_arc", arc)
 	}
 }
 
@@ -118,7 +154,21 @@ func assertItemsEqual(t *testing.T, before, after []contracts.ThreadItem) {
 		if b.Seq != a.Seq || b.Type != a.Type || !b.TS.Equal(a.TS) {
 			t.Errorf("item %d differs before/after rebuild:\n before=%+v\n after=%+v", i, b, a)
 		}
+		// Payload must also survive (JSON round-trip: compare canonicalized).
+		if jsonEq(b.Payload) != jsonEq(a.Payload) {
+			t.Errorf("item %d payload differs: before=%v after=%v", i, b.Payload, a.Payload)
+		}
 	}
+}
+
+// jsonEq canonicalizes a payload to its JSON string for comparison across a
+// store round-trip (where a typed payload may re-decode as map[string]any).
+func jsonEq(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "<unmarshalable>"
+	}
+	return string(b)
 }
 
 // TestCrashSafety: append items, then — WITHOUT calling Close (simulating a

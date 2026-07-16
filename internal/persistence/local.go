@@ -63,8 +63,8 @@ func (s *LocalStore) Create(meta contracts.ThreadMeta) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if meta.ThreadID == "" {
-		return fmt.Errorf("persistence: create: empty thread id")
+	if err := validateThreadID(meta.ThreadID); err != nil {
+		return err
 	}
 	if _, err := getThread(s.db, meta.ThreadID); err == nil {
 		return fmt.Errorf("%w: %s", ErrExists, meta.ThreadID)
@@ -243,25 +243,22 @@ func (s *LocalStore) Fork(threadID string, seq int64) (contracts.ThreadMeta, err
 }
 
 // Archive implements contracts.ThreadStore. Spec §4: "Archive = flag
-// (hidden from default /resume)." Persisted both in the mirror (for query
-// speed) and as a sidecar marker file (so it survives RebuildIndex — see
-// schemaDDL doc comment in sqlite.go).
+// (hidden from default /resume)."
+//
+// archived is PRIMARY daemon state in state.db, not derived from the JSONL
+// (spec §2 explicitly carves out primary state — enrollments, hook trust,
+// session grants — that is "backed up with the identity dir", not
+// rebuild-derivable). RebuildIndex preserves it in place; a total loss of
+// state.db loses it, by design, so back up state.db as primary state. This
+// replaces the earlier sidecar-marker approach, which was a fragile third
+// on-disk format with a crash-ordering + missing-fsync bug (review, PR #38).
 func (s *LocalStore) Archive(threadID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r, err := getThread(s.db, threadID)
-	if err != nil {
+	if _, err := getThread(s.db, threadID); err != nil {
 		return err
 	}
-	if err := setArchived(s.db, threadID, true); err != nil {
-		return err
-	}
-	marker := archivedMarkerPath(s.root, r.CreatedAt, threadID)
-	f, err := os.Create(marker)
-	if err != nil {
-		return fmt.Errorf("persistence: write archive marker: %w", err)
-	}
-	return f.Close()
+	return setArchived(s.db, threadID, true)
 }
 
 // Delete implements contracts.ThreadStore. Spec §4: "Delete = file removal
@@ -278,14 +275,17 @@ func (s *LocalStore) Delete(threadID string) error {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("persistence: delete thread file: %w", err)
 	}
-	_ = os.Remove(archivedMarkerPath(s.root, r.CreatedAt, threadID))
 	return deleteThreadRow(s.db, threadID)
 }
 
-// RebuildIndex regenerates the SQLite mirror entirely from the JSONL files
-// under root — "a rebuild-index command regenerates it; corruption is an
-// inconvenience, never data loss" (spec §2).
-func (s *LocalStore) RebuildIndex() error {
+// RebuildIndex regenerates the derived columns of the SQLite mirror from
+// the JSONL files under root — "a rebuild-index command regenerates it;
+// corruption is an inconvenience, never data loss" (spec §2). It PRESERVES
+// primary state (archived, agent_edges — see sqlite.go schemaDDL doc).
+// Returns the ids of any thread files it had to skip because they were
+// unreadable (a corrupt file must not defeat the recovery of the rest);
+// nil when every file rebuilt cleanly.
+func (s *LocalStore) RebuildIndex() (skipped []string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return rebuildIndex(s.root, s.db)
