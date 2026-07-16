@@ -70,6 +70,13 @@ func ParseSkillMD(data []byte, dirName string) (*Skill, error) {
 		name = sanitizeLine(dirName)
 	}
 	name = truncateChars(name, nameCap(name))
+	// If truncation stripped the namespace separator (a colon at/beyond the
+	// 128 cap), the result is effectively a plain name and must not keep the
+	// wider namespaced budget — re-cap to the plain 64-char limit (review
+	// delta #2; nameCap was decided on the untruncated string).
+	if !strings.Contains(name, ":") {
+		name = truncateChars(name, MaxNameChars)
+	}
 
 	desc := sanitizeLine(doc.Description)
 	if desc == "" {

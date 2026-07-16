@@ -240,6 +240,36 @@ func TestParseSidecar_IconTraversalRejected(t *testing.T) {
 	}
 }
 
+// Delta #1 (Sonnet + DeepSeek) — case-(c) must not write the header when the
+// header alone exceeds the byte budget; the rendered body must never exceed
+// the budget. Budget(10)=4 bytes is a reachable production value (tiny context
+// window), far below the 21-byte "### Available skills\n" header.
+func TestFitBody_CaseCHeaderOverBudgetDoesNotOvershoot(t *testing.T) {
+	entries := []CatalogEntry{
+		{Name: "a", Description: "d", Path: "/root/a/SKILL.md", Scope: ScopeUser, RootPath: "/root"},
+	}
+	budget := Budget(10) // = 4 bytes
+	body, _ := fitBody(entries, budget)
+	if len(body) > budget {
+		t.Fatalf("case-(c) body = %d bytes, exceeds budget %d (header written unconditionally): %q", len(body), budget, body)
+	}
+}
+
+// Delta #2 (Sonnet) — a colon at or beyond the namespaced cap is stripped by
+// truncation, leaving a colon-less name that must NOT keep the 128-char
+// namespaced budget. Fix-induced by F5: nameCap decided on the untruncated
+// string. Spec §1.1: plain names ≤64.
+func TestParseSkillMD_LateColonDoesNotBypassPlainCap(t *testing.T) {
+	raw := strings.Repeat("a", 200) + ":x" // colon at rune 200, past the 128 cap
+	sk, err := ParseSkillMD([]byte("---\nname: "+raw+"\ndescription: d\n---\n"), "fb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sk.Name, ":") && utf8.RuneCountInString(sk.Name) > MaxNameChars {
+		t.Fatalf("late-colon name bypassed the plain %d-char cap: %d runes, no colon", MaxNameChars, utf8.RuneCountInString(sk.Name))
+	}
+}
+
 // De-tautologized Budget assertions: literal expected values, independent of
 // the implementation formula. Spec §3.2.
 func TestBudget_LiteralValues(t *testing.T) {

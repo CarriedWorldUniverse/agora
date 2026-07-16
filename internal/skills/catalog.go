@@ -257,6 +257,14 @@ func fitVariant(entries []CatalogEntry, budget int, useAlias bool) (string, []st
 	copy(ordered, entries)
 	sortByRenderOrder(ordered)
 
+	// If even the section header does not fit, emit nothing rather than
+	// writing a header that already blows the byte budget (reachable for a
+	// tiny context window, e.g. Budget(10)=4 < 21-byte header; review delta
+	// #1). The body must never exceed budget.
+	if headerLen > budget {
+		return "", []string{fmt.Sprintf("skills catalog: %d skill(s) omitted, budget too small for the section header", len(ordered))}, 0
+	}
+
 	var sb strings.Builder
 	sb.WriteString(header.String())
 	used := headerLen

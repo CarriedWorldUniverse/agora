@@ -2,6 +2,7 @@ package skills
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -57,7 +58,8 @@ func DiscoverAGENTSMD(cwd string, markers []string, filenames []string, budgetBy
 		if remaining <= 0 {
 			break
 		}
-		file, content, found := pickAgentsFile(dir, filenames, root)
+		file, content, found, warns := pickAgentsFile(dir, filenames, root)
+		result.Warnings = append(result.Warnings, warns...)
 		if !found {
 			continue
 		}
@@ -76,20 +78,29 @@ func DiscoverAGENTSMD(cwd string, markers []string, filenames []string, budgetBy
 // the next filename in the SAME directory is tried — so an empty
 // AGENTS.override.md never suppresses a populated AGENTS.md beside it (spec §6:
 // "first hit of ...; empty files skipped"; review finding F7). Reads are
-// symlink-contained under projectRoot and size-capped (findings S1/S2).
-func pickAgentsFile(dir string, filenames []string, projectRoot string) (file, content string, found bool) {
+// symlink-contained under projectRoot and size-capped (findings S1/S2). A read
+// refused for containment/size, or truncated at the cap, is surfaced as a
+// warning for parity with discover.go's scanRoot (review delta #4) — silent
+// rejection hid the containment decision from any auditor.
+func pickAgentsFile(dir string, filenames []string, projectRoot string) (file, content string, found bool, warns []string) {
 	for _, fn := range filenames {
 		p := filepath.Join(dir, fn)
-		data, _, err := safeReadUnder(p, projectRoot, true, MaxAgentsFileBytes)
+		data, truncated, err := safeReadUnder(p, projectRoot, true, MaxAgentsFileBytes)
 		if err != nil {
+			if !os.IsNotExist(err) {
+				warns = append(warns, fmt.Sprintf("AGENTS.md: %s skipped: %s", p, err.Error()))
+			}
 			continue
+		}
+		if truncated {
+			warns = append(warns, fmt.Sprintf("AGENTS.md: %s too large, truncated to %d bytes", p, MaxAgentsFileBytes))
 		}
 		if strings.TrimSpace(string(data)) == "" {
 			continue // empty candidate: fall through to the next filename (§6)
 		}
-		return fn, string(data), true
+		return fn, string(data), true, warns
 	}
-	return "", "", false
+	return "", "", false, warns
 }
 
 // RenderAGENTSFragment wraps the collected docs (plus an optional
