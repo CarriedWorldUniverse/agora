@@ -158,14 +158,22 @@ func Decide(policy contracts.PolicySet, req Request, store ScopeStore) Result {
 		return failClosedAsk(req.Kind, "policy:missing-fail-closed", "approval: policy set has no entry for this kind, fail-closed ask")
 	}
 
+	// KindQuestion is resolved CENTRALLY, before the policy-value switch: a
+	// question resolves only with an Answer (surfaced via ask) or, under a
+	// convert policy, via the escalation ladder. It is NEVER allow (no
+	// fabricated answer, no scope short-circuit) and NEVER deny (invariant 2).
+	// Doing this once here — rather than guarding each case — is what closes
+	// the question=auto and question=prompt+scope fail-opens the review found:
+	// no policy value can route a question to allow/deny.
+	if req.Kind == contracts.KindQuestion {
+		if v == contracts.PolicyConvert {
+			return Result{Action: ActionConvert, Kind: req.Kind, Stage: contracts.StagePolicy, By: "policy"}
+		}
+		return failClosedAsk(req.Kind, "policy:question-asks", "approval: a question resolves with an answer, never allow/deny, fail-closed ask")
+	}
+
 	switch v {
 	case contracts.PolicyDeny:
-		if req.Kind == contracts.KindQuestion {
-			// Invariant 2: a question is never denied. Treat a misconfigured
-			// deny-on-question the same as a malformed value: fail closed to
-			// ask, never fabricate an answer, never silently refuse.
-			return failClosedAsk(req.Kind, "policy:question-never-denied", "approval: question policy cannot be deny, fail-closed ask")
-		}
 		return Result{
 			Action:  ActionDeny,
 			Kind:    req.Kind,
@@ -184,15 +192,9 @@ func Decide(policy contracts.PolicySet, req Request, store ScopeStore) Result {
 		}
 
 	case contracts.PolicyConvert:
-		if req.Kind != contracts.KindQuestion {
-			return failClosedAsk(req.Kind, "policy:convert-misapplied", "approval: convert is only valid for question, fail-closed ask")
-		}
-		return Result{
-			Action: ActionConvert,
-			Kind:   req.Kind,
-			Stage:  contracts.StagePolicy,
-			By:     "policy",
-		}
+		// KindQuestion (the only kind convert is valid for) is fully handled
+		// above; reaching here means convert was misapplied to a non-question.
+		return failClosedAsk(req.Kind, "policy:convert-misapplied", "approval: convert is only valid for question, fail-closed ask")
 
 	case contracts.PolicyPerServer:
 		if req.Kind != contracts.KindMCPTool {

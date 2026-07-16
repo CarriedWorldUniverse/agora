@@ -76,6 +76,13 @@ func (s *MemScopeStore) Grant(a ScopeAllow) error {
 	if a.Key == "" {
 		return ErrScopeKeyEmpty
 	}
+	// A question resolves with an Answer, never allow/deny (spec §3: it renders
+	// as a question card, not the allow/deny modal), so it has no scope-allow
+	// semantics — refuse to persist one. Defense in depth for the Decide-side
+	// central question guard (review, U7).
+	if a.Kind == contracts.KindQuestion {
+		return ErrScopeKindMismatch
+	}
 	switch a.Scope {
 	case contracts.ScopeOnce:
 		return ErrScopeNotPersistable
@@ -93,6 +100,12 @@ func (s *MemScopeStore) Grant(a ScopeAllow) error {
 		s.mu.Unlock()
 		return nil
 	case contracts.ScopeHost:
+		// host:<pattern> is network-only (spec §1); the network kind is
+		// escalation ("network beyond policy"). Symmetric to prefix's exec-only
+		// check — reject a host allow for any other kind (review, U7).
+		if a.Kind != contracts.KindEscalation {
+			return ErrScopeKindMismatch
+		}
 		s.mu.Lock()
 		s.keyedAllows[[3]string{string(a.Kind), string(a.Scope), a.Key}] = a
 		s.mu.Unlock()
