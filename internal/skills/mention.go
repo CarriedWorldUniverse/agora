@@ -91,12 +91,12 @@ func ResolveMention(m Mention, all []*Skill, disabledPaths map[string]bool) (*Sk
 				return sk, nil
 			}
 		}
-		// Linked form gave an explicit path that didn't match anything —
-		// per §4 this is exact-path-first; fall through to name
-		// resolution only if the path scheme suggests it's not a literal
-		// skill path (best-effort; skip that nuance and just fail here,
-		// matching "exact path match first").
-		return nil, ErrMentionNotFound
+		// Exact path did not match a filesystem path — e.g. a spec §4 URI
+		// scheme (skill://, plugin://, mcp://, app://), which is never equal
+		// to a real Skill.Path/Dir. Spec §4 resolution is "exact path match
+		// first; THEN plain name" — so fall through to name resolution using
+		// m.Name (parsed from the [$name](path) form) rather than failing
+		// closed (review finding F4).
 	}
 
 	var matches []*Skill

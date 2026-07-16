@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 )
 
 // FallbackBudgetChars is used when the model's context window is unknown.
@@ -192,20 +193,44 @@ func fitVariant(entries []CatalogEntry, budget int, useAlias bool) (string, []st
 		minLen += len(minimal(e, ""))
 	}
 	if minLen <= budget {
+		// Round-robin description characters one at a time. The budget is a
+		// BYTE budget (Budget() = tokens*4; the case-a/min checks use len()),
+		// so each appended rune costs its UTF-8 byte length, not 1 — else
+		// multi-byte (e.g. CJK) descriptions overshoot the budget 2-4x
+		// (review finding F1). A rune too wide for the remaining budget is
+		// skipped for that entry (descChars must stay a contiguous prefix);
+		// the loop ends when no entry can afford its next rune.
+		descRunes := make([][]rune, len(entries))
+		for i, e := range entries {
+			descRunes[i] = []rune(e.Description)
+		}
 		descChars := make([]int, len(entries))
 		remaining := budget - minLen
 		progress := true
 		for remaining > 0 && progress {
 			progress = false
-			for i, e := range entries {
+			for i := range entries {
 				if remaining <= 0 {
 					break
 				}
-				if descChars[i] >= len([]rune(e.Description)) {
+				if descChars[i] >= len(descRunes[i]) {
+					continue
+				}
+				cost := utf8.RuneLen(descRunes[i][descChars[i]])
+				if cost < 0 {
+					cost = 1 // invalid rune (RuneError); charge a byte
+				}
+				if descChars[i] == 0 {
+					// First description char for this entry: minimal(e, desc)
+					// inserts a separator space before "(file: ...)" that the
+					// minimal(e, "") line (counted in minLen) does not have.
+					cost++
+				}
+				if cost > remaining {
 					continue
 				}
 				descChars[i]++
-				remaining--
+				remaining -= cost
 				progress = true
 			}
 		}
@@ -213,8 +238,8 @@ func fitVariant(entries []CatalogEntry, budget int, useAlias bool) (string, []st
 		sb.WriteString(header.String())
 		truncatedAny := false
 		for i, e := range entries {
-			d := string([]rune(e.Description)[:descChars[i]])
-			if descChars[i] < len([]rune(e.Description)) {
+			d := string(descRunes[i][:descChars[i]])
+			if descChars[i] < len(descRunes[i]) {
 				truncatedAny = true
 			}
 			sb.WriteString(minimal(e, d))
@@ -237,11 +262,19 @@ func fitVariant(entries []CatalogEntry, budget int, useAlias bool) (string, []st
 	used := headerLen
 	included := 0
 	var omitted []string
-	for _, e := range ordered {
+	for idx, e := range ordered {
 		line := minimal(e, "")
 		if used+len(line) > budget {
-			omitted = append(omitted, e.Name)
-			continue
+			// Preserve scope priority: once an entry does not fit, every
+			// lower-priority entry after it (ordered is scope-priority
+			// sorted) is omitted too — never keep a lower-priority skill
+			// while a higher-priority one was dropped (spec §3.2(c): "in
+			// scope-priority order until exhausted, rest omitted"; review
+			// finding F2).
+			for _, rem := range ordered[idx:] {
+				omitted = append(omitted, rem.Name)
+			}
+			break
 		}
 		sb.WriteString(line)
 		used += len(line)

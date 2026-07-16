@@ -12,9 +12,20 @@ import (
 // Length limits from the frontmatter table.
 // Spec: agora-spec-skills.md §1.1.
 const (
-	MaxNameChars        = 64
-	MaxDescriptionChars = 1024
+	MaxNameChars           = 64
+	MaxNamespacedNameChars = 128
+	MaxDescriptionChars    = 1024
 )
+
+// nameCap returns the char cap for a name: 128 when it is namespace-qualified
+// (contains ':'), else 64. Spec §1.1: "≤64 chars (qualified w/ namespace
+// ≤128)". Review finding F5.
+func nameCap(name string) int {
+	if strings.Contains(name, ":") {
+		return MaxNamespacedNameChars
+	}
+	return MaxNameChars
+}
 
 // ErrEmptyDescription is returned when SKILL.md frontmatter lacks a
 // description (or it sanitizes to empty). Spec §1.1: "required (non-empty
@@ -58,13 +69,17 @@ func ParseSkillMD(data []byte, dirName string) (*Skill, error) {
 	if name == "" {
 		name = sanitizeLine(dirName)
 	}
-	name = truncateChars(name, MaxNameChars)
+	name = truncateChars(name, nameCap(name))
 
 	desc := sanitizeLine(doc.Description)
 	if desc == "" {
 		return nil, ErrEmptyDescription
 	}
-	desc = truncateChars(desc, MaxDescriptionChars)
+	// Cap WITH the "..." marker (spec §1.1: "≤1024 effective at render,
+	// truncate with '...'"). A plain char-cut here followed by the catalog's
+	// truncateWithEllipsis(1024) no-op'd (string already exactly 1024 runes),
+	// silently dropping the marker (review finding F6).
+	desc = truncateWithEllipsis(desc, MaxDescriptionChars)
 
 	short := sanitizeLine(doc.Metadata.ShortDescription)
 
@@ -89,16 +104,26 @@ func ParseSidecar(data []byte) Sidecar {
 	}
 	sc.Interface.ShortDescription = truncateChars(sc.Interface.ShortDescription, 1024)
 	sc.Interface.DefaultPrompt = truncateChars(sc.Interface.DefaultPrompt, 1024)
-	if sc.Interface.IconSmall != "" && !strings.HasPrefix(sc.Interface.IconSmall, "assets/") {
+	if sc.Interface.IconSmall != "" && !safeAssetPath(sc.Interface.IconSmall) {
 		sc.Interface.IconSmall = ""
 	}
-	if sc.Interface.IconLarge != "" && !strings.HasPrefix(sc.Interface.IconLarge, "assets/") {
+	if sc.Interface.IconLarge != "" && !safeAssetPath(sc.Interface.IconLarge) {
 		sc.Interface.IconLarge = ""
 	}
 	if sc.Interface.BrandColor != "" && len(sc.Interface.BrandColor) != 7 {
 		sc.Interface.BrandColor = ""
 	}
 	return sc
+}
+
+// safeAssetPath reports whether a sidecar icon path is a safe repo-relative
+// asset reference: under "assets/", not absolute, and free of ".." traversal.
+// The old check was prefix-only, so "assets/../../etc/passwd" passed (review
+// finding S3, defense-in-depth for a future asset-serving consumer).
+func safeAssetPath(p string) bool {
+	return strings.HasPrefix(p, "assets/") &&
+		!strings.HasPrefix(p, "/") &&
+		!strings.Contains(p, "..")
 }
 
 // frontmatterDelim matches the exact `---` delimiter lines.

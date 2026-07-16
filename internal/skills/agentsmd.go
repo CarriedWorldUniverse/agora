@@ -2,7 +2,6 @@ package skills
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 )
@@ -10,6 +9,12 @@ import (
 // DefaultAGENTSBudgetBytes is the 32 KiB default context-doc budget.
 // Spec: agora-spec-subagents.md §6.
 const DefaultAGENTSBudgetBytes = 32 * 1024
+
+// MaxAgentsFileBytes caps a single context-doc read BEFORE buffering, so a
+// symlinked AGENTS.md → /dev/zero (or a huge real file) cannot OOM the host
+// (review finding S2). Well above any realistic doc and the default budget;
+// the per-doc budget truncation still applies on top of this.
+const MaxAgentsFileBytes = 1 << 20 // 1 MiB
 
 // DefaultAGENTSFilenames is the per-directory precedence list: first hit
 // wins. Spec §6: "AGENTS.override.md > AGENTS.md > configured fallbacks
@@ -52,12 +57,9 @@ func DiscoverAGENTSMD(cwd string, markers []string, filenames []string, budgetBy
 		if remaining <= 0 {
 			break
 		}
-		file, content, found := pickAgentsFile(dir, filenames)
+		file, content, found := pickAgentsFile(dir, filenames, root)
 		if !found {
 			continue
-		}
-		if strings.TrimSpace(content) == "" {
-			continue // empty files skipped (§6)
 		}
 		if len(content) > remaining {
 			content = content[:remaining]
@@ -69,14 +71,21 @@ func DiscoverAGENTSMD(cwd string, markers []string, filenames []string, budgetBy
 	return result
 }
 
-// pickAgentsFile returns the first filenames-precedence file that exists
-// in dir.
-func pickAgentsFile(dir string, filenames []string) (file, content string, found bool) {
+// pickAgentsFile returns the first filenames-precedence file in dir whose
+// content is non-empty. An empty (or whitespace-only) candidate is skipped and
+// the next filename in the SAME directory is tried — so an empty
+// AGENTS.override.md never suppresses a populated AGENTS.md beside it (spec §6:
+// "first hit of ...; empty files skipped"; review finding F7). Reads are
+// symlink-contained under projectRoot and size-capped (findings S1/S2).
+func pickAgentsFile(dir string, filenames []string, projectRoot string) (file, content string, found bool) {
 	for _, fn := range filenames {
 		p := filepath.Join(dir, fn)
-		data, err := os.ReadFile(p)
+		data, _, err := safeReadUnder(p, projectRoot, true, MaxAgentsFileBytes)
 		if err != nil {
 			continue
+		}
+		if strings.TrimSpace(string(data)) == "" {
+			continue // empty candidate: fall through to the next filename (§6)
 		}
 		return fn, string(data), true
 	}
