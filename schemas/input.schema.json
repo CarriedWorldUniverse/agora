@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://carriedworlduniverse.github.io/agora/schemas/input.schema.json",
+  "title": "agora input message (agora-spec-io §1; Go source of truth: contracts/event.go Input)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["type"],
+  "properties": {
+    "type": {
+      "enum": ["user_message", "steer", "interrupt", "approval_response", "question_response", "config", "provision", "end"]
+    },
+    "text": { "type": "string" },
+    "model": { "type": "string" },
+    "effort": { "enum": ["low", "medium", "high", "xhigh", "max"] },
+    "id": { "type": "string" },
+    "decision": { "enum": ["allow", "deny"] },
+    "scope": { "enum": ["once", "session", "prefix", "host"] },
+    "message": { "type": "string" },
+    "answer": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "client-supplied answer — carries NO attribution; the daemon stamps `by` from the authenticated connection (planning-questions §6 invariant 4).",
+      "properties": {
+        "choice": { "type": "array", "items": { "type": "string" } },
+        "text": { "type": "string" }
+      }
+    },
+    "provision": { "$ref": "provision.schema.json" },
+    "key": { "type": "string" },
+    "value": {}
+  },
+  "allOf": [
+    { "if": { "properties": { "type": { "const": "approval_response" } } }, "then": { "required": ["id", "decision"] } },
+    { "if": { "properties": { "type": { "const": "question_response" } } }, "then": { "required": ["id", "answer"] } },
+    { "if": { "properties": { "type": { "const": "provision" } } }, "then": { "required": ["provision"] } },
+    { "if": { "properties": { "type": { "const": "config" } } }, "then": { "required": ["key"] } }
+  ]
+}
