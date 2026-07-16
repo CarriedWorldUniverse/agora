@@ -5,7 +5,7 @@
 ## 0. Ground rules
 
 1. **Contracts as code before fan-out.** Unit U0 translates the prose seams into a compiling `contracts` package + JSON schemas ONCE, centrally. Parallel builders import compiled types; divergent spec readings become compile errors, not integration surprises.
-2. **Observable DoD only** (docs/network/OBSERVABLE-CRITERIA.md): every unit's acceptance is checkable from artifact + evidence — tests pass (`-race` always), golden fixtures match, conformance green. No narrative acceptance. The acceptance gates (judge-the-diff + test-evidence) enforce this at PR time.
+2. **Observable DoD only** (the observable-criteria standard — acceptance checkable from artifact + evidence, never from the agent's word): every unit's acceptance is `-race` tests pass, golden fixtures match, conformance green — a human or a gate can verify it without trusting a narrative. The acceptance gates (judge-the-diff + test-evidence) enforce this at PR time.
 3. **Specs travel into the repo** at U1 (`docs/spec/` — this directory copied, then repo copy = canonical). Off-git-in-`~` was right for the design phase; pod builders can't read croft's home. Design iteration continues in-repo from then on.
 4. **Old code**: the repo's existing TUI (WS chat panel on claudecode) freezes on branch `v0-legacy` at U1 — runnable reference until the new TUI reaches parity; `main` restarts with the new skeleton. Nothing deleted.
 5. **Interactive exceptions** (never one-shot; their machinery IS one-shot, their content/tuning is not): the core prompt TEXT (models × core eval, prompt §6), the TUI FEEL pass (operator dogfood after U16), context-curation TUNING (knobs + synthetic task, curation §8), and the workflow-creator/agent-def content.
