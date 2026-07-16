@@ -183,7 +183,13 @@ func TestCrashSafety(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewLocalStore: %v", err)
 		}
-		// Deliberately no s.Close() / defer — simulate an unclean stop.
+		// Deliberately no s.Close() before s2 opens — simulate an unclean stop
+		// (the crash is the ABSENCE of a clean shutdown between write and the
+		// next open). We DO release the leaked db handle at end-of-test via
+		// Cleanup, otherwise Windows can't delete the still-open state.db
+		// during TempDir teardown (Unix unlinks open files fine). Registered
+		// after t.TempDir(), so LIFO Cleanup closes it before RemoveAll runs.
+		t.Cleanup(func() { _ = s.Close() })
 		now := time.Now().UTC()
 		mustCreate(t, s, contracts.ThreadMeta{ThreadID: "th_crash", CreatedAt: now, IdentityFP: "agora:x", Profile: "dev", WorkingDir: "/work"})
 		if err := s.Append("th_crash", []contracts.ThreadItem{
