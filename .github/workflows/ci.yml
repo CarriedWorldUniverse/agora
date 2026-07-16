@@ -26,6 +26,15 @@ jobs:
           go-version: 'stable'
           cache: true
 
+      - name: gofmt (lint)
+        if: runner.os != 'Windows'
+        run: |
+          # Capture stdout AND stderr: gofmt reports drift on stdout but parse
+          # errors on stderr (exit 2) — stdout-only would pass a broken file.
+          if ! out="$(gofmt -l . 2>&1)" || [ -n "$out" ]; then
+            echo "gofmt failed or found drift:"; echo "$out"; exit 1
+          fi
+
       - name: go vet
         run: go vet ./...
 
