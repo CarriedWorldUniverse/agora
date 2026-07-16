@@ -1,0 +1,9 @@
+{"op":"create","thread_id":"th_flow_parent","identity_fp":"agora:k5xw3zjanfzsa2lt","profile":"dev","working_dir":"/work/demo"}
+{"op":"append","thread_id":"th_flow_parent","items":[{"type":"user_message","payload":"let's build the widget"},{"type":"agent_message","payload":"sure, starting on the widget"},{"type":"agent_message","payload":"actually, let's use a different approach"}]}
+{"op":"fork","thread_id":"th_flow_parent","seq":2,"result_ref":"child"}
+{"op":"append","thread_ref":"child","items":[{"type":"user_message","payload":"no, keep the original approach"},{"type":"agent_message","payload":"got it, continuing the original approach"}]}
+{"op":"append","thread_id":"th_flow_parent","items":[{"type":"agent_message","payload":"post-fork parent-only message"}]}
+{"op":"resume","thread_id":"th_flow_parent","expect_payloads":["let's build the widget","sure, starting on the widget","actually, let's use a different approach","post-fork parent-only message"]}
+{"op":"resume","thread_ref":"child","expect_payloads":["let's build the widget","sure, starting on the widget","no, keep the original approach","got it, continuing the original approach"]}
+{"op":"create","thread_id":"th_flow_other_wd","identity_fp":"agora:k5xw3zjanfzsa2lt","profile":"dev","working_dir":"/work/other"}
+{"op":"list","filter":{"working_dir":"/work/demo"},"expect_thread_ids":["th_flow_parent","child"]}
