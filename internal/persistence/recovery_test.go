@@ -94,9 +94,29 @@ func TestMidFileCorruptionIsHardError(t *testing.T) {
 	_, _ = f.WriteString("this is not json\n" + `{"seq":2,"type":"user_message"}` + "\n")
 	_ = f.Close()
 
-	_, _, err = readThreadFile(path)
-	if err == nil {
-		t.Fatal("mid-file corruption must be a hard error, got nil")
+	if _, _, err := readThreadFile(path); err == nil {
+		t.Fatal("mid-file corruption before a good line must be a hard error, got nil")
+	}
+
+	// The subtler case (delta re-review, PR #38): a corrupt COMPLETE line
+	// immediately followed by a TORN tail. The torn tail is dropped, which
+	// must NOT make the preceding corrupt line "tolerable" — it is still real
+	// mid-file corruption and must hard-error, not silently drop the item.
+	root2 := t.TempDir()
+	s2, err := NewLocalStore(root2, Config{})
+	if err != nil {
+		t.Fatalf("NewLocalStore: %v", err)
+	}
+	mustCreate(t, s2, contracts.ThreadMeta{ThreadID: "th_mt", CreatedAt: now, IdentityFP: "agora:x", Profile: "dev", WorkingDir: "/w"})
+	_ = s2.Close()
+	path2 := threadPath(root2, now, "th_mt")
+	f2, _ := os.OpenFile(path2, os.O_APPEND|os.O_WRONLY, 0o644)
+	// meta line already present + newline; append: bad-complete-line\n + torn-partial(no newline)
+	_, _ = f2.WriteString("{BADJSONNOTVALID\n" + `{"seq":2`)
+	_ = f2.Close()
+
+	if _, _, err := readThreadFile(path2); err == nil {
+		t.Fatal("corrupt complete line before a torn tail must hard-error, got nil (silent data loss)")
 	}
 }
 

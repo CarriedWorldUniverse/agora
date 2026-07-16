@@ -74,7 +74,10 @@ func validateThreadID(id string) error {
 	if id == "" {
 		return fmt.Errorf("persistence: empty thread id")
 	}
-	if len(id) > 255 {
+	// Cap well below the common 255-byte filename limit, leaving room for the
+	// ".jsonl" suffix threadPath appends — so an over-long id fails with this
+	// clean validation error, not a later OS error.
+	if len(id) > 240 {
 		return fmt.Errorf("persistence: thread id too long")
 	}
 	if id == "." || id == ".." {

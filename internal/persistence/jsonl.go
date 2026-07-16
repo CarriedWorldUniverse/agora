@@ -57,20 +57,15 @@ func readThreadFile(path string) (contracts.ThreadMeta, []contracts.ThreadItem, 
 	if len(data) == 0 {
 		return contracts.ThreadMeta{}, nil, fmt.Errorf("persistence: empty thread file %s", path)
 	}
-	// Split into lines WITHOUT dropping information about a torn tail: a file
-	// that does not end in '\n' has an incomplete final line.
 	lines := bytes.Split(data, []byte{'\n'})
-	// bytes.Split leaves a trailing empty element when data ends in '\n';
-	// drop it. If the file does NOT end in '\n', the final element is a
-	// partial (torn) line and is dropped as untrusted.
-	tornTail := false
+	// bytes.Split always leaves a trailing element after the final '\n':
+	// empty when the file ends cleanly, or the torn partial final line when a
+	// crash left no terminating newline. Either way it is NOT a complete item
+	// line — drop it. This is the entirety of torn-tail tolerance: every line
+	// that remains is complete, so any later decode failure is genuine
+	// mid-file corruption, not a torn write.
 	if n := len(lines); n > 0 {
-		if len(lines[n-1]) == 0 {
-			lines = lines[:n-1] // clean newline terminator
-		} else {
-			lines = lines[:n-1] // torn partial final line — discard it
-			tornTail = true
-		}
+		lines = lines[:n-1]
 	}
 	if len(lines) == 0 {
 		return contracts.ThreadMeta{}, nil, fmt.Errorf("persistence: no complete lines in %s", path)
@@ -94,13 +89,9 @@ func readThreadFile(path string) (contracts.ThreadMeta, []contracts.ThreadItem, 
 		}
 		var it contracts.ThreadItem
 		if err := json.Unmarshal(line, &it); err != nil {
-			isLast := i == len(lines)-1
-			// A decode failure on the last complete line, when the file was
-			// already torn, is part of the same crash — tolerate. Otherwise
-			// it is genuine mid-file corruption: hard error.
-			if isLast && tornTail {
-				break
-			}
+			// The torn trailing line was already dropped above; every line
+			// here is complete, so a decode failure is real mid-file
+			// corruption (bit-rot / a bug), never a torn write — hard error.
 			return contracts.ThreadMeta{}, nil, fmt.Errorf("persistence: decode item line %d: %w", i, err)
 		}
 		items = append(items, it)
