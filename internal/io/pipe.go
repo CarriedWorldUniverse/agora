@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	stdio "io"
-	"sync"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
 )
@@ -61,6 +60,18 @@ type itemPayload struct {
 	Text string `json:"text"`
 }
 
+// turnFailedPayload is the payload shape turn.failed carries when the
+// Engine wants to signal that the failure was an interruption rather than a
+// genuine error (FIX 4). This is the ENGINE's authoritative signal — the
+// only correct place to classify ExitInterrupted vs ExitFailed, since it
+// alone knows why the turn ended, unlike a client-side heuristic based on
+// read-time input ordering (which races: an interrupt Input sent right as a
+// turn is already failing for an unrelated reason could be misread as
+// "the interrupt caused this").
+type turnFailedPayload struct {
+	Interrupted bool `json:"interrupted"`
+}
+
 // RunPipe drives engine in pipe mode: it decodes stdin JSONL Input, forwards
 // them to engine, and writes engine's output Event stream to stdout as
 // JSONL (§1), honoring opts. stderr receives human diagnostics only — never
@@ -74,13 +85,15 @@ type itemPayload struct {
 //
 // Exit-code classification (spec-ambiguity call, documented here since §4
 // doesn't spell out how "interrupted" is detected on the wire — there is no
-// turn.interrupted event type): RunPipe tracks the most recently sent Input
-// type. If the engine's last terminal event for the run is turn.failed AND
-// the immediately preceding Input was "interrupt", the run is classified
-// ExitInterrupted; a turn.failed with any other preceding input is
-// ExitFailed; turn.completed is ExitCompleted; a run with no terminal event
-// at all (e.g. only a config/end round-trip, no turn ever started) is
-// ExitCompleted.
+// turn.interrupted event type): RunPipe classifies from the ENGINE's
+// terminal event content, not client-side read timing (a prior "track the
+// most recently sent Input" heuristic raced the reader goroutine against
+// the classifier — FIX 4). On turn.failed, RunPipe decodes the payload as
+// turnFailedPayload; {"interrupted":true} classifies ExitInterrupted, any
+// other turn.failed payload (including one with no "interrupted" field at
+// all) classifies ExitFailed regardless of what Input preceded it.
+// turn.completed is ExitCompleted; a run with no terminal event at all (e.g.
+// only a config/end round-trip, no turn ever started) is ExitCompleted.
 func RunPipe(ctx context.Context, r stdio.Reader, w stdio.Writer, stderr stdio.Writer, engine Engine, opts PipeOptions) (int, error) {
 	in := make(chan contracts.Input, 1)
 	out := make(chan contracts.Event, 1)
@@ -88,16 +101,10 @@ func RunPipe(ctx context.Context, r stdio.Reader, w stdio.Writer, stderr stdio.W
 	engineErr := make(chan error, 1)
 	go func() { engineErr <- engine.Run(ctx, in, out) }()
 
-	var mu sync.Mutex // guards lastInput between the reader goroutine and the classifier below
-	var lastInput contracts.InputType
-
 	readErr := make(chan error, 1)
 	go func() {
 		defer close(in)
 		readErr <- readPipeInput(ctx, r, opts, func(i contracts.Input) bool {
-			mu.Lock()
-			lastInput = i.Type
-			mu.Unlock()
 			select {
 			case in <- i:
 				return true
@@ -116,10 +123,9 @@ func RunPipe(ctx context.Context, r stdio.Reader, w stdio.Writer, stderr stdio.W
 		case contracts.EvTurnCompleted:
 			exitCode = ExitCompleted
 		case contracts.EvTurnFailed:
-			mu.Lock()
-			li := lastInput
-			mu.Unlock()
-			if li == contracts.InInterrupt {
+			var p turnFailedPayload
+			_ = json.Unmarshal(ev.Payload, &p) // absent/malformed payload => not interrupted
+			if p.Interrupted {
 				exitCode = ExitInterrupted
 			} else {
 				exitCode = ExitFailed

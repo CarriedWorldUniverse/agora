@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -59,6 +60,31 @@ func (c *dialClient) sendInput(t *testing.T, in contracts.Input) {
 	t.Helper()
 	if err := c.enc.Encode(ClientFrame{Input: &in}); err != nil {
 		t.Fatalf("send input: %v", err)
+	}
+}
+
+// waitForAttachCount polls sess's registered client count until it reaches
+// n or d elapses. dialAndAttach only guarantees the attach FRAME has been
+// written to the wire, not that the server's accept-loop goroutine has
+// actually run Session.Attach yet — two dialAndAttach calls back to back
+// race each other's server-side registration order with no synchronization
+// otherwise. Tests that need a deterministic "client X is attached before
+// client Y dials" ordering poll this (rather than assuming dial order
+// implies attach order, which the flaky prior version of this test did).
+func waitForAttachCount(t *testing.T, sess *Session, n int, d time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for {
+		sess.mu.Lock()
+		count := len(sess.clients)
+		sess.mu.Unlock()
+		if count >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %d attached client(s), have %d", n, count)
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 
@@ -117,8 +143,15 @@ func TestServeUnix_MultiAttachOverRealSocket(t *testing.T) {
 
 	go func() { _ = ServeUnix(ctx, ln, sessions) }()
 
-	c1 := dialAndAttach(t, sockPath, AttachRequest{ThreadID: "th_wire", ClientID: "c1", Kind: "tui"})
+	c1 := dialAndAttach(t, sockPath, AttachRequest{ThreadID: "th_wire", ClientID: "c1", Kind: "tui", Capabilities: []contracts.Capability{contracts.CapInteractive}})
 	defer c1.conn.Close()
+	// dialAndAttach only guarantees the attach frame reached the wire, not
+	// that the server's accept-loop goroutine has run Session.Attach yet —
+	// wait for that deterministically before dialing c2, so which of the
+	// two clients' presence event the other observes isn't a race (a prior
+	// version of this test assumed dial order implies attach order, which
+	// was flaky).
+	waitForAttachCount(t, sess, 1, 3*time.Second)
 	c2 := dialAndAttach(t, sockPath, AttachRequest{ThreadID: "th_wire", ClientID: "c2", Kind: "vessel"})
 	defer c2.conn.Close()
 
@@ -126,6 +159,13 @@ func TestServeUnix_MultiAttachOverRealSocket(t *testing.T) {
 	presence := c1.recvEvent(t, 3*time.Second)
 	if presence.Type != contracts.EvClientAttached {
 		t.Fatalf("c1 first event = %s, want client.attached", presence.Type)
+	}
+	var p presencePayload
+	if err := json.Unmarshal(presence.Payload, &p); err != nil {
+		t.Fatalf("decode presence payload: %v", err)
+	}
+	if p.ClientID != "c2" {
+		t.Fatalf("presence client_id = %s, want c2 (the joining client)", p.ClientID)
 	}
 
 	c1.sendInput(t, contracts.Input{Type: contracts.InUserMessage, Text: "go"})
@@ -150,6 +190,118 @@ func TestServeUnix_MultiAttachOverRealSocket(t *testing.T) {
 	tail := c3.recvEvent(t, 3*time.Second)
 	if tail.Type != contracts.EvTurnCompleted {
 		t.Fatalf("c3 replay tail[0] = %s, want turn.completed (the last backlog event)", tail.Type)
+	}
+}
+
+// TestListenUnix_SocketPermissionHardened: ListenUnix chmods the socket to
+// 0700 so it isn't world-connectable under a looser default umask (FIX 5).
+// Unix-only — os.FileMode's owner/group/other bits aren't meaningful on
+// Windows, and this package's own doc comments already note Windows AF_UNIX
+// support is best-effort.
+func TestListenUnix_SocketPermissionHardened(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket permission bits aren't meaningful on Windows")
+	}
+	sockPath := filepath.Join(t.TempDir(), "agora-perm.sock")
+	ln, err := ListenUnix(sockPath)
+	if err != nil {
+		t.Fatalf("ListenUnix: %v", err)
+	}
+	defer ln.Close()
+
+	fi, err := os.Stat(sockPath)
+	if err != nil {
+		t.Fatalf("stat socket: %v", err)
+	}
+	if got := fi.Mode().Perm(); got != 0o700 {
+		t.Fatalf("socket mode = %o, want 0700", got)
+	}
+}
+
+// TestServeConn_OversizedFrameRejected: a client frame larger than
+// maxClientFrameBytes makes readClient/ServeConn return an error instead of
+// growing memory without bound (FIX 2).
+func TestServeConn_OversizedFrameRejected(t *testing.T) {
+	sockPath := filepath.Join(t.TempDir(), "agora3.sock")
+	ln, err := ListenUnix(sockPath)
+	if err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("unix sockets unsupported on this Windows runtime: %v", err)
+		}
+		t.Fatalf("ListenUnix: %v", err)
+	}
+	defer ln.Close()
+
+	sessions := &sessionMap{sessions: map[string]*Session{}}
+	serveErr := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			serveErr <- err
+			return
+		}
+		defer conn.Close()
+		serveErr <- ServeConn(context.Background(), conn, sessions)
+	}()
+
+	conn, err := DialUnix(sockPath)
+	if err != nil {
+		t.Fatalf("DialUnix: %v", err)
+	}
+	defer conn.Close()
+
+	// A single line far larger than maxClientFrameBytes, newline-terminated
+	// (as json.NewEncoder would produce), but never a valid JSON frame — the
+	// scanner must reject it on size before json.Unmarshal ever sees it.
+	oversized := make([]byte, maxClientFrameBytes+1024)
+	for i := range oversized {
+		oversized[i] = ' '
+	}
+	oversized = append(oversized, '\n')
+	if _, err := conn.Write(oversized); err != nil {
+		t.Fatalf("write oversized frame: %v", err)
+	}
+
+	select {
+	case err := <-serveErr:
+		if err == nil {
+			t.Fatal("ServeConn returned nil error for an oversized frame, want an error")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for ServeConn to reject the oversized frame")
+	}
+}
+
+// TestFrameCodec_NormalFrameRoundTrips: a frame well under
+// maxClientFrameBytes still round-trips through the bounded scanner (FIX 2
+// regression guard: the size cap must not break ordinary frames).
+func TestFrameCodec_NormalFrameRoundTrips(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		codec := newFrameCodec(server)
+		f, err := codec.readClient()
+		if err != nil {
+			t.Errorf("readClient: %v", err)
+			return
+		}
+		if f.Attach == nil || f.Attach.ThreadID != "th_normal" {
+			t.Errorf("readClient frame = %+v, want attach.thread_id=th_normal", f)
+		}
+	}()
+
+	enc := json.NewEncoder(client)
+	if err := enc.Encode(ClientFrame{Attach: &AttachRequest{ThreadID: "th_normal", ClientID: "c1"}}); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for normal frame round trip")
 	}
 }
 

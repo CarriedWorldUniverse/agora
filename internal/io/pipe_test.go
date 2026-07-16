@@ -249,7 +249,10 @@ func TestRunPipe_ExitCodes(t *testing.T) {
 				`{"type":"interrupt"}` + "\n",
 			script: []ScriptedTurn{
 				{Events: []contracts.Event{{Type: contracts.EvTurnStarted}}},
-				{Events: []contracts.Event{{Type: contracts.EvTurnFailed, Payload: json.RawMessage(`{"error":"interrupted"}`)}}},
+				// The engine's own authoritative signal (FIX 4): a
+				// turn.failed carrying {"interrupted":true}, NOT client-side
+				// read-timing relative to the preceding interrupt Input.
+				{Events: []contracts.Event{{Type: contracts.EvTurnFailed, Payload: json.RawMessage(`{"interrupted":true}`)}}},
 			},
 			wantCode: ExitInterrupted,
 		},
@@ -269,6 +272,33 @@ func TestRunPipe_ExitCodes(t *testing.T) {
 				t.Fatalf("code = %d, want %d\noutput:\n%s", code, tc.wantCode, out.String())
 			}
 		})
+	}
+}
+
+// TestRunPipe_ExitCode_FailedIgnoresPrecedingInterrupt: a plain turn.failed
+// with no {"interrupted":true} marker classifies ExitFailed regardless of
+// an interrupt Input that happened to precede it on the wire (FIX 4 — the
+// classifier must key off the ENGINE's own signal, not client-side
+// read-time ordering: an interrupt sent right as an unrelated failure is
+// already in flight must not be misread as having caused it).
+func TestRunPipe_ExitCode_FailedIgnoresPrecedingInterrupt(t *testing.T) {
+	engine := &ScriptedEngine{Script: []ScriptedTurn{
+		{Events: []contracts.Event{{Type: contracts.EvTurnStarted}}},
+		{Events: []contracts.Event{{Type: contracts.EvTurnFailed, Payload: json.RawMessage(`{"error":"boom"}`)}}},
+	}}
+	in := strings.NewReader(
+		`{"type":"user_message","text":"go"}` + "\n" +
+			`{"type":"interrupt"}` + "\n",
+	)
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	code, err := RunPipe(ctx, in, &out, &bytes.Buffer{}, engine, PipeOptions{})
+	if err != nil {
+		t.Fatalf("RunPipe: %v", err)
+	}
+	if code != ExitFailed {
+		t.Fatalf("code = %d, want ExitFailed (a preceding interrupt Input must not flip a plain turn.failed to ExitInterrupted)\noutput:\n%s", code, out.String())
 	}
 }
 

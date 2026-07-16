@@ -3,6 +3,7 @@
 package io
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,13 @@ import (
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
 )
+
+// maxClientFrameBytes bounds a single session-protocol client frame (attach
+// or input line). json.NewDecoder(rw) with no size cap lets an oversized
+// frame OOM the daemon (the ws NetConn also disables its own read limit);
+// pipe mode already bounds lines the same way via bufio.Scanner
+// (maxPipeLineBytes) — this mirrors that backstop for the session protocol.
+const maxClientFrameBytes = 1 << 20 // 1 MiB
 
 // AttachRequest is the first frame a session-protocol connection sends —
 // which thread to join, who the client is, and how much backlog to replay.
@@ -59,18 +67,31 @@ var ErrExpectedAttach = errors.New("io: session protocol: first frame must be at
 // never in framing.
 // Spec: agora-spec-io.md §2 ("unix socket / ws framing").
 type frameCodec struct {
-	rw  stdio.ReadWriteCloser
-	dec *json.Decoder
-	mu  sync.Mutex // guards writes: the fan-out pump and (if ever needed) a direct writer could race
+	rw stdio.ReadWriteCloser
+	sc *bufio.Scanner
+	mu sync.Mutex // guards writes (and Close, FIX 7): the fan-out pump and (if ever needed) a direct writer could race
 }
 
 func newFrameCodec(rw stdio.ReadWriteCloser) *frameCodec {
-	return &frameCodec{rw: rw, dec: json.NewDecoder(rw)}
+	sc := bufio.NewScanner(rw)
+	sc.Buffer(make([]byte, 0, 64*1024), maxClientFrameBytes)
+	return &frameCodec{rw: rw, sc: sc}
 }
 
+// readClient reads one newline-delimited frame. Clients write frames with
+// json.NewEncoder, which newline-terminates every value, so a bufio.Scanner
+// (line-bounded to maxClientFrameBytes) is wire-compatible while capping
+// memory: an oversized frame returns bufio.ErrTooLong instead of growing
+// json.Decoder's internal buffer without bound.
 func (c *frameCodec) readClient() (ClientFrame, error) {
 	var f ClientFrame
-	err := c.dec.Decode(&f)
+	if !c.sc.Scan() {
+		if err := c.sc.Err(); err != nil {
+			return f, err
+		}
+		return f, stdio.EOF
+	}
+	err := json.Unmarshal(c.sc.Bytes(), &f)
 	return f, err
 }
 
@@ -86,7 +107,13 @@ func (c *frameCodec) writeServer(f ServerFrame) error {
 	return err
 }
 
-func (c *frameCodec) Close() error { return c.rw.Close() }
+// Close closes the underlying connection. It holds c.mu so it can't race a
+// concurrent writeServer (FIX 7).
+func (c *frameCodec) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.rw.Close()
+}
 
 // SessionLookup resolves a thread_id to its Session. The daemon (U18,
 // internal/daemon) supplies the real multi-thread registry; tests use a
