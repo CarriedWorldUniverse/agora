@@ -77,8 +77,8 @@ type Event struct {
 	// Item is set on item.* events.
 	Item *ItemRef `json:"item,omitempty"`
 	// Payload carries the type-specific body (usage on turn.completed,
-	// ApprovalRequest on approval.requested, QuestionPayload+id on
-	// question.asked, ...). Decoded by consumers per Type.
+	// ApprovalRequest on approval.requested, QuestionAsked on question.asked,
+	// ...). Decoded by consumers per Type.
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 

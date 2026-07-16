@@ -9,6 +9,7 @@
 //
 //	identity.go   — agora-spec.md §Identity
 //	approval.go   — agora-spec-approvals.md
+//	capability.go — agora-spec-remote.md §4 (controller capability tiers)
 //	question.go   — agora-spec-planning-questions.md §4–§6
 //	plan.go       — agora-spec-planning-questions.md §1–§3
 //	event.go      — agora-spec-io.md §1–§2 (events + input messages)

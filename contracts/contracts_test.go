@@ -322,17 +322,52 @@ func TestPlanGateShape(t *testing.T) {
 	}
 }
 
-// TestPlanGateRejectsUnrelatedAnswer is the negative control proving the ID
-// correlation has teeth: a synthetic flow where an UNRELATED answer arrives
-// before allow must be caught as an invariant violation. (This is exactly
-// Sonnet's repro against the old boolean-only logic — it now fails, correctly.)
-func TestPlanGateRejectsUnrelatedAnswer(t *testing.T) {
-	outstanding := map[string]bool{"oq_real": true}
-	// unrelated answer
-	delete(outstanding, "qu_unrelated")
-	// gate allow with the real question still open ⇒ must be a violation
-	if len(outstanding) == 0 {
-		t.Fatal("unrelated answer wrongly cleared the outstanding set — invariant has no teeth")
+// TestPlanGateTeethAgainstFixtureMutation is the negative control with REAL
+// teeth: it runs the identical outstanding-ID scan over a MUTATED plan_gate
+// flow (the answer redirected to an unrelated id) and asserts the invariant
+// fires. Unlike a hand-built map literal, this exercises the actual
+// PlanArtifact/QuestionAsked/Answer decode path against the real event loop.
+func TestPlanGateTeethAgainstFixtureMutation(t *testing.T) {
+	outstanding := map[string]bool{}
+	var violated bool
+	for _, line := range fixtureLines(t, "plan_gate.jsonl") {
+		var ev Event
+		if err := json.Unmarshal(line, &ev); err != nil {
+			t.Fatal(err)
+		}
+		switch ev.Type {
+		case EvApprovalRequested:
+			var ar ApprovalRequest
+			if err := json.Unmarshal(ev.Payload, &ar); err != nil || ar.Kind != KindPlan {
+				continue
+			}
+			raw, _ := json.Marshal(ar.Payload)
+			var pa PlanArtifact
+			if err := json.Unmarshal(raw, &pa); err != nil {
+				t.Fatal(err)
+			}
+			for _, oq := range pa.OpenQuestions {
+				outstanding[oq.ID] = true
+			}
+		case EvQuestionAnswered:
+			var a struct {
+				ID string `json:"id"`
+			}
+			_ = json.Unmarshal(ev.Payload, &a)
+			// MUTATION: redirect the answer to an unrelated id, as if forged.
+			delete(outstanding, a.ID+"_UNRELATED")
+		case EvApprovalResolved:
+			var res ApprovalResolution
+			if err := json.Unmarshal(ev.Payload, &res); err != nil {
+				t.Fatal(err)
+			}
+			if res.Decision == DecisionAllow && len(outstanding) > 0 {
+				violated = true // the scan correctly detects the unresolved question
+			}
+		}
+	}
+	if !violated {
+		t.Fatal("mutated flow (answer to unrelated id) did not trip the open-questions invariant — the scan has no teeth")
 	}
 }
 

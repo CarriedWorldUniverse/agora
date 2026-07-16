@@ -133,7 +133,7 @@ type ApprovalRequest struct {
 	ID   string       `json:"id"`
 	Kind ApprovalKind `json:"kind"`
 	// Payload is kind-specific: the command for exec, the diff footprint for
-	// patch, a QuestionPayload for question, a PlanArtifact for plan, etc.
+	// patch, a QuestionAsked for question, a PlanArtifact for plan, etc.
 	Payload any `json:"payload"`
 }
 
