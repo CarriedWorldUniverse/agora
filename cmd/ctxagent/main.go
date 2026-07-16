@@ -24,6 +24,7 @@ import (
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
 	"github.com/CarriedWorldUniverse/bridle/codemap"
+	"github.com/CarriedWorldUniverse/bridle/wset"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/adapter"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/distill"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/embed"
@@ -470,7 +471,7 @@ func seedStore(st *store.Store, sessionID, path string) (int, error) {
 	return n, nil
 }
 
-func runConfig(name, model string, mapOn, within, state, useCodemap, useJournal, wset bool, keep int, seedFile, taskDir, taskPrompt, testCmd string, maxSteps int) result {
+func runConfig(name, model string, mapOn, within, state, useCodemap, useJournal, useWset bool, wsetWindow, keep int, seedFile, taskDir, taskPrompt, testCmd string, maxSteps int) result {
 	dir := setupSandbox(taskDir)
 	defer os.RemoveAll(dir)
 
@@ -528,8 +529,8 @@ func runConfig(name, model string, mapOn, within, state, useCodemap, useJournal,
 	// context-degradation regime: evict old tool results past the keep window
 	// (both map-on and map-off — the cap is the experimental pressure; the map
 	// is the intervention)
-	if keep > 0 {
-		if wset {
+	if keep > 0 && wsetWindow == 0 {
+		if useWset {
 			h.RegisterBeforeModelCall((&wsetEvictor{keep: keep}).hook)
 		} else {
 			ev := &evictor{keep: keep, eng: eng, focus: taskPrompt}
@@ -551,6 +552,17 @@ func runConfig(name, model string, mapOn, within, state, useCodemap, useJournal,
 	// ctxmap (no models, no store), composes with any config.
 	if useJournal {
 		(&journal{}).attach(h)
+	}
+
+	// wset v2 (two-layer budget): ledger + demote/track/readmit + harness-read
+	// refresh + partial spans. -window shrinks the simulated context window to
+	// force demotion pressure on tasks whose working set would otherwise fit.
+	if wsetWindow > 0 {
+		cfg := wset.DefaultManagerConfig(dir)
+		cfg.ContextWindowTokens = wsetWindow
+		cfg.KeepOthers = keep
+		_, detachW := wset.AttachManager(h, cfg)
+		defer detachW()
 	}
 
 	t0 := time.Now()
@@ -617,6 +629,7 @@ func main() {
 	useCodemap := flag.Bool("codemap", false, "attach the codemap symbol server (code_* tools + drift reports) over the sandbox")
 	useJournal := flag.Bool("journal", false, "decision journal (arm E): journal_commit tool + eviction-proof system-prompt block")
 	wset := flag.Bool("wset", false, "working-set retention (arm F): latest read of each file never evicted; command outputs keep last N")
+	wsetWindow := flag.Int("window", 0, "wset v2 two-layer manager with this simulated context window in tokens (0 = off); composes with -keep for the others window")
 	flag.Parse()
 
 	prompt, _ := os.ReadFile(filepath.Join(*taskDir, "README-task.md"))
@@ -647,7 +660,7 @@ func main() {
 			continue
 		}
 		for r := 0; r < *reps; r++ {
-			res := runConfig(c.name, c.model, c.mapOn, *within, *state, *useCodemap, *useJournal, *wset, *keep, *seed, *taskDir, taskPrompt, testCmd, *maxSteps)
+			res := runConfig(c.name, c.model, c.mapOn, *within, *state, *useCodemap, *useJournal, *wset, *wsetWindow, *keep, *seed, *taskDir, taskPrompt, testCmd, *maxSteps)
 			status := "FAIL"
 			if res.passed {
 				status = "PASS"
