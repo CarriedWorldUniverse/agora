@@ -32,6 +32,15 @@ type NewOptions struct {
 // base_version honestly from builtinVersion.
 // Spec: agora-spec-prompt.md §2a (`agora prompt new`).
 func New(destDir string, builtin CorePackage, builtinVersion string, opts NewOptions) error {
+	// Refuse to clobber an existing package: silently overwriting hand edits,
+	// or leaving a mixed core.md + segments/ layout that LoadPackage then
+	// rejects as ErrPackageAmbiguous, is worse than erroring (review, U4).
+	for _, marker := range []string{"manifest.toml", "core.md", "segments"} {
+		if _, err := os.Stat(filepath.Join(destDir, marker)); err == nil {
+			return fmt.Errorf("prompt: refusing to overwrite existing package at %s (already has %s)", destDir, marker)
+		}
+	}
+
 	source := builtin
 	if opts.Source != nil {
 		source = *opts.Source

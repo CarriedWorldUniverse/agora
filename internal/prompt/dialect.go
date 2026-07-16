@@ -77,10 +77,37 @@ func ApplyDialect(text string, knobs map[string]string) string {
 	return rendered
 }
 
+// maxKnobValueLen bounds a rendered knob value in an annotation line — knobs
+// are short tokens (native, flat, low, on); anything longer is abuse, not use.
+const maxKnobValueLen = 80
+
+// sanitizeKnobValue makes a knob value safe to append to the composed system
+// prompt. Registry-supplied knobs (ModelInfo.Prompt.Dialect) do NOT pass
+// through the TOML control-char guard, so a value could carry a newline or a
+// forged "CONTRACT:" marker and fabricate a contract line — the exact §4
+// invariant ("a dialect may never add contract") this annotation must not
+// break. Collapse control chars to spaces, neutralize the contract marker, and
+// cap length. Security review (U4).
+func sanitizeKnobValue(v string) string {
+	v = strings.Map(func(r rune) rune {
+		if r == '\t' || (r >= 0x20 && r != 0x7f) {
+			return r
+		}
+		return ' '
+	}, v)
+	v = strings.ReplaceAll(v, contractLinePrefix, "contract:")
+	v = strings.TrimSpace(v)
+	if len(v) > maxKnobValueLen {
+		v = strings.TrimSpace(v[:maxKnobValueLen])
+	}
+	return v
+}
+
 // dialectNotes renders recognized-but-not-reformatting knobs (tool_idiom,
 // thinking, verbosity) as an appended, clearly-additive annotation line —
 // additive presentation, never a rewrite of existing contract text. Knob
-// names are sorted for determinism.
+// names are sorted for determinism; values are sanitized (see
+// sanitizeKnobValue) so a knob cannot forge a contract line.
 func dialectNotes(knobs map[string]string) string {
 	recognized := map[string]bool{"tool_idiom": true, "thinking": true, "verbosity": true}
 	names := make([]string, 0, len(knobs))
@@ -95,7 +122,7 @@ func dialectNotes(knobs map[string]string) string {
 	sort.Strings(names)
 	parts := make([]string, 0, len(names))
 	for _, k := range names {
-		parts = append(parts, "("+k+": "+knobs[k]+")")
+		parts = append(parts, "("+k+": "+sanitizeKnobValue(knobs[k])+")")
 	}
 	return strings.Join(parts, " ")
 }

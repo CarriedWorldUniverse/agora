@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,6 +17,13 @@ import (
 // segmentHeaderRE matches the "## <segment-name>" markers this package uses
 // to split a whole-file core.md into its §2 sections.
 var segmentHeaderRE = regexp.MustCompile(`(?m)^##\s+([a-z-]+)\s*$`)
+
+// MaxPackageFileBytes caps any single core-package file read (manifest.toml,
+// core.md, each segment/rendition). Reads are size-limited before buffering so
+// a huge or symlinked-to-/dev/zero package file cannot OOM the process; a file
+// over the cap is rejected rather than truncated (a truncated contract is
+// worse than a refused package). Security review (U4).
+const MaxPackageFileBytes = 1 << 20 // 1 MiB
 
 // Rendition is one compiled per-model rendering of a core (§2a, §4),
 // keyed by model and the core hash it was compiled against.
@@ -94,6 +102,36 @@ func segmentSet(sections map[contracts.Segment]string) map[contracts.Segment]boo
 	return set
 }
 
+// readPackageFile reads one core-package file with the security constraints a
+// package (which may not be 100% first-party — a shared variant, a fetched
+// zip, a dispatch-provisioned pod image) demands: it refuses a symlinked file
+// (a symlinked segment could read an arbitrary host file straight into the
+// highest-authority system prompt) and caps the read before buffering so a
+// huge/`/dev/zero` file cannot OOM the process. Missing files keep their
+// os.IsNotExist error so optional files stay optional. Security review (U4).
+func readPackageFile(path string) ([]byte, error) {
+	li, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if li.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("prompt: refusing symlinked package file %s", filepath.Base(path))
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, int64(MaxPackageFileBytes)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > MaxPackageFileBytes {
+		return nil, fmt.Errorf("prompt: package file %s exceeds the %d-byte cap", filepath.Base(path), MaxPackageFileBytes)
+	}
+	return data, nil
+}
+
 // LoadPackage reads a core package directory: manifest.toml, core.md OR
 // segments/*.md, optional dialects.toml, optional renditions/*.md.
 // Spec: agora-spec-prompt.md §2a (canonical layout).
@@ -101,7 +139,7 @@ func LoadPackage(dir string) (CorePackage, error) {
 	var pkg CorePackage
 
 	manifestPath := filepath.Join(dir, "manifest.toml")
-	if data, err := os.ReadFile(manifestPath); err == nil {
+	if data, err := readPackageFile(manifestPath); err == nil {
 		kv, perr := parseTOMLFlat(data)
 		if perr != nil {
 			return CorePackage{}, fmt.Errorf("prompt: %s: %w", manifestPath, perr)
@@ -117,7 +155,7 @@ func LoadPackage(dir string) (CorePackage, error) {
 
 	coreMDPath := filepath.Join(dir, "core.md")
 	hasFullText := false
-	if data, err := os.ReadFile(coreMDPath); err == nil {
+	if data, err := readPackageFile(coreMDPath); err == nil {
 		pkg.FullText = string(data)
 		hasFullText = true
 	} else if !os.IsNotExist(err) {
@@ -135,7 +173,7 @@ func LoadPackage(dir string) (CorePackage, error) {
 				continue
 			}
 			name := strings.TrimSuffix(e.Name(), ".md")
-			data, rerr := os.ReadFile(filepath.Join(segDir, e.Name()))
+			data, rerr := readPackageFile(filepath.Join(segDir, e.Name()))
 			if rerr != nil {
 				return CorePackage{}, rerr
 			}
@@ -150,15 +188,20 @@ func LoadPackage(dir string) (CorePackage, error) {
 	}
 
 	dialectsPath := filepath.Join(dir, "dialects.toml")
-	if data, err := os.ReadFile(dialectsPath); err == nil {
+	if data, err := readPackageFile(dialectsPath); err == nil {
 		sections, perr := parseTOMLSections(data)
 		if perr != nil {
 			return CorePackage{}, fmt.Errorf("prompt: %s: %w", dialectsPath, perr)
 		}
 		pkg.Dialect = map[string]map[string]string{}
 		for section, kv := range sections {
-			// dialects.toml sections are "models.<model>".
-			model := strings.TrimPrefix(section, "models.")
+			// dialects.toml sections are "models.<model>"; skip a stray header
+			// rather than register a dead model key that can never match a real
+			// ModelInfo.ID (review nit, U4).
+			model, ok := strings.CutPrefix(section, "models.")
+			if !ok {
+				continue
+			}
 			pkg.Dialect[model] = kv
 		}
 	} else if !os.IsNotExist(err) {
@@ -177,7 +220,7 @@ func LoadPackage(dir string) (CorePackage, error) {
 			if !ok {
 				continue
 			}
-			data, rerr := os.ReadFile(filepath.Join(renDir, e.Name()))
+			data, rerr := readPackageFile(filepath.Join(renDir, e.Name()))
 			if rerr != nil {
 				return CorePackage{}, rerr
 			}

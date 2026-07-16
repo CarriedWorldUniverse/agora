@@ -24,8 +24,21 @@ import (
 
 func tomlStripComment(line string) string {
 	inQuote := false
+	esc := false
 	for i, r := range line {
+		if esc {
+			// Previous rune was a backslash inside a quoted string: this rune
+			// is literal (a \" does not close the string). Without this, an
+			// escaped quote desynced the quote tracker and a later '#' was
+			// wrongly treated as a comment (review finding, U4).
+			esc = false
+			continue
+		}
 		switch r {
+		case '\\':
+			if inQuote {
+				esc = true
+			}
 		case '"':
 			inQuote = !inQuote
 		case '#':
@@ -37,11 +50,18 @@ func tomlStripComment(line string) string {
 	return line
 }
 
+// stripBOM removes a leading UTF-8 byte-order mark, so a BOM-prefixed file
+// (many Windows editors emit one) does not fold the mark into the first key or
+// defeat "[section]" detection (review finding, U4).
+func stripBOM(s string) string {
+	return strings.TrimPrefix(s, "\ufeff")
+}
+
 // parseTOMLFlat parses top-level "key = \"value\"" pairs only. Any table
 // header ends parsing of flat keys (manifest.toml never has tables).
 func parseTOMLFlat(data []byte) (map[string]string, error) {
 	out := map[string]string{}
-	for lineNo, raw := range strings.Split(string(data), "\n") {
+	for lineNo, raw := range strings.Split(stripBOM(string(data)), "\n") {
 		line := strings.TrimSpace(tomlStripComment(raw))
 		if line == "" {
 			continue
@@ -54,6 +74,9 @@ func parseTOMLFlat(data []byte) (map[string]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("toml: line %d: %w", lineNo+1, err)
 		}
+		if _, dup := out[k]; dup {
+			return nil, fmt.Errorf("toml: line %d: duplicate key %q", lineNo+1, k)
+		}
 		out[k] = v
 	}
 	return out, nil
@@ -64,16 +87,20 @@ func parseTOMLFlat(data []byte) (map[string]string, error) {
 func parseTOMLSections(data []byte) (map[string]map[string]string, error) {
 	out := map[string]map[string]string{}
 	section := ""
-	for lineNo, raw := range strings.Split(string(data), "\n") {
+	for lineNo, raw := range strings.Split(stripBOM(string(data)), "\n") {
 		line := strings.TrimSpace(tomlStripComment(raw))
 		if line == "" {
 			continue
 		}
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
 			section = strings.TrimSpace(line[1 : len(line)-1])
-			if _, ok := out[section]; !ok {
-				out[section] = map[string]string{}
+			if section == "" {
+				return nil, fmt.Errorf("toml: line %d: empty table name %q", lineNo+1, line)
 			}
+			if _, ok := out[section]; ok {
+				return nil, fmt.Errorf("toml: line %d: duplicate table [%s]", lineNo+1, section)
+			}
+			out[section] = map[string]string{}
 			continue
 		}
 		k, v, err := tomlParseKV(line)
@@ -82,6 +109,9 @@ func parseTOMLSections(data []byte) (map[string]map[string]string, error) {
 		}
 		if section == "" {
 			return nil, fmt.Errorf("toml: line %d: key %q outside any table", lineNo+1, k)
+		}
+		if _, dup := out[section][k]; dup {
+			return nil, fmt.Errorf("toml: line %d: duplicate key %q in [%s]", lineNo+1, k, section)
 		}
 		out[section][k] = v
 	}
@@ -99,6 +129,18 @@ func tomlParseKV(line string) (key, value string, err error) {
 	if err != nil {
 		return "", "", fmt.Errorf("expected quoted string value for %q, got %q: %w", key, valPart, err)
 	}
+	// A manifest/dialect value is a single flat string: reject embedded control
+	// characters (newlines via \n, NUL via \x00, etc. survive strconv.Unquote).
+	// Newlines here are the parse-layer root of the dialect CONTRACT-line
+	// injection; NUL/controls can corrupt downstream consumers (review, U4).
+	for _, r := range value {
+		if r == '\t' {
+			continue
+		}
+		if r < 0x20 || r == 0x7f {
+			return "", "", fmt.Errorf("value for %q contains a control character (U+%04X)", key, r)
+		}
+	}
 	return key, value, nil
 }
 
@@ -111,9 +153,8 @@ func writeTOMLFlat(kv map[string]string) []byte {
 	sort.Strings(keys)
 	var b strings.Builder
 	for _, k := range keys {
-		if kv[k] == "" {
-			continue
-		}
+		// Write empty values too — dropping them made write→parse lossy for a
+		// key that legitimately holds "" (review finding, U4).
 		fmt.Fprintf(&b, "%s = %s\n", k, strconv.Quote(kv[k]))
 	}
 	return []byte(b.String())

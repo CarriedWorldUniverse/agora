@@ -2,9 +2,26 @@ package prompt
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
 )
+
+// fillMissingSections returns builtinSections with sections overlaid on top, so
+// a variant or full override that omits a core contract section inherits the
+// built-in's text for it rather than dropping it from the composed prompt —
+// contract sections are mandatory (§4; review finding, U4). Present sections
+// win; missing ones gap-fill from the built-in.
+func fillMissingSections(sections, builtinSections map[contracts.Segment]string) map[contracts.Segment]string {
+	out := make(map[contracts.Segment]string, len(builtinSections)+len(sections))
+	for k, v := range builtinSections {
+		out[k] = v
+	}
+	for k, v := range sections {
+		out[k] = v
+	}
+	return out
+}
 
 // Layer identifies where a core package originates. Ordering matters:
 // overrides apply low-to-high, and only Layer User and above may define an
@@ -93,6 +110,11 @@ func Resolve(builtin CorePackage, overrides []Source, variant *Source) (Effectiv
 		if err := checkKnownSegments(builtin, sections); err != nil {
 			return Effective{}, err
 		}
+		builtinSections, err := builtin.sections()
+		if err != nil {
+			return Effective{}, err
+		}
+		sections = fillMissingSections(sections, builtinSections)
 		return Effective{
 			Manifest:   variant.Pkg.Manifest,
 			Layer:      variant.Layer,
@@ -118,7 +140,14 @@ func Resolve(builtin CorePackage, overrides []Source, variant *Source) (Effectiv
 	dialect := builtin.Dialect
 	renditions := builtin.Renditions
 
-	for _, ov := range overrides {
+	// Defensive ordering: fold overrides low-to-high by Layer regardless of the
+	// caller's slice order, so a misordered caller can't silently invert the
+	// documented precedence (system < user). The layer-ORIGIN gate below still
+	// refuses Project/Dispatch outright (review finding, U4).
+	ordered := append([]Source(nil), overrides...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Layer < ordered[j].Layer })
+
+	for _, ov := range ordered {
 		if !allowedOverrideLayer(ov.Layer) {
 			return Effective{}, fmt.Errorf("%w: override from layer %s", ErrOverrideLayerNotAllowed, ov.Layer)
 		}
@@ -130,7 +159,7 @@ func Resolve(builtin CorePackage, overrides []Source, variant *Source) (Effectiv
 			if err := checkKnownSegments(builtin, full); err != nil {
 				return Effective{}, err
 			}
-			sections = full
+			sections = fillMissingSections(full, base)
 		} else if len(ov.Pkg.Segments) > 0 {
 			if err := checkKnownSegments(builtin, ov.Pkg.Segments); err != nil {
 				return Effective{}, err
