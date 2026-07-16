@@ -26,6 +26,12 @@ jobs:
           go-version: 'stable'
           cache: true
 
+      - name: gofmt (lint)
+        if: runner.os != 'Windows'
+        run: |
+          drift="$(gofmt -l .)"
+          if [ -n "$drift" ]; then echo "gofmt drift:"; echo "$drift"; exit 1; fi
+
       - name: go vet
         run: go vet ./...
 
