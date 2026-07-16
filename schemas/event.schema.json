@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://carriedworlduniverse.github.io/agora/schemas/event.schema.json",
+  "title": "agora output event (agora-spec-io §1; Go source of truth: contracts/event.go)",
+  "type": "object",
+  "required": ["type"],
+  "properties": {
+    "type": {
+      "enum": [
+        "thread.started", "turn.started", "turn.completed", "turn.failed",
+        "item.started", "item.updated", "item.completed", "item.agent_message.delta",
+        "tool.loaded",
+        "thread.compaction.started", "thread.compaction.completed",
+        "thread.curation.demoted", "thread.curation.readmitted",
+        "approval.requested", "approval.resolved",
+        "question.asked", "question.answered",
+        "thread.waiting", "thread.resumed",
+        "client.attached", "client.detached",
+        "error"
+      ]
+    },
+    "thread_id": { "type": "string" },
+    "turn_id": { "type": "string" },
+    "item": {
+      "type": "object",
+      "required": ["seq", "type"],
+      "properties": {
+        "seq": { "type": "integer" },
+        "type": {
+          "enum": [
+            "agent_message", "reasoning", "command_execution", "file_change",
+            "mcp_tool_call", "plan", "agent_spawn", "workflow_progress"
+          ]
+        }
+      }
+    },
+    "payload": {}
+  }
+}

@@ -1,0 +1,8 @@
+{"type":"thread.started","thread_id":"th_0003","payload":{"identity_fp":"agora:k5xw3zjanfzsa2lt","profile":"dev","working_dir":"/work/demo"}}
+{"type":"turn.started","thread_id":"th_0003","turn_id":"tu_0001"}
+{"type":"question.asked","thread_id":"th_0003","turn_id":"tu_0001","payload":{"id":"qu_0001","source":"agent","blocking":true,"payload":{"text":"Which registry is canonical for the staging images?","context":"Both ghcr.io and the cluster-local registry carry a staging tag; the spec names neither.","evidence":["deploy/staging.yaml:14","docs/spec/registries.md"],"options":[{"label":"ghcr.io","description":"the org registry"},{"label":"cluster-local","description":"localhost:5000 on the node"}],"free_text":true,"blocking":true,"source":"agent"}}}
+{"type":"thread.waiting","thread_id":"th_0003","payload":{"question_id":"qu_0001"}}
+{"type":"question.answered","thread_id":"th_0003","payload":{"id":"qu_0001","answer":{"choice":["cluster-local"],"by":"agora:q7ymdevice001"}}}
+{"type":"thread.resumed","thread_id":"th_0003","payload":{"question_id":"qu_0001"}}
+{"type":"turn.started","thread_id":"th_0003","turn_id":"tu_0002"}
+{"type":"turn.completed","thread_id":"th_0003","turn_id":"tu_0002","payload":{"usage":{"input":3100,"output":140}}}

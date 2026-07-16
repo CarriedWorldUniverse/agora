@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"th_0001","payload":{"identity_fp":"agora:k5xw3zjanfzsa2lt","profile":"dev","working_dir":"/work/demo"}}
+{"type":"turn.started","thread_id":"th_0001","turn_id":"tu_0001"}
+{"type":"item.started","thread_id":"th_0001","turn_id":"tu_0001","item":{"seq":1,"type":"agent_message"}}
+{"type":"item.agent_message.delta","thread_id":"th_0001","turn_id":"tu_0001","item":{"seq":1,"type":"agent_message"},"payload":{"text":"Looking at the failing test"}}
+{"type":"item.agent_message.delta","thread_id":"th_0001","turn_id":"tu_0001","item":{"seq":1,"type":"agent_message"},"payload":{"text":" now.\n"}}
+{"type":"item.completed","thread_id":"th_0001","turn_id":"tu_0001","item":{"seq":1,"type":"agent_message"},"payload":{"text":"Looking at the failing test now.\n"}}
+{"type":"turn.completed","thread_id":"th_0001","turn_id":"tu_0001","payload":{"usage":{"input":1200,"output":18,"cached":900}}}

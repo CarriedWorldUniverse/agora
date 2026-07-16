@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://carriedworlduniverse.github.io/agora/schemas/provision.schema.json",
+  "title": "agora pod provision message (agora-spec-remote §6a; Go source of truth: contracts/provision.go)",
+  "type": "object",
+  "required": ["identity", "profile", "session"],
+  "properties": {
+    "identity": {
+      "type": "object",
+      "required": ["source"],
+      "properties": { "source": { "type": "string" } }
+    },
+    "profile": { "type": "string" },
+    "model_aliases": { "type": "object", "additionalProperties": { "type": "string" } },
+    "session": {
+      "type": "object",
+      "properties": {
+        "new": { "type": "boolean" },
+        "resume": { "type": "string" },
+        "ephemeral": { "type": "boolean" }
+      },
+      "oneOf": [ { "required": ["new"] }, { "required": ["resume"] } ]
+    },
+    "workspace": {
+      "type": "object",
+      "required": ["dir"],
+      "properties": {
+        "dir": { "type": "string" },
+        "checkout": {
+          "type": "object",
+          "required": ["repo"],
+          "properties": { "repo": { "type": "string" }, "ref": { "type": "string" } }
+        }
+      }
+    },
+    "context": {
+      "type": "object",
+      "properties": {
+        "files": { "type": "array", "items": { "type": "string" } },
+        "fragments": { "type": "array", "items": { "type": "string" } },
+        "mcp_overlay": { "type": "object" },
+        "env": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    }
+  }
+}

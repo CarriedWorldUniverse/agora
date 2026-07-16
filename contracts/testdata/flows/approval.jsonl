@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"th_0002","payload":{"identity_fp":"agora:k5xw3zjanfzsa2lt","profile":"dev","working_dir":"/work/demo"}}
+{"type":"turn.started","thread_id":"th_0002","turn_id":"tu_0001"}
+{"type":"approval.requested","thread_id":"th_0002","turn_id":"tu_0001","payload":{"id":"ap_0001","kind":"exec","payload":{"command":"go test ./... -run TestFlaky -count=100"}}}
+{"type":"approval.resolved","thread_id":"th_0002","turn_id":"tu_0001","payload":{"id":"ap_0001","decision":"allow","scope":"once","by":"agora:q7ymdevice001","stage":"approver"}}
+{"type":"item.started","thread_id":"th_0002","turn_id":"tu_0001","item":{"seq":1,"type":"command_execution"}}
+{"type":"item.completed","thread_id":"th_0002","turn_id":"tu_0001","item":{"seq":1,"type":"command_execution"},"payload":{"exit_code":0}}
+{"type":"turn.completed","thread_id":"th_0002","turn_id":"tu_0001","payload":{"usage":{"input":2400,"output":210}}}
