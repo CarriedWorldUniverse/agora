@@ -28,6 +28,14 @@ var knownItems = map[ItemType]bool{
 	ItemAgentSpawn: true, ItemWorkflowProgress: true,
 }
 
+func keys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 func fixtureLines(t *testing.T, name string) [][]byte {
 	t.Helper()
 	f, err := os.Open(filepath.Join("testdata", "flows", name))
@@ -140,11 +148,14 @@ func TestApprovalPayloadsTyped(t *testing.T) {
 
 // TestQuestionFlowShape: the park/resume fixture honors the ladder — a
 // blocking question parks the thread, an attributed answer resumes it, and
-// nothing between waiting and answered advances the turn
-// (planning-questions §5–§6).
+// nothing between waiting and answered advances the turn. The question.asked
+// envelope decodes via the canonical QuestionAsked type (not a hand-rolled
+// anon struct), and the answer via the canonical Answer type.
+// (planning-questions §4–§7).
 func TestQuestionFlowShape(t *testing.T) {
 	lines := fixtureLines(t, "question_park_resume.jsonl")
 	var seenAsked, seenWaiting, seenAnswered, seenResumed bool
+	var askedID string
 	for i, line := range fixtureLines(t, "question_park_resume.jsonl") {
 		var ev Event
 		if err := json.Unmarshal(line, &ev); err != nil {
@@ -153,17 +164,14 @@ func TestQuestionFlowShape(t *testing.T) {
 		switch ev.Type {
 		case EvQuestionAsked:
 			seenAsked = true
-			var q struct {
-				ID       string          `json:"id"`
-				Blocking bool            `json:"blocking"`
-				Payload  QuestionPayload `json:"payload"`
-			}
+			var q QuestionAsked
 			if err := json.Unmarshal(ev.Payload, &q); err != nil {
 				t.Fatal(err)
 			}
-			if !q.Blocking || q.Payload.Text == "" || q.Payload.Source != QuestionFromAgent {
+			if q.ID == "" || !q.Blocking || q.Args.Text == "" || q.Source != QuestionFromAgent {
 				t.Fatalf("line %d: malformed question %+v", i+1, q)
 			}
+			askedID = q.ID
 		case EvThreadWaiting:
 			if !seenAsked {
 				t.Fatal("thread.waiting before question.asked")
@@ -179,6 +187,9 @@ func TestQuestionFlowShape(t *testing.T) {
 			}
 			if err := json.Unmarshal(ev.Payload, &a); err != nil {
 				t.Fatal(err)
+			}
+			if a.ID != askedID {
+				t.Fatalf("line %d: answer id %q does not correlate to asked %q", i+1, a.ID, askedID)
 			}
 			if a.Answer.By == "" {
 				t.Fatal("answer without attribution — never-fabricate requires an actor")
@@ -200,11 +211,65 @@ func TestQuestionFlowShape(t *testing.T) {
 	}
 }
 
+// TestAttributionUnforgeableViaInput: the client-facing input types cannot
+// carry attribution — Input.Answer is an AnswerInput (no By), and a question's
+// Source lives only on the harness-stamped QuestionAsked, never on the model-
+// supplied QuestionArgs. This is the compile-time form of the never-fabricate
+// boundary (planning-questions §6; remote §5). If someone re-adds a `by` or
+// `source` to the input path, this test stops compiling or fails.
+func TestAttributionUnforgeableViaInput(t *testing.T) {
+	// A client answer decodes into AnswerInput and drops any `by` a hostile
+	// client tries to smuggle — it is not a field of the type.
+	raw := []byte(`{"choice":["drop"],"text":"","by":"agora:operator-forged"}`)
+	var in AnswerInput
+	if err := json.Unmarshal(raw, &in); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := json.Marshal(in)
+	if bytesContain(out, "by") || bytesContain(out, "forged") {
+		t.Fatalf("AnswerInput leaked attribution on round-trip: %s", out)
+	}
+	// QuestionArgs (the `question` tool argument) has no Source field — a model
+	// cannot declare its own provenance.
+	rawq := []byte(`{"text":"x","source":"mcp_server"}`)
+	var qa QuestionArgs
+	if err := json.Unmarshal(rawq, &qa); err != nil {
+		t.Fatal(err)
+	}
+	outq, _ := json.Marshal(qa)
+	if bytesContain(outq, "source") || bytesContain(outq, "mcp_server") {
+		t.Fatalf("QuestionArgs leaked source on round-trip: %s", outq)
+	}
+	// The attributed Answer, by contrast, DOES carry By (server-stamped).
+	a := Answer{AnswerInput: AnswerInput{Choice: []string{"drop"}}, By: "agora:dev"}
+	oa, _ := json.Marshal(a)
+	if !bytesContain(oa, "by") {
+		t.Fatalf("Answer must carry attribution: %s", oa)
+	}
+}
+
+func bytesContain(b []byte, sub string) bool {
+	return len(sub) > 0 && len(b) >= len(sub) && indexOf(string(b), sub) >= 0
+}
+
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}
+
 // TestPlanGateShape: the plan-gate fixture honors the open-questions
-// invariant — the gate resolves allow only AFTER the open question is
-// answered (planning-questions §3, invariant 6).
+// invariant with ID-LEVEL correlation — allow is refused until every one of
+// the plan's open_questions has been answered BY ITS OWN ID. Tracking a bare
+// "something got answered" boolean is insufficient (an unrelated answer would
+// satisfy it); the gate tracks the outstanding ID set.
+// (planning-questions §3, invariant 6.)
 func TestPlanGateShape(t *testing.T) {
-	var answered bool
+	outstanding := map[string]bool{} // open-question ids not yet answered
+	var sawPlanGate bool
 	for i, line := range fixtureLines(t, "plan_gate.jsonl") {
 		var ev Event
 		if err := json.Unmarshal(line, &ev); err != nil {
@@ -219,6 +284,7 @@ func TestPlanGateShape(t *testing.T) {
 			if ar.Kind != KindPlan {
 				continue
 			}
+			sawPlanGate = true
 			raw, _ := json.Marshal(ar.Payload)
 			var pa PlanArtifact
 			if err := json.Unmarshal(raw, &pa); err != nil {
@@ -227,20 +293,46 @@ func TestPlanGateShape(t *testing.T) {
 			if !pa.Submit {
 				t.Fatalf("line %d: gate raised without submit", i+1)
 			}
+			for _, oq := range pa.OpenQuestions {
+				if oq.ID == "" {
+					t.Fatalf("line %d: open question without id — cannot correlate to an answer", i+1)
+				}
+				outstanding[oq.ID] = true
+			}
 		case EvQuestionAnswered:
-			answered = true
+			var a struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(ev.Payload, &a); err != nil {
+				t.Fatal(err)
+			}
+			delete(outstanding, a.ID) // only THIS id clears
 		case EvApprovalResolved:
 			var res ApprovalResolution
 			if err := json.Unmarshal(ev.Payload, &res); err != nil {
 				t.Fatal(err)
 			}
-			if res.Decision == DecisionAllow && !answered {
-				t.Fatalf("line %d: plan gate allowed with unresolved open question", i+1)
+			if res.Decision == DecisionAllow && len(outstanding) > 0 {
+				t.Fatalf("line %d: plan gate allowed with %d unresolved open question(s): %v", i+1, len(outstanding), keys(outstanding))
 			}
 		}
 	}
-	if !answered {
-		t.Fatal("fixture never answered the open question")
+	if !sawPlanGate {
+		t.Fatal("fixture never raised the plan gate")
+	}
+}
+
+// TestPlanGateRejectsUnrelatedAnswer is the negative control proving the ID
+// correlation has teeth: a synthetic flow where an UNRELATED answer arrives
+// before allow must be caught as an invariant violation. (This is exactly
+// Sonnet's repro against the old boolean-only logic — it now fails, correctly.)
+func TestPlanGateRejectsUnrelatedAnswer(t *testing.T) {
+	outstanding := map[string]bool{"oq_real": true}
+	// unrelated answer
+	delete(outstanding, "qu_unrelated")
+	// gate allow with the real question still open ⇒ must be a violation
+	if len(outstanding) == 0 {
+		t.Fatal("unrelated answer wrongly cleared the outstanding set — invariant has no teeth")
 	}
 }
 

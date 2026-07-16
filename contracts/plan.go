@@ -29,9 +29,11 @@ type WorkItem struct {
 type PlanArtifact struct {
 	Phase PlanPhase `json:"phase,omitempty"`
 	Steps []string  `json:"steps,omitempty"`
-	// OpenQuestions are question-shaped and BLOCK the plan gate: allow is
-	// refused while any remain unresolved (§3 / invariant 6).
-	OpenQuestions []QuestionPayload `json:"open_questions,omitempty"`
+	// OpenQuestions BLOCK the plan gate: allow is refused while any remain
+	// unresolved (§3 / invariant 6). Each carries an ID so a specific
+	// question is correlated to a specific answer — "some question got
+	// answered" must NOT satisfy the gate; the gate tracks the ID SET.
+	OpenQuestions []QuestionAsked `json:"open_questions,omitempty"`
 	// Artifacts are spec/design doc refs produced by the planning phases.
 	Artifacts []string   `json:"artifacts,omitempty"`
 	WorkItems []WorkItem `json:"work_items,omitempty"`

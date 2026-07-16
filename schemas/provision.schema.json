@@ -1,8 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://carriedworlduniverse.github.io/agora/schemas/provision.schema.json",
-  "title": "agora pod provision message (agora-spec-remote §6a; Go source of truth: contracts/provision.go)",
+  "title": "agora pod provision payload (agora-spec-remote §6a; Go source of truth: contracts/provision.go). Carried under Input.provision when Input.type == \"provision\".",
   "type": "object",
+  "additionalProperties": false,
   "required": ["identity", "profile", "session"],
   "properties": {
     "identity": {

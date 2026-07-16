@@ -1,6 +1,9 @@
 package contracts
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // ToolSpec is the one tool format agora emits; bridle translates to each
 // provider's function-calling shape and back without remangling names.
@@ -52,10 +55,13 @@ const (
 // FSChange is the fs-watcher signal: path-keyed, content-hash-identified
 // (identical bytes = no-op, not an invalidation), coalesced per path.
 // Consumers: the edit-tool staleness guard and the curation staleness gate.
-// Spec: agora-spec-mcp.md §5a.
+// Spec: agora-spec-mcp.md §5a ("emits {path, kind, at} keyed by path").
 type FSChange struct {
 	Path string `json:"path"`
 	Kind string `json:"kind"` // modified | created | deleted
+	// At is the quiescence time of the coalesced change — the staleness
+	// consumers need recency/ordering, per the spec's emitted tuple.
+	At time.Time `json:"at"`
 	// ContentHash of the on-disk bytes after the change ("" for deleted).
 	ContentHash string `json:"content_hash,omitempty"`
 }

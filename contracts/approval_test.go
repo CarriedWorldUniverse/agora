@@ -2,25 +2,31 @@ package contracts
 
 import "testing"
 
-// TestBuiltinPresetMatrix is the approvals-§2 preset table, verbatim, as a
-// test. If the table and the code disagree, one of them is wrong — loudly.
+// TestBuiltinPresetMatrix transcribes the approvals-§2 preset table
+// INDEPENDENTLY from the spec markdown (columns exec|patch|escalation|
+// mcp_tool|question|plan — NO gate column) and asserts the code matches. The
+// value is that this map is read off the spec table, not copied from the
+// implementation; a drift between the two surfaces one of them.
 func TestBuiltinPresetMatrix(t *testing.T) {
+	// Rows are exactly the §2 table cells; "auto*" and "auto-within-sandbox"
+	// both encode as PolicyAuto at the policy layer (the sandbox distinction
+	// is the envelope's, not the policy value's).
 	want := map[string]map[ApprovalKind]PolicyValue{
 		PresetPrompt: {
 			KindExec: PolicyPrompt, KindPatch: PolicyAuto, KindEscalation: PolicyPrompt,
-			KindQuestion: PolicyPrompt, KindPlan: PolicyPrompt, KindGate: PolicyPrompt,
+			KindMCPTool: PolicyPerServer, KindQuestion: PolicyPrompt, KindPlan: PolicyPrompt,
 		},
 		PresetAutoSafe: {
 			KindExec: PolicyAuto, KindPatch: PolicyAuto, KindEscalation: PolicyPrompt,
-			KindQuestion: PolicyPrompt, KindPlan: PolicyPrompt, KindGate: PolicyPrompt,
+			KindMCPTool: PolicyPerServer, KindQuestion: PolicyPrompt, KindPlan: PolicyPrompt,
 		},
 		PresetStrict: {
 			KindExec: PolicyPrompt, KindPatch: PolicyPrompt, KindEscalation: PolicyPrompt,
-			KindQuestion: PolicyPrompt, KindPlan: PolicyPrompt, KindGate: PolicyPrompt,
+			KindMCPTool: PolicyPrompt, KindQuestion: PolicyPrompt, KindPlan: PolicyPrompt,
 		},
 		PresetNeverEscalate: {
 			KindExec: PolicyAuto, KindPatch: PolicyAuto, KindEscalation: PolicyDeny,
-			KindQuestion: PolicyConvert, KindPlan: PolicyDeny, KindGate: PolicyDeny,
+			KindMCPTool: PolicyPerServer, KindQuestion: PolicyConvert, KindPlan: PolicyDeny,
 		},
 	}
 	got := BuiltinPresets()
@@ -32,10 +38,17 @@ func TestBuiltinPresetMatrix(t *testing.T) {
 		if !ok {
 			t.Fatalf("missing preset %q", preset)
 		}
+		if len(ps) != len(kinds) {
+			t.Errorf("%s: kind count got %d want %d (a fabricated or missing column)", preset, len(ps), len(kinds))
+		}
 		for kind, v := range kinds {
 			if ps[kind] != v {
 				t.Errorf("%s/%s: got %q want %q", preset, kind, ps[kind], v)
 			}
+		}
+		// No gate column exists in the spec table.
+		if _, hasGate := ps[KindGate]; hasGate {
+			t.Errorf("%s: preset contains KindGate — §2 has no gate column (gate always surfaces to the operator)", preset)
 		}
 	}
 }
@@ -50,6 +63,43 @@ func TestConvertOnlyForQuestions(t *testing.T) {
 				t.Errorf("%s: PolicyConvert on %q — only question may convert", preset, kind)
 			}
 		}
+	}
+}
+
+// TestPerServerOnlyForMCPTool: PolicyPerServer is valid ONLY on KindMCPTool —
+// it means "defer to the server's approval_mode" and is meaningless elsewhere
+// (approvals §2 mcp_tool column, agora-spec-mcp §1).
+func TestPerServerOnlyForMCPTool(t *testing.T) {
+	for preset, ps := range BuiltinPresets() {
+		for kind, v := range ps {
+			if v == PolicyPerServer && kind != KindMCPTool {
+				t.Errorf("%s: PolicyPerServer on %q — only mcp_tool may defer per-server", preset, kind)
+			}
+		}
+	}
+}
+
+// TestCapabilityMapping: the compiled capability map matches the spec — a
+// question answer is interactive (not approver), config/provision are admin,
+// and approver does not implicitly grant interactive (remote §4).
+func TestCapabilityMapping(t *testing.T) {
+	if RequiredForInput(InQuestionResponse) != CapInteractive {
+		t.Error("question_response must require interactive, not approver")
+	}
+	if RequiredForInput(InConfig) != CapAdmin || RequiredForInput(InProvision) != CapAdmin {
+		t.Error("config and provision must require admin")
+	}
+	if RequiredForApproval(KindQuestion) != CapInteractive {
+		t.Error("answering a question kind must require interactive")
+	}
+	if RequiredForApproval(KindPlan) != CapApprover || RequiredForApproval(KindExec) != CapApprover {
+		t.Error("plan/exec approvals must require approver")
+	}
+	if Holds([]Capability{CapApprover}, CapInteractive) {
+		t.Error("approver must not implicitly satisfy interactive — tiers do not nest")
+	}
+	if !Holds([]Capability{CapApprover, CapInteractive}, CapInteractive) {
+		t.Error("explicit interactive grant must satisfy interactive")
 	}
 }
 

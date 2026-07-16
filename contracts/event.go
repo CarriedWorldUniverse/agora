@@ -98,12 +98,15 @@ const (
 	InSteer            InputType = "steer"
 	InInterrupt        InputType = "interrupt"
 	InApprovalResponse InputType = "approval_response"
-	// InQuestionResponse answers a question.asked with a structured Answer.
-	// Spec: agora-spec-planning-questions.md §7.
+	// InQuestionResponse answers a question.asked with an AnswerInput
+	// (no attribution — the daemon stamps By). Spec: planning-questions §7.
 	InQuestionResponse InputType = "question_response"
 	// InConfig requires the admin capability, not plain interactive.
 	InConfig InputType = "config"
-	InEnd    InputType = "end"
+	// InProvision makes a blank pod specific (admin capability).
+	// Spec: agora-spec-remote.md §6a.
+	InProvision InputType = "provision"
+	InEnd       InputType = "end"
 )
 
 // Input is the inbound envelope.
@@ -120,7 +123,12 @@ type Input struct {
 	Decision Decision `json:"decision,omitempty"`
 	Scope    Scope    `json:"scope,omitempty"`
 	Message  string   `json:"message,omitempty"`
-	Answer   *Answer  `json:"answer,omitempty"`
+	// Answer is the client-supplied answer for question_response — an
+	// AnswerInput with NO `by`: the daemon stamps attribution from the
+	// authenticated connection (a client cannot forge who answered).
+	Answer *AnswerInput `json:"answer,omitempty"`
+	// Provision carries the pod-specialization message (InProvision, admin).
+	Provision *Provision `json:"provision,omitempty"`
 	// Key/Value for config messages.
 	Key   string          `json:"key,omitempty"`
 	Value json.RawMessage `json:"value,omitempty"`

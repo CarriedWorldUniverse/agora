@@ -63,6 +63,10 @@ const (
 	// — never auto-answered, never silently denied.
 	// Spec: agora-spec-approvals.md §2 footnote †.
 	PolicyConvert PolicyValue = "convert"
+	// PolicyPerServer is valid ONLY for KindMCPTool: defer to the MCP server's
+	// own approval_mode (agora-spec-mcp.md §1). The "per-server" cells of the
+	// §2 preset table.
+	PolicyPerServer PolicyValue = "per-server"
 )
 
 // PolicySet maps kind → policy value. A named preset is a PolicySet plus the
@@ -80,27 +84,31 @@ const (
 	PresetNeverEscalate = "never-escalate" // headless/pod default
 )
 
-// BuiltinPresets are the four shipped policy sets, exactly as the spec table
-// defines them (mcp_tool is per-server and therefore absent from the sets —
-// its resolution happens at the MCP layer).
-// Spec: agora-spec-approvals.md §2 (presets table incl. question/plan columns).
+// BuiltinPresets are the four shipped policy sets — the columns of the §2
+// preset table, exactly: exec | patch | escalation | mcp_tool | question | plan.
+// KindGate is deliberately ABSENT: the table has no gate column because
+// workflow gates always surface to the operator (ctx.approval always asks,
+// workflows §2), so gate is not preset-governed. patch "auto" here means
+// writes-inside-wd are the sandbox's job; protected paths still raise
+// escalation (§2 note *).
+// Spec: agora-spec-approvals.md §2 (presets table).
 func BuiltinPresets() map[string]PolicySet {
 	return map[string]PolicySet{
 		PresetPrompt: {
 			KindExec: PolicyPrompt, KindPatch: PolicyAuto, KindEscalation: PolicyPrompt,
-			KindQuestion: PolicyPrompt, KindPlan: PolicyPrompt, KindGate: PolicyPrompt,
+			KindMCPTool: PolicyPerServer, KindQuestion: PolicyPrompt, KindPlan: PolicyPrompt,
 		},
 		PresetAutoSafe: {
 			KindExec: PolicyAuto, KindPatch: PolicyAuto, KindEscalation: PolicyPrompt,
-			KindQuestion: PolicyPrompt, KindPlan: PolicyPrompt, KindGate: PolicyPrompt,
+			KindMCPTool: PolicyPerServer, KindQuestion: PolicyPrompt, KindPlan: PolicyPrompt,
 		},
 		PresetStrict: {
 			KindExec: PolicyPrompt, KindPatch: PolicyPrompt, KindEscalation: PolicyPrompt,
-			KindQuestion: PolicyPrompt, KindPlan: PolicyPrompt, KindGate: PolicyPrompt,
+			KindMCPTool: PolicyPrompt, KindQuestion: PolicyPrompt, KindPlan: PolicyPrompt,
 		},
 		PresetNeverEscalate: {
 			KindExec: PolicyAuto, KindPatch: PolicyAuto, KindEscalation: PolicyDeny,
-			KindQuestion: PolicyConvert, KindPlan: PolicyDeny, KindGate: PolicyDeny,
+			KindMCPTool: PolicyPerServer, KindQuestion: PolicyConvert, KindPlan: PolicyDeny,
 		},
 	}
 }
