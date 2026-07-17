@@ -12,6 +12,8 @@ package conformance
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -152,9 +154,108 @@ func driveFlowPlanGate(t *testing.T) []byte {
 }
 
 func TestFlowPlanGate(t *testing.T) {
+	assertFixturePlanArtifactMatchesConstant(t)
 	got := driveFlowPlanGate(t)
 	want := rawFlow(t, "plan_gate.jsonl")
 	if !bytes.Equal(got, want) {
 		t.Fatalf("stdout mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// approvalRequestPlanWire decodes an approval.requested{kind:"plan"} line's
+// payload with Payload typed as contracts.PlanArtifact (contracts.
+// ApprovalRequest.Payload is `any`, which json.Unmarshal would otherwise
+// decode into an untyped map — useless for a structural comparison against
+// flowPlanArtifact).
+type approvalRequestPlanWire struct {
+	ID      string                 `json:"id"`
+	Kind    contracts.ApprovalKind `json:"kind"`
+	Payload contracts.PlanArtifact `json:"payload"`
+}
+
+// assertFixturePlanArtifactMatchesConstant is finding #6(b)'s fix: this
+// flow drives entirely off the hardcoded flowPlanArtifact Go constant, and
+// nothing previously validated it against the fixture's OWN
+// approval.requested PlanArtifact — a divergence between the two (e.g. the
+// fixture edited without updating the constant, or vice versa) would go
+// undetected even though the byte-exact stdout comparison passed (both
+// sides would just be wrong the SAME way, since flowPlanArtifact IS what
+// driveFlowPlanGate emits). Decoding the fixture's own line and comparing
+// it against the constant closes that gap.
+func assertFixturePlanArtifactMatchesConstant(t *testing.T) {
+	t.Helper()
+	fixture := loadFlow(t, "plan_gate.jsonl")
+	for _, ev := range fixture {
+		if ev.Type != contracts.EvApprovalRequested {
+			continue
+		}
+		var req approvalRequestPlanWire
+		if err := json.Unmarshal(ev.Payload, &req); err != nil {
+			t.Fatalf("decode approval.requested: %v", err)
+		}
+		if req.Kind != contracts.KindPlan {
+			continue
+		}
+		gotJSON, err := json.Marshal(req.Payload)
+		if err != nil {
+			t.Fatalf("marshal fixture PlanArtifact: %v", err)
+		}
+		wantJSON, err := json.Marshal(flowPlanArtifact)
+		if err != nil {
+			t.Fatalf("marshal flowPlanArtifact: %v", err)
+		}
+		if string(gotJSON) != string(wantJSON) {
+			t.Fatalf("fixture's approval.requested(plan) PlanArtifact diverges from the flowPlanArtifact constant\nfixture:  %s\nconstant: %s", gotJSON, wantJSON)
+		}
+		return
+	}
+	t.Fatal("fixture has no approval.requested(kind=plan) line to validate flowPlanArtifact against")
+}
+
+// TestFlowPlanGate_NegativeControl_UnansweredOpenQuestionRefusesGate is the
+// riskiest-logic negative control finding #5 calls for: TestFlowPlanGate
+// alone is happy-path only (oq_0001 is always answered, so
+// projectOutstandingOpenQuestions always yields an EMPTY set) — a stub that
+// unconditionally strips every open question would pass that test
+// byte-for-byte, undetected. This subtest runs the SAME real seam calls
+// (projectOutstandingOpenQuestions + planning.Gate) but withholds the
+// answer, so the projection must still carry oq_0001 and the real Gate
+// call must refuse the allow (invariant 6: ErrOpenQuestions/DecisionDeny) —
+// unfalsifiable behavior in the happy path alone.
+func TestFlowPlanGate_NegativeControl_UnansweredOpenQuestionRefusesGate(t *testing.T) {
+	answered := map[string]bool{} // nothing answered — oq_0001 stays outstanding
+	projected := projectOutstandingOpenQuestions(flowPlanArtifact, answered)
+	if len(projected.OpenQuestions) != 1 || projected.OpenQuestions[0].ID != "oq_0001" {
+		t.Fatalf("projection with nothing answered = %+v, want oq_0001 still outstanding", projected.OpenQuestions)
+	}
+
+	outcome, err := planning.Gate(planning.GateRequest{
+		Plan: projected, Decision: contracts.DecisionAllow, Exit: contracts.ExitInline, By: planGateBy,
+	})
+	if !errors.Is(err, planning.ErrOpenQuestions) {
+		t.Fatalf("Gate error = %v, want ErrOpenQuestions (invariant 6: an allow must not pass with open_questions non-empty)", err)
+	}
+	if !outcome.Revise {
+		t.Fatal("GateOutcome.Revise = false, want true (the posture stays and the model must revise and re-raise)")
+	}
+	if outcome.Resolution.Decision != contracts.DecisionDeny {
+		t.Fatalf("Resolution.Decision = %q, want %q", outcome.Resolution.Decision, contracts.DecisionDeny)
+	}
+
+	// A stub that unconditionally strips OpenQuestions (defeating the real
+	// projection) or a Gate stand-in that always allows would both pass
+	// TestFlowPlanGate's happy path but fail HERE.
+	//
+	// Also cover the "answered a DIFFERENT id" variant the finding names:
+	// oq_0001 stays outstanding even though some OTHER id was answered.
+	answeredWrongID := map[string]bool{"oq_9999": true}
+	projectedWrongID := projectOutstandingOpenQuestions(flowPlanArtifact, answeredWrongID)
+	if len(projectedWrongID.OpenQuestions) != 1 || projectedWrongID.OpenQuestions[0].ID != "oq_0001" {
+		t.Fatalf("projection with a DIFFERENT id answered = %+v, want oq_0001 still outstanding", projectedWrongID.OpenQuestions)
+	}
+	if _, err := planning.Gate(planning.GateRequest{
+		Plan: projectedWrongID, Decision: contracts.DecisionAllow, Exit: contracts.ExitInline, By: planGateBy,
+	}); !errors.Is(err, planning.ErrOpenQuestions) {
+		t.Fatalf("Gate error (wrong-id-answered variant) = %v, want ErrOpenQuestions", err)
 	}
 }

@@ -55,3 +55,15 @@ func newTurnStarted(threadID, turnID string) contracts.Event {
 func newTurnCompleted(threadID, turnID string, u contracts.Usage) contracts.Event {
 	return contracts.Event{Type: contracts.EvTurnCompleted, ThreadID: threadID, TurnID: turnID, Payload: mustMarshalJSON(usagePayload{Usage: u})}
 }
+
+// itemRefsEqual compares two *contracts.ItemRef by value (nil-safe) — the
+// structural-comparison teeth finding #6(a) wants: a wrong Item.Seq/Type
+// (e.g. both events being item.started with nil payloads) must fail a
+// structural comparison, not silently pass because only Type/ThreadID were
+// checked.
+func itemRefsEqual(a, b *contracts.ItemRef) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}

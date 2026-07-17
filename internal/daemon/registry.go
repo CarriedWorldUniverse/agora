@@ -24,7 +24,7 @@ func (d *Daemon) Session(threadID string) (*agoraio.Session, error) {
 		return nil, ErrNoEngineFactory
 	}
 	engine := d.engineFor(threadID, meta)
-	sess := agoraio.NewSession(d.baseCtx, threadID, engine)
+	sess := agoraio.NewSession(d.baseCtx, threadID, approvalKindSnoop{inner: engine, kinds: d.kinds})
 	d.sessions[threadID] = sess
 	return sess, nil
 }

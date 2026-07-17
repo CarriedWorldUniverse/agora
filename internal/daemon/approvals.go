@@ -5,10 +5,13 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
 	"github.com/CarriedWorldUniverse/agora/internal/approval"
+	agoraio "github.com/CarriedWorldUniverse/agora/internal/io"
+	"github.com/CarriedWorldUniverse/agora/internal/remote"
 )
 
 // byLookup is the daemon-owned, io-untouched side-channel that lets an
@@ -104,6 +107,104 @@ func (d *Daemon) WaitForBy(ctx context.Context, id string) (string, error) {
 // blueprint §3.2a) can stash it directly instead of going through a wire
 // attach.
 func (d *Daemon) StashBy(id, clientID string) { d.by.Stash(id, clientID) }
+
+// approvalKindSnoop wraps a thread's real Engine so the daemon can learn an
+// approval id's contracts.ApprovalKind BEFORE the approval.requested event
+// it was raised on ever reaches a client (finding #2's fix: enforcing
+// remote.CheckApproval(device, kind) on the approval-resolution path needs
+// to know kind, and Input carries only the id, never the kind — see
+// serve.go's read loop). Recording the id->kind mapping HERE, centrally,
+// at the one place every thread's events already flow through on their way
+// out (rather than snooping per-connection in ServeConn's write goroutine,
+// which would race an attaching client's own response against that same
+// connection's snoop of the request), guarantees the mapping is stashed
+// before ANY client could possibly have seen (let alone answered) the
+// request — no race to reason about.
+type approvalKindSnoop struct {
+	inner agoraio.Engine
+	kinds *byLookup
+}
+
+func (s approvalKindSnoop) Run(ctx context.Context, in <-chan contracts.Input, out chan<- contracts.Event) error {
+	relay := make(chan contracts.Event, eventBufferSizeHint)
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.inner.Run(ctx, in, relay) }()
+	for ev := range relay {
+		if ev.Type == contracts.EvApprovalRequested {
+			var req contracts.ApprovalRequest
+			if err := json.Unmarshal(ev.Payload, &req); err == nil && req.ID != "" {
+				s.kinds.Stash(req.ID, string(req.Kind))
+			}
+		}
+		select {
+		case out <- ev:
+		case <-ctx.Done():
+			// Drain relay so s.inner's Run (still writing to it) never
+			// blocks forever on a send nobody will read after we bail.
+			go func() {
+				for range relay {
+				}
+			}()
+			close(out)
+			return <-errCh
+		}
+	}
+	close(out)
+	return <-errCh
+}
+
+// eventBufferSizeHint mirrors internal/io's own eventBufferSize (unexported
+// there) — this relay channel only needs to be non-zero-buffered so the
+// inner engine's Run never has to synchronize its send with this loop's
+// receive+re-send 1:1; the exact size isn't load-bearing.
+const eventBufferSizeHint = 256
+
+// approvalKind resolves id to the contracts.ApprovalKind approvalKindSnoop
+// recorded when the approval.requested event carrying it was raised.
+// Blocks (bounded by ctx) if the mapping hasn't been stashed yet — safe
+// because approvalKindSnoop guarantees the stash happens before the event
+// (and therefore before any client's response) is ever delivered, so this
+// only actually blocks for a malformed/forged id a client invents out of
+// thin air, in which case ctx (the connection's own, canceled on teardown)
+// is what bounds the wait.
+func (d *Daemon) approvalKind(ctx context.Context, id string) (contracts.ApprovalKind, error) {
+	kind, err := d.kinds.WaitFor(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	return contracts.ApprovalKind(kind), nil
+}
+
+// checkApprovalScope enforces remote.CheckApproval(device, kind) on an
+// InApprovalResponse before it is allowed to reach a.Send (finding #2): a
+// CapApprover device whose registry-granted AllowedApprovalKinds constraint
+// excludes the responded-to approval's kind is refused, even though the
+// coarse CapApprover tier io.Session.handleInput already checked would
+// otherwise let it through (RequiredForApproval collapses every non-question
+// kind to the same CapApprover tier — the constraint is a NARROWING on top
+// of that tier, and nothing before this call ever enforced it). Returns nil
+// (permit) whenever there is no registry (capability enforcement is off
+// entirely in that mode — serve.go's authenticate already governs what such
+// a client can do) or the approval's kind can't be resolved in time (a
+// forged/unknown id — the coarse capability/first-answer-wins checks
+// downstream still apply; this is defense in depth, not the only gate).
+func (d *Daemon) checkApprovalScope(ctx context.Context, clientID string, in contracts.Input) error {
+	if d.registry == nil || in.Type != contracts.InApprovalResponse || in.ID == "" {
+		return nil
+	}
+	device, ok := d.registry.Get(clientID)
+	if !ok || device.Revoked {
+		return ErrUnknownDevice
+	}
+	kind, err := d.approvalKind(ctx, in.ID)
+	if err != nil {
+		// Unknown id (never actually raised, or ctx died first) — nothing
+		// further to narrow against; downstream checks (capability tier,
+		// first-answer-wins) still apply.
+		return nil
+	}
+	return remote.CheckApproval(device, kind)
+}
 
 // ResolveApproval converts a raw approval_response Input plus its
 // (daemon-attributed) actor into the real contracts.ApprovalResolution, by

@@ -35,15 +35,23 @@ const maxFrameBytes = 1 << 20
 // req.ThreadID is refused here, before any Session.Attach call.
 //
 // When the daemon has no registry configured at all (Config.Registry left
-// nil), authenticate falls back to trusting the wire-declared kind/
-// capabilities verbatim — an explicit, narrowly-scoped dev/test-only
-// convenience (e.g. a daemon smoke test that isn't exercising capability
-// enforcement at all) documented here so it is never mistaken for the
-// production default; every conformance drive that exercises capability
-// enforcement configures a real *remote.Registry.
+// nil), authenticate FAILS CLOSED by default: the connecting client is
+// granted CapObserver only (it can attach and watch a thread's event
+// stream, but Session.handleInput's own capability gate then refuses every
+// input needing CapInteractive/CapApprover/CapAdmin — it can never approve,
+// admin, or interact). Trusting the wire-declared kind/capabilities
+// verbatim is available ONLY via the explicit Config.InsecureTrustWireCaps
+// opt-in (NewDaemon logs a loud warning when it's set) — a narrowly-scoped
+// dev/test-only convenience, never the shipped `agora daemon` default
+// (cmd/agora/daemon.go's runDaemon leaves it false). Every conformance
+// drive that exercises capability enforcement configures a real
+// *remote.Registry instead of relying on either nil-Registry path.
 func (d *Daemon) authenticate(req agoraio.AttachRequest) (agoraio.AttachInfo, error) {
 	if d.registry == nil {
-		return agoraio.AttachInfo{ClientID: req.ClientID, Kind: req.Kind, Capabilities: req.Capabilities}, nil
+		if d.insecureTrustWireCaps {
+			return agoraio.AttachInfo{ClientID: req.ClientID, Kind: req.Kind, Capabilities: req.Capabilities}, nil
+		}
+		return agoraio.AttachInfo{ClientID: req.ClientID, Kind: req.Kind, Capabilities: []contracts.Capability{contracts.CapObserver}}, nil
 	}
 	device, ok := d.registry.Get(req.ClientID)
 	if !ok || device.Revoked {
@@ -94,6 +102,19 @@ func (d *Daemon) ServeConn(ctx context.Context, rw stdio.ReadWriteCloser) error 
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// finding #4: the read loop below blocks in sc.Scan() with no read
+	// deadline and no ctx.Done() escape of its own — on daemon ctx-cancel
+	// (SIGTERM) with a connected-but-idle client, Scan() never returns and
+	// this whole goroutine (plus the connection's FD, since rw.Close is
+	// deferred and never fires) leaks. This watcher closes rw the instant
+	// cctx is done, which makes the blocked Scan() return an error
+	// immediately — rw.Close is safe to call more than once (the deferred
+	// call above is a no-op after this one already ran).
+	go func() {
+		<-cctx.Done()
+		_ = rw.Close()
+	}()
+
 	writeDone := make(chan error, 1)
 	go func() {
 		enc := json.NewEncoder(rw)
@@ -130,6 +151,17 @@ func (d *Daemon) ServeConn(ctx context.Context, rw stdio.ReadWriteCloser) error 
 			continue // stray/duplicate attach frame after the first, ignore
 		}
 		in := *f.Input
+		// finding #2: narrow-scope enforcement (remote.CheckApproval's
+		// AllowedApprovalKinds) on top of the coarse CapApprover tier
+		// io.Session.handleInput already checks — refuse (skip forwarding,
+		// keep the connection open for anything else this device IS
+		// authorized for) rather than tearing down the whole connection,
+		// since a device scoped to some approval kinds but not others is
+		// not thereby misbehaving on every other input it might legally
+		// send.
+		if err := d.checkApprovalScope(cctx, info.ClientID, in); err != nil {
+			continue
+		}
 		sendErr := a.Send(cctx, in)
 		if sendErr == nil && (in.Type == contracts.InApprovalResponse || in.Type == contracts.InQuestionResponse) && in.ID != "" {
 			// Only the arbitration WINNER's Send ever returns nil for a given

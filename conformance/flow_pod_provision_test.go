@@ -1,8 +1,13 @@
-// TestFlowPodProvision (blueprint §3.6): reuses internal/pod.Pod directly
-// (per §2: "does NOT use flowEngine"), driven through the Pod's own public
-// Go API (Provision then RunTurn) exactly as the real dispatch controller
-// would (pod/turn_test.go's stubBroker shape) — NOT exec-CLI (blueprint §6
-// resolution 4).
+// TestFlowPodProvision (blueprint §3.6): drives internal/pod.Pod THROUGH
+// the daemon's own pod-mode wiring (daemon.Daemon.PodMode, internal/daemon/
+// pod.go — fix finding #3) rather than constructing pod.NewPod directly:
+// the *pod.Pod under test shares the daemon's clock/store/questions, so a
+// bug in THAT wiring (wrong store, a second independent QuestionLog, a
+// stale clock) is now detectable here — the daemon-assembly proof this
+// flow exists for, not a near-duplicate of U17's own pod-package e2e. The
+// Pod itself is then driven through its own public Go API (Provision then
+// RunTurn) exactly as the real dispatch controller would (pod/turn_test.go's
+// stubBroker shape) — NOT exec-CLI (blueprint §6 resolution 4).
 //
 // Two constraints this drive works within, both discovered grounding the
 // blueprint against the actual (frozen, must-not-touch) internal/pod
@@ -22,6 +27,10 @@
 //     the REAL decoded broadcast payload RunTurn itself read off the wire
 //     (turn.go: `json.Unmarshal(ev.Payload, &q)`), re-serialized with the
 //     same struct and marshal path, not fabricated content.
+//  3. daemon.PodMode is CONTROL-LEVEL wiring only (Provision/RunTurn) —
+//     internal/pod exposes no second-attachment/observer hook to drive
+//     multi-attach streaming through the daemon's session-protocol wire,
+//     and adding one is a pod API change out of this unit's scope.
 package conformance
 
 import (
@@ -32,6 +41,7 @@ import (
 	"time"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
+	"github.com/CarriedWorldUniverse/agora/internal/daemon"
 	agoraio "github.com/CarriedWorldUniverse/agora/internal/io"
 	"github.com/CarriedWorldUniverse/agora/internal/persistence"
 	"github.com/CarriedWorldUniverse/agora/internal/pod"
@@ -75,12 +85,14 @@ func TestFlowPodProvision(t *testing.T) {
 		})},
 	}}}}
 
-	p := pod.NewPod(ctx, pod.Config{
-		Clock:         func() time.Time { return time.Unix(0, 0).UTC() },
-		Identities:    podFlowIdentities{},
-		Store:         store,
-		EngineFactory: func(contracts.Identity, string) agoraio.Engine { return engine },
+	// REAL daemon-level wiring — d.PodMode constructs the *pod.Pod sharing
+	// d's own clock/store/questions (internal/daemon/pod.go, fix #3), not a
+	// pod.NewPod built fresh from scratch here.
+	d := daemon.NewDaemon(ctx, daemon.Config{
+		Clock: func() time.Time { return time.Unix(0, 0).UTC() },
+		Store: store,
 	})
+	p := d.PodMode(podFlowIdentities{}, func(contracts.Identity, string) agoraio.Engine { return engine })
 
 	if got := p.State(); got != pod.StateBlank {
 		t.Fatalf("fresh pod state = %q, want blank", got)
@@ -144,6 +156,15 @@ func assertPodFlowStructurallyMatches(t *testing.T, got, want []contracts.Event,
 	for i := range got {
 		if got[i].Type != want[i].Type || got[i].ThreadID != want[i].ThreadID {
 			t.Fatalf("line %d: (type,thread_id) = (%s,%s), want (%s,%s)", i+1, got[i].Type, got[i].ThreadID, want[i].Type, want[i].ThreadID)
+		}
+		// finding #6(a): assert TurnID + Item per line too — a wrong
+		// Item.Seq/Type (both payloads nil, e.g. on item.started) or a
+		// wrong TurnID previously passed silently.
+		if got[i].TurnID != want[i].TurnID {
+			t.Fatalf("line %d: turn_id = %q, want %q", i+1, got[i].TurnID, want[i].TurnID)
+		}
+		if !itemRefsEqual(got[i].Item, want[i].Item) {
+			t.Fatalf("line %d: item = %+v, want %+v", i+1, got[i].Item, want[i].Item)
 		}
 		if got[i].Type != contracts.EvQuestionAsked {
 			if string(got[i].Payload) != string(want[i].Payload) {

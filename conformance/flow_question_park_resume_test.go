@@ -328,6 +328,16 @@ func assertQuestionFlowStructurallyMatches(t *testing.T, got, want []contracts.E
 		if got[i].ThreadID != want[i].ThreadID {
 			t.Fatalf("line %d: thread_id = %s, want %s", i+1, got[i].ThreadID, want[i].ThreadID)
 		}
+		// finding #6(a): assert TurnID + Item on EVERY line, not just
+		// EvTurnStarted/EvTurnCompleted — a wrong Item.Seq/Type (both
+		// payloads nil on the non-turn lines) or a wrong TurnID elsewhere
+		// previously passed silently.
+		if got[i].TurnID != want[i].TurnID {
+			t.Fatalf("line %d: turn_id = %q, want %q", i+1, got[i].TurnID, want[i].TurnID)
+		}
+		if !itemRefsEqual(got[i].Item, want[i].Item) {
+			t.Fatalf("line %d: item = %+v, want %+v", i+1, got[i].Item, want[i].Item)
+		}
 		switch got[i].Type {
 		case contracts.EvQuestionAsked:
 			var g, w contracts.QuestionAsked
@@ -359,20 +369,16 @@ func assertQuestionFlowStructurallyMatches(t *testing.T, got, want []contracts.E
 			if g.ID != questionID {
 				t.Fatalf("line %d: question.answered id %q != real minted id %q", i+1, g.ID, questionID)
 			}
-			if g.Answer.By == "" {
-				t.Fatalf("line %d: answer lacks attribution", i+1)
+			// finding #6(a): the By VALUE must match the fixture's, not
+			// merely be non-empty — a stub attributing to the wrong (but
+			// non-empty) actor previously passed.
+			if g.Answer.By != w.Answer.By {
+				t.Fatalf("line %d: answer.by = %q, want %q", i+1, g.Answer.By, w.Answer.By)
 			}
 			if len(g.Answer.Choice) != len(w.Answer.Choice) || (len(g.Answer.Choice) > 0 && g.Answer.Choice[0] != w.Answer.Choice[0]) {
 				t.Fatalf("line %d: answer choice = %v, want %v", i+1, g.Answer.Choice, w.Answer.Choice)
 			}
-		case contracts.EvTurnStarted:
-			if got[i].TurnID != want[i].TurnID {
-				t.Fatalf("line %d: turn_id = %s, want %s", i+1, got[i].TurnID, want[i].TurnID)
-			}
 		case contracts.EvTurnCompleted:
-			if got[i].TurnID != want[i].TurnID {
-				t.Fatalf("line %d: turn_id = %s, want %s", i+1, got[i].TurnID, want[i].TurnID)
-			}
 			if string(got[i].Payload) != string(want[i].Payload) {
 				t.Fatalf("line %d: turn.completed payload = %s, want %s", i+1, got[i].Payload, want[i].Payload)
 			}

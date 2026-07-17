@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -37,6 +38,22 @@ type Config struct {
 	Policy        contracts.PolicySet
 	Subagents     *subagent.Manager
 	EngineFactory EngineFactory
+
+	// InsecureTrustWireCaps is a NARROW, explicit opt-in for the nil-Registry
+	// path in authenticate() (serve.go) to trust a connecting client's
+	// wire-declared AttachRequest.Capabilities verbatim, exactly as it did
+	// before this field existed. Left false (the default, and what
+	// cmd/agora's runDaemon ships), a nil-Registry daemon instead grants
+	// every connecting client CapObserver ONLY — it can watch a thread but
+	// can never approve/admin/interact — because trusting self-declared caps
+	// with zero authentication is a fail-OPEN capability bypass (any client
+	// can self-declare CapAdmin/CapApprover and walk straight through the
+	// approval gate; with -http it's remotely exploitable). Set this true
+	// ONLY for a genuinely local, non-capability-enforcing dev/test
+	// convenience (e.g. a daemon smoke test that isn't exercising
+	// authorization at all) — NewDaemon logs a loud stderr warning whenever
+	// it's set, so it is never silently mistaken for the production default.
+	InsecureTrustWireCaps bool
 }
 
 // Daemon is the assembled runtime: a thread registry (SessionLookup) over
@@ -55,7 +72,10 @@ type Daemon struct {
 	engineFor  EngineFactory
 	baseCtx    context.Context
 
-	by *byLookup
+	by    *byLookup
+	kinds *byLookup
+
+	insecureTrustWireCaps bool
 
 	mu       sync.Mutex
 	sessions map[string]*agoraio.Session
@@ -87,20 +107,25 @@ func NewDaemon(ctx context.Context, cfg Config) *Daemon {
 	if subagents == nil {
 		subagents = subagent.NewManager(store, subagent.NewMemGraphStore(), subagent.NewRegistry(nil), noopRunner{})
 	}
+	if cfg.InsecureTrustWireCaps {
+		fmt.Fprintln(os.Stderr, "agora daemon: WARNING: InsecureTrustWireCaps is set — every connecting client's self-declared capabilities are trusted verbatim (no authentication). Dev/test only; NEVER set this on a daemon reachable by anyone but you.")
+	}
 	return &Daemon{
-		clock:      clock,
-		store:      store,
-		identities: cfg.Identities,
-		registry:   cfg.Registry,
-		questions:  planning.NewQuestionLog(store),
-		plans:      planning.NewPlanLog(store),
-		scopes:     scopes,
-		policy:     policy,
-		subagents:  subagents,
-		engineFor:  cfg.EngineFactory,
-		baseCtx:    ctx,
-		by:         newByLookup(),
-		sessions:   make(map[string]*agoraio.Session),
+		clock:                 clock,
+		store:                 store,
+		identities:            cfg.Identities,
+		registry:              cfg.Registry,
+		questions:             planning.NewQuestionLog(store),
+		plans:                 planning.NewPlanLog(store),
+		scopes:                scopes,
+		policy:                policy,
+		subagents:             subagents,
+		engineFor:             cfg.EngineFactory,
+		baseCtx:               ctx,
+		by:                    newByLookup(),
+		kinds:                 newByLookup(),
+		insecureTrustWireCaps: cfg.InsecureTrustWireCaps,
+		sessions:              make(map[string]*agoraio.Session),
 	}
 }
 
@@ -133,8 +158,9 @@ func (d *Daemon) Policy() contracts.PolicySet { return d.policy }
 func (d *Daemon) Subagents() *subagent.Manager { return d.subagents }
 
 // Registry returns the daemon's device registry (U16 handoff), or nil if
-// none was configured (capability enforcement then falls back to the
-// permissive dev-only mode documented on serveConn).
+// none was configured (authenticate then fails closed to CapObserver-only,
+// per serve.go's authenticate doc comment — never the wire-declared-caps
+// trust unless Config.InsecureTrustWireCaps is explicitly set).
 func (d *Daemon) Registry() *remote.Registry { return d.registry }
 
 // CreateThread mints (or, if meta.ThreadID is already set, adopts) a thread:
