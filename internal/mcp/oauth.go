@@ -161,6 +161,15 @@ func ResolveAuthStatus(ctx context.Context, cfg ServerConfig, stored *Credential
 			return AuthStatusBearerToken
 		}
 	}
+	// env_http_headers (header -> env-var-name) is a documented way to
+	// source Authorization too — without this, an env-sourced-auth server
+	// wrongly falls through to discovery and resolves Unsupported (spurious
+	// "run agora mcp login" hint) even though auth is already configured.
+	for k := range cfg.EnvHTTPHeaders {
+		if strings.EqualFold(k, "authorization") {
+			return AuthStatusBearerToken
+		}
+	}
 
 	if stored != nil {
 		if stored.Usable(now) {
@@ -271,6 +280,11 @@ type Store interface {
 // (§3). Locking uses an atomic-mkdir lockdir — portable across
 // Linux/macOS/Windows without a third-party flock dependency (ground rule
 // 2: minimize deps).
+//
+// A stale lockdir (process died mid-write, leaving the lockdir behind) has
+// no reaper: every subsequent Save/Load/Delete just times out after
+// lockTimeout until someone manually removes it. (LOW, review finding,
+// accepted — not implemented.)
 type FileStore struct {
 	Path string
 	// LockTimeout bounds how long Save/Load/Delete wait for the lock before

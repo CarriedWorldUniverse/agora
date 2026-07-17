@@ -119,6 +119,18 @@ func TestResolveAuthStatus_Order(t *testing.T) {
 		}
 	})
 
+	// env_http_headers is a documented way to source Authorization (header
+	// -> env-var-name); ResolveAuthStatus must recognize it the same as a
+	// literal HTTPHeaders entry, or an env-sourced-auth server wrongly
+	// resolves to Unsupported and triggers spurious discovery/login-hint UX.
+	t.Run("authorization via env_http_headers", func(t *testing.T) {
+		cfg := ServerConfig{EnvHTTPHeaders: map[string]string{"Authorization": "TOKEN_VAR"}, URL: "https://x"}
+		got := ResolveAuthStatus(context.Background(), cfg, nil, now, nil)
+		if got != AuthStatusBearerToken {
+			t.Fatalf("got %v", got)
+		}
+	})
+
 	t.Run("stored usable oauth", func(t *testing.T) {
 		cfg := ServerConfig{URL: "https://x"}
 		cred := Credential{ExpiresAtMs: now.Add(time.Hour).UnixMilli()}

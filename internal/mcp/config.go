@@ -181,14 +181,16 @@ func ParseServerConfig(name string, raw map[string]any) (ServerConfig, error) {
 		c.BearerTokenEnvVar, _ = rawString(raw, "bearer_token_env_var")
 		c.HTTPHeaders = rawStringMap(raw, "http_headers")
 		c.EnvHTTPHeaders = rawStringMap(raw, "env_http_headers")
-		if _, hasRaw := raw["bearer_token"]; hasRaw {
+		if _, hasRaw := raw["bearer_token"]; hasRaw && c.Enabled {
 			return ServerConfig{}, fmt.Errorf("mcp: server %q: %w", name, ErrRawBearerToken)
 		}
 	case hasModule:
 		c.Transport = TransportWasm
 		c.Module, _ = rawString(raw, "module")
 		c.ModuleHash, _ = rawString(raw, "module_hash")
-		return ServerConfig{}, fmt.Errorf("mcp: server %q: %w", name, ErrWasmUnsupported)
+		if c.Enabled {
+			return ServerConfig{}, fmt.Errorf("mcp: server %q: %w", name, ErrWasmUnsupported)
+		}
 	default:
 		if c.Enabled {
 			return ServerConfig{}, fmt.Errorf("mcp: server %q: %w", name, ErrNoTransport)

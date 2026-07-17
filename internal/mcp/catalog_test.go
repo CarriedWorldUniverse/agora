@@ -16,6 +16,25 @@ func TestStdioCacheKey_StableForSameConfig(t *testing.T) {
 	}
 }
 
+// TestStdioCacheKey_NoDelimiterInjectionCollision guards against the
+// fingerprint's field-joining being ambiguous: an arg/env value containing
+// an embedded "\narg="/"\nenv=" token must NOT hash identically to a
+// differently-shaped config that only "looks like" it after naive
+// string-joining (confused-deputy risk: wrong cached tool schema served).
+func TestStdioCacheKey_NoDelimiterInjectionCollision(t *testing.T) {
+	a := ServerConfig{Name: "herald", Command: "npx", Args: []string{"a\narg=b"}}
+	b := ServerConfig{Name: "herald", Command: "npx", Args: []string{"a", "b"}}
+	if StdioCacheKey(a, nil, false) == StdioCacheKey(b, nil, false) {
+		t.Fatalf("arg delimiter-injection collision: %q and %q hashed identically", a.Args, b.Args)
+	}
+
+	c := ServerConfig{Name: "herald", Command: "npx", Env: map[string]string{"A": "x\nenv=B=y"}}
+	d := ServerConfig{Name: "herald", Command: "npx", Env: map[string]string{"A": "x", "B": "y"}}
+	if StdioCacheKey(c, nil, false) == StdioCacheKey(d, nil, false) {
+		t.Fatalf("env delimiter-injection collision: %v and %v hashed identically", c.Env, d.Env)
+	}
+}
+
 func TestStdioCacheKey_ChangesInvalidate(t *testing.T) {
 	base := ServerConfig{Name: "herald", Command: "npx", Args: []string{"-y", "herald"}, Cwd: "/work", EnvironmentID: "local"}
 	baseKey := StdioCacheKey(base, nil, false)

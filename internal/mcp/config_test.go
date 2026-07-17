@@ -83,6 +83,57 @@ func TestParseServerConfig_RawBearerTokenRejected(t *testing.T) {
 	}
 }
 
+// TestParseServerConfig_RawBearerTokenOnDisabledIsOK: §1 "enabled:false ⇒
+// skipped entirely" must apply to the raw-bearer-token structural check
+// too, not just the no-transport branch — a disabled stanza with a literal
+// bearer_token should parse cleanly (skipped), not hard-error the whole
+// batch it lives in.
+func TestParseServerConfig_RawBearerTokenOnDisabledIsOK(t *testing.T) {
+	raw := map[string]any{"enabled": false, "url": "https://x", "bearer_token": "literal-secret"}
+	c, err := ParseServerConfig("bad", raw)
+	if err != nil {
+		t.Fatalf("unexpected error for disabled raw-bearer-token server: %v", err)
+	}
+	if c.Enabled {
+		t.Fatalf("expected disabled")
+	}
+}
+
+// TestParseServerConfig_WasmOnDisabledIsOK: same §1 rule for the
+// not-yet-supported wasm transport.
+func TestParseServerConfig_WasmOnDisabledIsOK(t *testing.T) {
+	raw := map[string]any{"enabled": false, "module": "embedded:comms", "module_hash": "sha256:abc"}
+	c, err := ParseServerConfig("comms", raw)
+	if err != nil {
+		t.Fatalf("unexpected error for disabled wasm server: %v", err)
+	}
+	if c.Enabled {
+		t.Fatalf("expected disabled")
+	}
+}
+
+// TestParseServers_DisabledBadStanzaDoesNotBlockSiblings: one disabled
+// server with a structurally-rejected shape (raw bearer_token / wasm) must
+// not abort ParseServers for the WHOLE table — a sibling enabled server
+// still loads.
+func TestParseServers_DisabledBadStanzaDoesNotBlockSiblings(t *testing.T) {
+	table := map[string]map[string]any{
+		"broken":  {"enabled": false, "url": "https://x", "bearer_token": "literal-secret"},
+		"wasmoff": {"enabled": false, "module": "embedded:comms"},
+		"ok":      {"command": "npx"},
+	}
+	servers, err := ParseServers(table)
+	if err != nil {
+		t.Fatalf("ParseServers: %v", err)
+	}
+	if servers["ok"].Command != "npx" {
+		t.Fatalf("sibling server did not load: %+v", servers)
+	}
+	if servers["broken"].Enabled || servers["wasmoff"].Enabled {
+		t.Fatalf("expected disabled servers to remain disabled: %+v", servers)
+	}
+}
+
 func TestParseServerConfig_WasmRecognizedButUnsupported(t *testing.T) {
 	raw := map[string]any{"module": "embedded:comms", "module_hash": "sha256:abc"}
 	_, err := ParseServerConfig("comms", raw)

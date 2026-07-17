@@ -32,26 +32,58 @@ type CacheKey string
 // deterministically since the (name, value-or-absent) set is what's hashed.
 func StdioCacheKey(c ServerConfig, envVarValues map[string]string, elicitation bool) CacheKey {
 	h := sha1.New()
-	fmt.Fprintf(h, "command=%s\n", c.Command)
+	writeField(h, "command", c.Command)
+	writeInt(h, "argc", len(c.Args))
 	for _, a := range c.Args {
-		fmt.Fprintf(h, "arg=%s\n", a)
+		writeField(h, "arg", a)
 	}
-	for _, k := range SortedNames(c.Env) {
-		fmt.Fprintf(h, "env=%s=%s\n", k, c.Env[k])
+	envKeys := SortedNames(c.Env)
+	writeInt(h, "envc", len(envKeys))
+	for _, k := range envKeys {
+		writeField(h, "envk", k)
+		writeField(h, "envv", c.Env[k])
 	}
 	names := make([]string, len(c.EnvVars))
 	for i, ev := range c.EnvVars {
 		names[i] = ev.Name
 	}
 	sort.Strings(names)
+	writeInt(h, "envvarc", len(names))
 	for _, n := range names {
 		v, ok := envVarValues[n]
-		fmt.Fprintf(h, "env_var=%s=%s(present=%v)\n", n, v, ok)
+		writeField(h, "envvarn", n)
+		writeField(h, "envvarv", v)
+		writeBool(h, "envvarpresent", ok)
 	}
-	fmt.Fprintf(h, "cwd=%s\n", c.Cwd)
-	fmt.Fprintf(h, "environment_id=%s\n", c.EnvironmentID)
-	fmt.Fprintf(h, "elicitation=%v\n", elicitation)
+	writeField(h, "cwd", c.Cwd)
+	writeField(h, "environment_id", c.EnvironmentID)
+	writeBool(h, "elicitation", elicitation)
 	return CacheKey(fmt.Sprintf("%s:%s", c.Name, hex.EncodeToString(h.Sum(nil))))
+}
+
+// writeField hashes name and value length-prefixed so no byte sequence a
+// value could contain (including delimiter-shaped substrings like
+// "\narg=") can make two structurally-different configs collide (§2 cache
+// key must be injective, not just "usually distinct"). Format:
+// "<len(name)>:<name>=<len(value)>:<value>\n" — every length is written as
+// a decimal token before the bytes it bounds, so the boundary between
+// fields can never be forged by content.
+func writeField(h hashWriter, name, value string) {
+	fmt.Fprintf(h, "%d:%s=%d:%s\n", len(name), name, len(value), value)
+}
+
+func writeInt(h hashWriter, name string, n int) {
+	fmt.Fprintf(h, "%d:%s=%d\n", len(name), name, n)
+}
+
+func writeBool(h hashWriter, name string, b bool) {
+	fmt.Fprintf(h, "%d:%s=%v\n", len(name), name, b)
+}
+
+// hashWriter is the io.Writer subset writeField/writeInt/writeBool need —
+// named so the fingerprint helpers aren't coupled to a specific hash impl.
+type hashWriter interface {
+	Write(p []byte) (int, error)
 }
 
 // WasmCacheKey computes the §1a/§2 wasm cache key: an EXACT key of

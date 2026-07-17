@@ -61,6 +61,12 @@ type future struct {
 	ready  chan struct{}
 	client Client
 	err    error
+	// cancel stops the context passed to the underlying connector.Connect
+	// for this future. Invoked by Cancel(name) and by startOne on timeout,
+	// so an abandoned caller still signals the connect to stop rather than
+	// leaking the goroutine/subprocess/dial indefinitely (§2 per-server
+	// cancellation token).
+	cancel context.CancelFunc
 }
 
 // Manager runs eager concurrent MCP server startup and required-server
@@ -90,31 +96,38 @@ func (m *Manager) connect(cfg ServerConfig) *future {
 		m.mu.Unlock()
 		return f
 	}
-	f = &future{ready: make(chan struct{})}
+	connectCtx, cancel := context.WithCancel(context.Background())
+	f = &future{ready: make(chan struct{}), cancel: cancel}
 	m.futures[cfg.Name] = f
 	m.mu.Unlock()
 
 	go func() {
 		defer close(f.ready)
-		// The connect itself runs unbounded on a background context — a
-		// caller's local timeout (Start's per-server select) governs
-		// whether THAT caller waits for it, but does not tear down a
-		// connect another caller may still be awaiting (that is what
-		// Cancel/Shutdown is for).
-		f.client, f.err = m.connector.Connect(context.Background(), cfg)
+		// The connect runs on connectCtx, a per-server cancellable context
+		// (§2's per-server cancellation token) — a caller's local timeout
+		// (startOne's select) governs whether THAT caller waits for it, but
+		// does not by itself tear down a connect another caller may still
+		// be awaiting; startOne's timeout path and Cancel() both explicitly
+		// call f.cancel() when THEY decide the connect should stop, so the
+		// underlying Connector actually observes ctx.Done() rather than the
+		// goroutine (and any subprocess/dial it owns) leaking forever.
+		f.client, f.err = m.connector.Connect(connectCtx, cfg)
 	}()
 	return f
 }
 
-// Cancel tears down a specific server's future's context by discarding it
-// so a future StartAll call reconnects. It does not forcibly interrupt an
-// in-flight Connect (Connector implementations are expected to honor ctx
-// cancellation themselves for that); it is the per-server token §2 asks for
-// at the bookkeeping level this package owns.
+// Cancel tears down a specific server's future: it invokes the future's
+// stored cancel func (signalling any in-flight connector.Connect via
+// ctx.Done(), per §2's per-server cancellation token) and then discards the
+// map entry so a future StartAll call reconnects.
 func (m *Manager) Cancel(name string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	f, ok := m.futures[name]
 	delete(m.futures, name)
+	m.mu.Unlock()
+	if ok && f.cancel != nil {
+		f.cancel()
+	}
 }
 
 // StartAll starts every enabled server in cfgs concurrently (one goroutine
@@ -217,8 +230,18 @@ func (m *Manager) startOne(ctx context.Context, cfg ServerConfig) (ServerState, 
 		}
 		return StateReady, nil
 	case <-timer.C:
+		// This caller is done waiting; signal the shared future's connect
+		// to stop too rather than leaving it to run unbounded (no other
+		// caller is awaiting it in the timeout case — StartAll owns the
+		// only reference per server per call).
+		if f.cancel != nil {
+			f.cancel()
+		}
 		return StateFailed, fmt.Errorf("%w: server %q after %s", ErrStartupTimeout, cfg.Name, timeout)
 	case <-ctx.Done():
+		if f.cancel != nil {
+			f.cancel()
+		}
 		return StateCancelled, ctx.Err()
 	}
 }

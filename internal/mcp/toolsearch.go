@@ -37,6 +37,13 @@ func NewRegistry() *Registry {
 }
 
 // Register adds or replaces an entry.
+//
+// Name-collision across servers is NOT enforced here (Register just keys by
+// e.Name, last write wins) — the integration caller is responsible for
+// always running AssignNames over the COMPLETE cross-server tool set before
+// registering, so two servers' same-named tools are disambiguated up front
+// rather than silently clobbering each other in this map. (LOW, review
+// finding, not implemented — documented expectation only.)
 func (r *Registry) Register(e Entry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

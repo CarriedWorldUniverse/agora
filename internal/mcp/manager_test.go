@@ -27,6 +27,10 @@ func (c *stubClient) Close() error { return nil }
 type stubConnector struct {
 	behaviors map[string]func() (Client, error)
 	callCount map[string]*int32
+	// ctxBehaviors, when set for a server name, takes priority over
+	// behaviors and receives the context passed to Connect — used by tests
+	// that must observe ctx cancellation reaching the connector.
+	ctxBehaviors map[string]func(ctx context.Context) (Client, error)
 }
 
 func newStubConnector() *stubConnector {
@@ -40,6 +44,9 @@ func (s *stubConnector) set(name string, fn func() (Client, error)) {
 }
 
 func (s *stubConnector) Connect(ctx context.Context, cfg ServerConfig) (Client, error) {
+	if fn, ok := s.ctxBehaviors[cfg.Name]; ok {
+		return fn(ctx)
+	}
 	if fn, ok := s.behaviors[cfg.Name]; ok {
 		if c := s.callCount[cfg.Name]; c != nil {
 			atomic.AddInt32(c, 1)
@@ -124,6 +131,70 @@ func TestManager_StartupTimeoutHonored(t *testing.T) {
 		t.Fatalf("expected ErrStartupTimeout, got %v", res.Failed["slow"])
 	}
 	close(block)
+}
+
+// TestManager_TimeoutCancelsInFlightConnect asserts that a startOne
+// timeout actually signals the underlying Connect's context, rather than
+// merely abandoning it locally while the background goroutine (and any
+// subprocess/dial it owns) leaks forever. The stub Connect blocks on
+// ctx.Done() (never on a channel the test controls directly) and reports
+// back over cancelled — if that never fires, ctx was never cancelled.
+func TestManager_TimeoutCancelsInFlightConnect(t *testing.T) {
+	conn := newStubConnector()
+	cancelled := make(chan struct{})
+	conn.ctxBehaviors = map[string]func(ctx context.Context) (Client, error){
+		"slow": func(ctx context.Context) (Client, error) {
+			<-ctx.Done()
+			close(cancelled)
+			return nil, ctx.Err()
+		},
+	}
+
+	m := NewManager(conn)
+	cfgs := []ServerConfig{
+		{Name: "slow", Enabled: true, Required: true, StartupTimeout: 20 * time.Millisecond, Command: "x"},
+	}
+	res, events, err := m.StartAll(context.Background(), cfgs)
+	drain(events)
+	if err == nil {
+		t.Fatalf("expected required-server timeout to error")
+	}
+	if _, ok := res.Failed["slow"]; !ok {
+		t.Fatalf("expected slow in Failed: %+v", res)
+	}
+
+	select {
+	case <-cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("startOne timeout did not cancel the in-flight Connect's context (goroutine leak)")
+	}
+}
+
+// TestManager_CancelStopsInFlightConnect exercises the explicit Cancel(name)
+// path: it must invoke the stored cancel func for that server's future, not
+// just delete the map entry, so the background goroutine actually unblocks.
+func TestManager_CancelStopsInFlightConnect(t *testing.T) {
+	conn := newStubConnector()
+	cancelled := make(chan struct{})
+	started := make(chan struct{})
+	conn.ctxBehaviors = map[string]func(ctx context.Context) (Client, error){
+		"herald": func(ctx context.Context) (Client, error) {
+			close(started)
+			<-ctx.Done()
+			close(cancelled)
+			return nil, ctx.Err()
+		},
+	}
+	m := NewManager(conn)
+	f := m.connect(ServerConfig{Name: "herald", Command: "x"})
+	<-started
+	m.Cancel("herald")
+	select {
+	case <-cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Cancel(name) did not cancel the in-flight Connect's context (goroutine leak)")
+	}
+	<-f.ready
 }
 
 func TestManager_AuthRequiredSurfacesHint(t *testing.T) {

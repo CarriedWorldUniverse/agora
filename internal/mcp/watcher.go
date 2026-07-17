@@ -65,6 +65,11 @@ type Sweeper struct {
 
 // NewSweeper builds a sweeper over roots (the session's working dir +
 // declared add_dir roots, §5a "Scope"). A nil clock uses SystemClock.
+//
+// roots are assumed to be real directories, not symlinks — a symlinked
+// root is not resolved/validated here, so a root that is (or becomes) a
+// symlink can walk unexpected targets. (LOW, review finding, not
+// implemented — caller must pass resolved paths.)
 func NewSweeper(roots []string, clock Clock) *Sweeper {
 	if clock == nil {
 		clock = SystemClock{}
