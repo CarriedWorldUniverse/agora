@@ -26,6 +26,10 @@ const (
 	ToolGrep      = "grep"
 )
 
+// fsMaxFileSize bounds read_file/grep against a huge file blowing out the
+// model's context or the process's memory (review fix 4).
+const fsMaxFileSize = 10 << 20 // 10 MiB
+
 // fsToolNames is the set fsFamily.Handles checks against.
 var fsToolNames = map[string]bool{
 	ToolReadFile:  true,
@@ -46,12 +50,36 @@ type FSFamily struct {
 	roots Roots
 
 	mu       sync.Mutex
-	readHash map[string]string // resolved absolute path -> sha256 hex of content at last read
+	readHash map[string]string      // resolved absolute path -> sha256 hex of content at last read
+	pathLock map[string]*sync.Mutex // resolved absolute path -> lock over its whole read+checkStale+write sequence
 }
 
 // NewFSFamily builds the fs family over roots.
 func NewFSFamily(roots Roots) *FSFamily {
-	return &FSFamily{roots: roots, readHash: make(map[string]string)}
+	return &FSFamily{
+		roots:    roots,
+		readHash: make(map[string]string),
+		pathLock: make(map[string]*sync.Mutex),
+	}
+}
+
+// lockPath returns (lazily creating) the mutex serializing one resolved
+// path's whole read+checkStale+write sequence. Review fix 3: without this,
+// two concurrent write_file/edit_file calls to the same path can each
+// independently os.ReadFile + checkStale against the same on-disk
+// snapshot and then race two unsynchronized os.WriteFile calls against
+// each other — not just "last write wins" but an actual torn/corrupted
+// file (confirmed empirically: interleaved writes of different lengths
+// produce neither attempted content, e.g. "v2"+"v11" landing as "v21").
+func (f *FSFamily) lockPath(resolved string) *sync.Mutex {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	l, ok := f.pathLock[resolved]
+	if !ok {
+		l = &sync.Mutex{}
+		f.pathLock[resolved] = l
+	}
+	return l
 }
 
 func (f *FSFamily) Name() string { return contracts.FamilyFS }
@@ -164,6 +192,20 @@ func hashBytes(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// checkFileSize rejects a file over fsMaxFileSize before it's read into
+// memory/context (review fix 4). A stat failure is not this check's
+// business — the caller's own os.ReadFile/os.Stat will surface it.
+func checkFileSize(resolved string) error {
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return nil
+	}
+	if info.Size() > fsMaxFileSize {
+		return ErrFileTooLarge
+	}
+	return nil
+}
+
 // --- read_file ---
 
 type readFileArgs struct {
@@ -179,6 +221,12 @@ func (f *FSFamily) readFile(raw json.RawMessage) Result {
 	}
 	resolved, err := resolveContained(f.roots, a.Path)
 	if err != nil {
+		return errorResult(err)
+	}
+	if f.roots.IsProtected(resolved) {
+		return errorResult(ErrProtectedPath)
+	}
+	if err := checkFileSize(resolved); err != nil {
 		return errorResult(err)
 	}
 	data, err := os.ReadFile(resolved)
@@ -224,6 +272,15 @@ func (f *FSFamily) writeFile(raw json.RawMessage) Result {
 	if f.roots.IsProtected(resolved) {
 		return errorResult(ErrProtectedPath)
 	}
+
+	// Review fix 3: hold the per-path lock across the WHOLE
+	// read+checkStale+write sequence — without it, two concurrent writers
+	// can each independently read+checkStale against the same on-disk
+	// snapshot and then race unsynchronized os.WriteFile calls, producing
+	// a torn/corrupted file rather than a clean serialized outcome.
+	pl := f.lockPath(resolved)
+	pl.Lock()
+	defer pl.Unlock()
 
 	// Staleness guard applies only when the file already exists (a
 	// brand-new file has nothing to have gone stale against) — the same
@@ -285,6 +342,13 @@ func (f *FSFamily) editFile(raw json.RawMessage) Result {
 		return errorResult(ErrProtectedPath)
 	}
 
+	// Same per-path-lock reasoning as write_file (review fix 3) — applied
+	// here too for consistency even though edit_file's substring match
+	// incidentally makes a torn write less likely to go unnoticed.
+	pl := f.lockPath(resolved)
+	pl.Lock()
+	defer pl.Unlock()
+
 	data, err := os.ReadFile(resolved)
 	if err != nil {
 		return errorResult(err)
@@ -333,6 +397,9 @@ func (f *FSFamily) listDir(raw json.RawMessage) Result {
 	if err != nil {
 		return errorResult(err)
 	}
+	if f.roots.IsProtected(resolved) {
+		return errorResult(ErrProtectedPath)
+	}
 	entries, err := os.ReadDir(resolved)
 	if err != nil {
 		return errorResult(err)
@@ -375,7 +442,7 @@ func (f *FSFamily) glob(raw json.RawMessage) Result {
 	patParts := strings.Split(a.Pattern, "/")
 
 	var matches []string
-	for _, root := range f.roots.All() {
+	for _, root := range f.roots.DedupedAll() {
 		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return nil //nolint:nilerr // best-effort walk, unreadable entries are skipped
@@ -458,9 +525,18 @@ func (f *FSFamily) grep(raw json.RawMessage) Result {
 		if err != nil {
 			return errorResult(err)
 		}
+		// Review fix 2: the existing per-descendant isProtectedName skip
+		// below only guards protected dirs found WHILE walking — it never
+		// covers the case where the caller-supplied path/) is ITSELF a
+		// protected root (grep(path=".git")), since WalkDir's root arg is
+		// never checked against isProtectedName (only "path != root"
+		// entries are). Check the resolved search root explicitly.
+		if f.roots.IsProtected(resolved) {
+			return errorResult(ErrProtectedPath)
+		}
 		searchRoots = []string{resolved}
 	} else {
-		searchRoots = f.roots.All()
+		searchRoots = f.roots.DedupedAll()
 	}
 
 	var matches []string
@@ -480,6 +556,9 @@ func (f *FSFamily) grep(raw json.RawMessage) Result {
 			}
 			if d.Type()&os.ModeSymlink != 0 {
 				return nil
+			}
+			if err := checkFileSize(path); err != nil {
+				return nil // oversized file: skip silently, same "safe direction" as an unreadable file
 			}
 			data, err := os.ReadFile(path)
 			if err != nil {

@@ -68,6 +68,30 @@ func (r Roots) All() []string {
 	return out
 }
 
+// DedupedAll is All() with any root dropped that is lexically nested under
+// an earlier root in the list (review fix 5: a walk over WorkingDir already
+// descends into a nested add_dir, so a naive per-root filepath.WalkDir over
+// All() double-lists every file under it and pre-trips grepMaxMatches).
+// Earlier entries win — WorkingDir is listed first, so a nested add_dir is
+// the one dropped, not the other way around.
+func (r Roots) DedupedAll() []string {
+	all := r.All()
+	out := make([]string, 0, len(all))
+	for _, root := range all {
+		nested := false
+		for _, kept := range out {
+			if under(root, kept) {
+				nested = true
+				break
+			}
+		}
+		if !nested {
+			out = append(out, root)
+		}
+	}
+	return out
+}
+
 // under reports whether p equals root or is lexically nested under it.
 // Both p and root are assumed already filepath.Clean'd absolute paths.
 func under(p, root string) bool {

@@ -3,9 +3,11 @@ package toolrunner
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -291,5 +293,231 @@ func TestGrepBadPatternIsErrorResult(t *testing.T) {
 	}
 	if !res.IsError {
 		t.Fatal("expected IsError for invalid regexp")
+	}
+}
+
+// --- review fix 2: protected dirs readable via read_file/list_dir/grep ---
+
+func seedProtectedGitConfig(t *testing.T, roots Roots) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(roots.WorkingDir, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(roots.WorkingDir, ".git", "config"), []byte("[credential]\n\thelper=secret\n"), 0o644); err != nil {
+		t.Fatalf("seed .git/config: %v", err)
+	}
+}
+
+func TestReadFileRejectsProtectedPath(t *testing.T) {
+	fam, roots := newFSFamily(t)
+	seedProtectedGitConfig(t, roots)
+
+	res, err := fam.Execute(context.Background(), Call{Name: ToolReadFile, Args: mustArgs(t, readFileArgs{Path: ".git/config"})})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !res.IsError || strings.Contains(res.Content, "secret") {
+		t.Fatalf("expected ErrProtectedPath and no leaked content, got %+v", res)
+	}
+
+	// A normal in-root path still works.
+	if _, err := fam.Execute(context.Background(), Call{Name: ToolWriteFile, Args: mustArgs(t, writeFileArgs{Path: "ok.txt", Content: "fine"})}); err != nil {
+		t.Fatalf("write ok.txt: %v", err)
+	}
+	res, err = fam.Execute(context.Background(), Call{Name: ToolReadFile, Args: mustArgs(t, readFileArgs{Path: "ok.txt"})})
+	if err != nil || res.IsError || res.Content != "fine" {
+		t.Fatalf("normal read: err=%v res=%+v", err, res)
+	}
+}
+
+func TestListDirRejectsProtectedPath(t *testing.T) {
+	fam, roots := newFSFamily(t)
+	seedProtectedGitConfig(t, roots)
+
+	res, err := fam.Execute(context.Background(), Call{Name: ToolListDir, Args: mustArgs(t, listDirArgs{Path: ".git"})})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected ErrProtectedPath for list_dir(.git)")
+	}
+
+	res, err = fam.Execute(context.Background(), Call{Name: ToolListDir, Args: mustArgs(t, listDirArgs{Path: "."})})
+	if err != nil || res.IsError {
+		t.Fatalf("normal list_dir: err=%v res=%+v", err, res)
+	}
+}
+
+func TestGrepRejectsProtectedPathRoot(t *testing.T) {
+	fam, roots := newFSFamily(t)
+	seedProtectedGitConfig(t, roots)
+	if err := os.WriteFile(filepath.Join(roots.WorkingDir, "app.go"), []byte("package main\n// helper=public\n"), 0o644); err != nil {
+		t.Fatalf("seed app.go: %v", err)
+	}
+
+	res, err := fam.Execute(context.Background(), Call{Name: ToolGrep, Args: mustArgs(t, grepArgs{Pattern: "helper", Path: ".git"})})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !res.IsError || strings.Contains(res.Content, "secret") {
+		t.Fatalf("expected ErrProtectedPath and no leaked content, got %+v", res)
+	}
+
+	// grep with no path (searches all writable roots) must still find the
+	// legitimate match while silently skipping .git as a descendant (this
+	// half already worked; regression guard).
+	res, err = fam.Execute(context.Background(), Call{Name: ToolGrep, Args: mustArgs(t, grepArgs{Pattern: "helper"})})
+	if err != nil || res.IsError {
+		t.Fatalf("grep whole-root: err=%v res=%+v", err, res)
+	}
+	if !strings.Contains(res.Content, "app.go") || strings.Contains(res.Content, "secret") {
+		t.Fatalf("grep whole-root content = %q", res.Content)
+	}
+}
+
+// --- review fix 3: non-atomic write_file staleness under concurrency ---
+
+func TestWriteFileConcurrentNoSilentLoss(t *testing.T) {
+	fam, roots := newFSFamily(t)
+	path := filepath.Join(roots.WorkingDir, "shared.txt")
+	if err := os.WriteFile(path, []byte("v0"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	ctx := context.Background()
+	if _, err := fam.Execute(ctx, Call{Name: ToolReadFile, Args: mustArgs(t, readFileArgs{Path: "shared.txt"})}); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	const n = 20
+	results := make([]Result, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i], _ = fam.Execute(ctx, Call{Name: ToolWriteFile, Args: mustArgs(t, writeFileArgs{Path: "shared.txt", Content: fmt.Sprintf("v%d", i+1)})})
+		}(i)
+	}
+	wg.Wait()
+
+	// The brief accepts either resolution: "exactly one wins cleanly and
+	// the other gets a clear error (OR both serialize correctly)". What
+	// must NEVER happen is the actual defect: an UNSYNCHRONIZED
+	// read+checkStale+write sequence lets two goroutines both pass the
+	// stale check against the same on-disk snapshot and then both
+	// os.WriteFile concurrently — producing either a torn/corrupted file
+	// (bytes from two different writes interleaved) or a "successful"
+	// response whose content never actually lands on disk. A per-path
+	// lock across the whole sequence fixes this by construction: every
+	// write_file call that reports success must have fully landed,
+	// so the FINAL on-disk content must be byte-for-byte one of the N
+	// attempted contents, never a mix/corruption of two.
+	final, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	valid := false
+	for i := 0; i < n; i++ {
+		if string(final) == fmt.Sprintf("v%d", i+1) {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		t.Fatalf("final content %q is not any single attempted write — torn/corrupted write", final)
+	}
+
+	// Every Result claiming success must be internally consistent: no
+	// response says "wrote shared.txt" while ALSO claiming a stale/error
+	// condition, and there must be at least one clean success (the whole
+	// burst didn't just error out).
+	successes := 0
+	for _, r := range results {
+		if !r.IsError {
+			successes++
+			if r.Content != "wrote shared.txt" {
+				t.Errorf("success result had unexpected content: %+v", r)
+			}
+		}
+	}
+	if successes == 0 {
+		t.Fatal("no writer succeeded at all")
+	}
+	t.Logf("%d/%d writers succeeded (both all-serialize and exactly-one-wins are acceptable per the brief)", successes, n)
+}
+
+// --- review fix 4 (fs half): unbounded file-size caps on read_file/grep ---
+
+func TestReadFileRejectsOversizedFile(t *testing.T) {
+	fam, roots := newFSFamily(t)
+	path := filepath.Join(roots.WorkingDir, "big.txt")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := os.Truncate(path, fsMaxFileSize+1); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+
+	res, err := fam.Execute(context.Background(), Call{Name: ToolReadFile, Args: mustArgs(t, readFileArgs{Path: "big.txt"})})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected IsError for an oversized file")
+	}
+}
+
+func TestGrepSkipsOversizedFile(t *testing.T) {
+	fam, roots := newFSFamily(t)
+	big := filepath.Join(roots.WorkingDir, "big.txt")
+	if err := os.WriteFile(big, nil, 0o644); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := os.Truncate(big, fsMaxFileSize+1); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(roots.WorkingDir, "small.txt"), []byte("NEEDLE here"), 0o644); err != nil {
+		t.Fatalf("seed small: %v", err)
+	}
+
+	res, err := fam.Execute(context.Background(), Call{Name: ToolGrep, Args: mustArgs(t, grepArgs{Pattern: "NEEDLE"})})
+	if err != nil || res.IsError {
+		t.Fatalf("grep: err=%v res=%+v", err, res)
+	}
+	if !strings.Contains(res.Content, "small.txt") {
+		t.Fatalf("expected match in small.txt, got %q", res.Content)
+	}
+}
+
+// --- review fix 5: glob/grep double-list a nested add_dir root ---
+
+func TestGlobDedupsNestedAddDirRoot(t *testing.T) {
+	wd := t.TempDir()
+	nested := filepath.Join(wd, "sub")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "f.go"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	roots, err := NewRoots(wd, nested) // nested add_dir, already under wd
+	if err != nil {
+		t.Fatalf("NewRoots: %v", err)
+	}
+	fam := NewFSFamily(roots)
+
+	res, err := fam.Execute(context.Background(), Call{Name: ToolGlob, Args: mustArgs(t, globArgs{Pattern: "**/*.go"})})
+	if err != nil || res.IsError {
+		t.Fatalf("glob: err=%v res=%+v", err, res)
+	}
+	got := strings.Split(strings.TrimSpace(res.Content), "\n")
+	count := 0
+	for _, l := range got {
+		if strings.HasSuffix(l, "f.go") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("f.go listed %d times, want 1: %q", count, res.Content)
 	}
 }
