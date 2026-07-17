@@ -13,6 +13,26 @@ import (
 	agoraio "github.com/CarriedWorldUniverse/agora/internal/io"
 )
 
+// shortSockPath returns a unix-socket path short enough for AF_UNIX's sun_path
+// limit (~104 bytes on macOS/BSD). t.TempDir() on macOS lives under
+// /var/folders/... which overflows that limit ("bind: invalid argument"), so on
+// macOS we anchor the socket under /tmp (-> /private/tmp, short). Linux temp
+// paths are already short enough. (Mirrors internal/io/transport_test.go's
+// helper, which isn't exported across packages.)
+func shortSockPath(t *testing.T, name string) string {
+	t.Helper()
+	base := ""
+	if runtime.GOOS == "darwin" {
+		base = "/tmp"
+	}
+	dir, err := os.MkdirTemp(base, "agdm")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, name)
+}
+
 // TestAgoraDaemon_ActuallyBootable builds the real agora binary and runs
 // `agora daemon -socket <path>` as a genuine subprocess — proving the
 // subcommand is actually bootable (blueprint §6 q4's own bar: "the daemon
@@ -34,8 +54,7 @@ func TestAgoraDaemon_ActuallyBootable(t *testing.T) {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
 
-	sockDir := t.TempDir()
-	sockPath := filepath.Join(sockDir, "agora.sock")
+	sockPath := shortSockPath(t, "agora.sock")
 
 	cmd := exec.Command(binPath, "daemon", "-socket", sockPath)
 	if err := cmd.Start(); err != nil {
