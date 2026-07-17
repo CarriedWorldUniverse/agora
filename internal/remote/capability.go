@@ -69,3 +69,48 @@ func kindAllowed(allowed []contracts.ApprovalKind, k contracts.ApprovalKind) boo
 	}
 	return false
 }
+
+// CheckProfile reports whether device may switch to/use profile, per its
+// registry-granted AllowedProfiles constraint (spec §4: "vessel bound to
+// the chat profile only"). Mirrors CheckApproval's narrow-only semantics:
+// an empty (nil or zero-length) AllowedProfiles means "no narrowing on this
+// axis" — allow. A non-empty constraint is an exact allow-list; profile
+// must be a member or this fails closed with ErrProfileNotAllowed.
+//
+// HANDOFF NOTE (U16 -> U18): this package has no in-unit call site that
+// performs a profile switch — that decision lives in the daemon wiring
+// (U18). U18's profile-switch path MUST call CheckProfile before honoring
+// a switch, or this constraint has zero effect despite being stored and
+// tested here.
+func CheckProfile(device Device, profile string) error {
+	if len(device.Constraints.AllowedProfiles) > 0 && !stringAllowed(device.Constraints.AllowedProfiles, profile) {
+		return fmt.Errorf("%w: profile %q not in device's allowed-profiles constraint", ErrProfileNotAllowed, profile)
+	}
+	return nil
+}
+
+// CheckThread reports whether device may attach to threadID, per its
+// registry-granted AllowedThreads constraint (spec §4). Mirrors
+// CheckProfile/CheckApproval's narrow-only semantics: an empty
+// AllowedThreads means unconstrained; a non-empty one is an exact
+// allow-list, else ErrThreadNotAllowed (fail closed).
+//
+// HANDOFF NOTE (U16 -> U18): same as CheckProfile — the thread-attach
+// decision is made in U18's daemon wiring, not in this package. U18's
+// attach path MUST call CheckThread before honoring an attach, or this
+// constraint has zero effect despite being stored and tested here.
+func CheckThread(device Device, threadID string) error {
+	if len(device.Constraints.AllowedThreads) > 0 && !stringAllowed(device.Constraints.AllowedThreads, threadID) {
+		return fmt.Errorf("%w: thread %q not in device's allowed-threads constraint", ErrThreadNotAllowed, threadID)
+	}
+	return nil
+}
+
+func stringAllowed(allowed []string, v string) bool {
+	for _, a := range allowed {
+		if a == v {
+			return true
+		}
+	}
+	return false
+}

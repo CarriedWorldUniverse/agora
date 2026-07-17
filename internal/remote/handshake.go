@@ -258,6 +258,14 @@ func (r *ResponderHandshake) Accept(m1 Message1) (deviceFP string, sessionToken 
 	// THE gate this unit exists to enforce: enrolled and not revoked, or
 	// refuse. Checked before any payload is trusted, before any reply is
 	// constructed.
+	//
+	// ACCEPTED trade-off: refusing an unenrolled device here, before the ss
+	// DH and payload decryption below, is a minor enrollment-enumeration
+	// timing side-channel (an attacker can distinguish "never enrolled"
+	// from "enrolled" by response latency). Kept deliberately: not
+	// deriving/decrypting payload for an unenrolled device is the more
+	// important property (never do AEAD work keyed off an untrusted
+	// identity before the enrollment gate).
 	switch r.reg.state(deviceFP) {
 	case stateUnenrolled:
 		return "", nil, Message2{}, TransportKeys{}, ErrDeviceNotEnrolled

@@ -27,6 +27,10 @@
 //   - capability.go: the capability gate over contracts.Holds/
 //     RequiredForInput/RequiredForApproval (§4) — derives a session's
 //     capabilities from the AUTHENTICATED device's grant, never the client.
+//     Also exports CheckProfile/CheckThread over AllowedProfiles/
+//     AllowedThreads (§4); U18's profile-switch and thread-attach paths
+//     MUST call these — this package has no in-unit call site for either
+//     decision (see capability.go's HANDOFF NOTE comments).
 //   - queue.go: the approval queue + timeout fallback (§8) — deny-on-timeout
 //     for permission-shaped kinds, PARK (never deny-fabricate) for
 //     contracts.KindQuestion.

@@ -71,6 +71,18 @@ var (
 	// whose kind is not contracts.KindQuestion.
 	ErrNotAQuestion = errors.New("remote: entry is not a question")
 
+	// ErrProfileNotAllowed is returned when an authenticated device's
+	// AllowedProfiles constraint is non-empty and does not contain the
+	// profile being switched to (spec §4: "vessel bound to the chat
+	// profile only"). Mirrors ErrCapabilityDenied's narrow-only semantics:
+	// an empty constraint means unconstrained, not "deny all".
+	ErrProfileNotAllowed = errors.New("remote: device's allowed-profiles constraint does not permit this profile")
+
+	// ErrThreadNotAllowed is returned when an authenticated device's
+	// AllowedThreads constraint is non-empty and does not contain the
+	// thread being attached to. Mirrors ErrProfileNotAllowed.
+	ErrThreadNotAllowed = errors.New("remote: device's allowed-threads constraint does not permit this thread")
+
 	// ErrGapWindowExceeded is returned by the gap-replay computation when a
 	// reconnecting device's last-known seq is older than the retained
 	// backlog window — the caller falls back to full-tail replay (spec §9:

@@ -96,6 +96,66 @@ func TestCapabilityConstraintNarrowsNeverWidens(t *testing.T) {
 	}
 }
 
+// TestCheckProfileConstraint mirrors TestCapabilityConstraintNarrowsNeverWidens
+// for the AllowedProfiles axis (spec §4: "vessel bound to the chat profile
+// only") — an empty constraint means unconstrained, a non-empty one is an
+// exact allow-list.
+func TestCheckProfileConstraint(t *testing.T) {
+	tests := []struct {
+		name    string
+		allowed []string
+		profile string
+		want    bool
+	}{
+		{"empty constraint allows any profile", nil, "dev", true},
+		{"empty constraint allows any profile 2", []string{}, "chat", true},
+		{"in allow-list: allowed", []string{"chat"}, "chat", true},
+		{"not in allow-list: refused", []string{"chat"}, "dev", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := Device{ID: "dev1", Constraints: DeviceConstraints{AllowedProfiles: tc.allowed}}
+			err := CheckProfile(d, tc.profile)
+			got := err == nil
+			if got != tc.want {
+				t.Fatalf("CheckProfile(%v, %q): got ok=%v (err=%v) want ok=%v", tc.allowed, tc.profile, got, err, tc.want)
+			}
+			if !tc.want && !errors.Is(err, ErrProfileNotAllowed) {
+				t.Errorf("refusal error should be ErrProfileNotAllowed, got %v", err)
+			}
+		})
+	}
+}
+
+// TestCheckThreadConstraint mirrors TestCheckProfileConstraint for the
+// AllowedThreads axis.
+func TestCheckThreadConstraint(t *testing.T) {
+	tests := []struct {
+		name    string
+		allowed []string
+		thread  string
+		want    bool
+	}{
+		{"empty constraint allows any thread", nil, "th_1", true},
+		{"empty constraint allows any thread 2", []string{}, "th_2", true},
+		{"in allow-list: allowed", []string{"th_1"}, "th_1", true},
+		{"not in allow-list: refused", []string{"th_1"}, "th_2", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := Device{ID: "dev1", Constraints: DeviceConstraints{AllowedThreads: tc.allowed}}
+			err := CheckThread(d, tc.thread)
+			got := err == nil
+			if got != tc.want {
+				t.Fatalf("CheckThread(%v, %q): got ok=%v (err=%v) want ok=%v", tc.allowed, tc.thread, got, err, tc.want)
+			}
+			if !tc.want && !errors.Is(err, ErrThreadNotAllowed) {
+				t.Errorf("refusal error should be ErrThreadNotAllowed, got %v", err)
+			}
+		})
+	}
+}
+
 // TestAttachInfoIgnoresClientDeclaredCapabilities proves the fix for
 // io/session.go's DEFERRED note: capabilities on the wire seam always come
 // from the authenticated device's registry grant, and a session built from
