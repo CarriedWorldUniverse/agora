@@ -54,6 +54,11 @@ type Entry struct {
 	// Span, if non-nil, is the resident window (partial re-admission,
 	// §3b) — nil means the whole artifact is resident/tracked.
 	Span *Span
+	// NoGroundTruth marks an entry re-admitted via §3b source 3: it was
+	// stale but has no disk ground truth (web/MCP/unrepeatable output), so
+	// the tracked copy is served AS the current truth (there is no fresher
+	// source) — carried through render as a provenance marker.
+	NoGroundTruth bool
 }
 
 // residentBytes is what this entry costs against the budget right now.
@@ -318,6 +323,11 @@ func (l *Ledger) Readmit(step int, k Key) (*Entry, ReadmitSource) {
 	if e.DiskBacked {
 		return e, ReadmitNeedsDiskRead
 	}
+	// §3b source 3: no disk ground truth. The tracked copy IS the only
+	// truth — clear Stale so it is served (not stubbed) and mark provenance
+	// so render prepends the "no fresher source" marker.
+	e.Stale = false
+	e.NoGroundTruth = true
 	e.Tier = TierResident
 	return e, ReadmitTrackedNoGroundTruth
 }

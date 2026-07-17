@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
 )
@@ -45,6 +46,12 @@ type Manager struct {
 	fragments   StateFragments
 
 	estimator *Estimator
+
+	// mu guards the mutable per-thread state below (fsObserved, estimator,
+	// lastEstimate/lastRawChars/lastEvents). ApplyFSChange is called by the
+	// async fs-watcher seam (mcp.Sweeper/notify) which can race a concurrent
+	// Assemble — an unguarded fsObserved map read+write is a fatal Go panic.
+	mu sync.Mutex
 
 	// fsObserved: latest known on-disk (hash, kind) per path, fed by
 	// ApplyFSChange — the fs-watcher signal (mcp §5a / Sweeper) applied at
@@ -91,6 +98,8 @@ func WithStateFragments(f StateFragments) Option { return func(m *Manager) { m.f
 // Per contract #5, this is called by the turn engine BETWEEN sampling
 // requests, never mid-turn.
 func (m *Manager) ApplyFSChange(c contracts.FSChange) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.fsObserved[c.Path] = c
 }
 
@@ -121,6 +130,8 @@ type pendingRead struct {
 // 2) is applied before that episode so a late mention can save a key from
 // demotion in the same pass it would otherwise have been evicted.
 func (m *Manager) Assemble(threadID string, turnInput []contracts.ThreadItem) ([]contracts.AssembledMessage, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.lastEvents = nil
 	ledger := NewLedger(m.cfg)
 	pending := make(map[string]pendingRead)
@@ -216,7 +227,11 @@ func (m *Manager) Assemble(threadID string, turnInput []contracts.ThreadItem) ([
 						continue
 					}
 					ledger.RecordRead(i, e.Key, item.Seq, hash, len(data), true)
-					appendix[i] += fmt.Sprintf("\n[readmitted %s (re-read for current content): %s]", e.Key.ID, string(data))
+					// §3a: per-item cap BEFORE the budget episode. Re-admitting
+					// the raw disk content would inject an arbitrarily large file
+					// in full — and re-inject it every Assemble while stale —
+					// defeating MaxRetainBytes and the whole curation budget.
+					appendix[i] += fmt.Sprintf("\n[readmitted %s (re-read for current content): %s]", e.Key.ID, capText(string(data), m.cfg.MaxRetainBytes))
 					m.lastEvents = append(m.lastEvents, NewCurationReadmittedEvent(threadID, e.Key))
 				}
 			}
@@ -324,10 +339,16 @@ func renderKeyed(ledger *Ledger, k Key, seq int64, fullContent string) string {
 	if e.Tier == TierTracked {
 		return fmt.Sprintf("[working set: %s demoted (untouched, %d bytes) — tracked; touch it or re-read to restore]", k.ID, e.SizeBytes)
 	}
+	body := fullContent
 	if e.Truncated {
-		return capText(fullContent, e.SizeBytes)
+		body = capText(fullContent, e.SizeBytes)
 	}
-	return fullContent
+	if e.NoGroundTruth {
+		// §3b source 3: served with a provenance marker — it is the only
+		// truth there is (no disk/web/MCP source to re-read from).
+		return "[re-admitted — no fresher source; tracked copy is current truth]\n" + body
+	}
+	return body
 }
 
 // resolveResultKey looks back from a tool_result at index i to the
@@ -433,6 +454,8 @@ func hashBytes(b []byte) string {
 // Observe implements contracts.ContextManager: folds actual usage against
 // the last Assemble's raw estimate into the correction factor (§3a).
 func (m *Manager) Observe(u contracts.Usage) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.estimator.Observe(m.lastRawChars, u.Input+u.Cached)
 }
 
@@ -448,7 +471,9 @@ func (m *Manager) Observe(u contracts.Usage) {
 // summarizer alias would do real work here instead of NoOp.
 func (m *Manager) Compact(trigger contracts.CompactionTrigger) (contracts.CompactionResult, error) {
 	halted := m.hooks.RunPreCompact(trigger)
+	m.mu.Lock()
 	before := m.lastEstimate
+	m.mu.Unlock()
 	result := contracts.CompactionResult{
 		Trigger:      trigger,
 		TokensBefore: before,
@@ -464,6 +489,8 @@ func (m *Manager) Compact(trigger contracts.CompactionTrigger) (contracts.Compac
 
 // Status implements contracts.ContextManager (contract 8).
 func (m *Manager) Status() contracts.ContextStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	window := m.model.ContextWindow
 	remaining := 1.0
 	if window > 0 {
@@ -485,8 +512,18 @@ func (m *Manager) Status() contracts.ContextStatus {
 // returns messages), the same way EvToolLoaded etc. ride the io seam
 // out-of-band from their triggering call in every other package.
 func (m *Manager) DrainEvents() []contracts.Event {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	ev := m.lastEvents
 	m.lastEvents = nil
-	sort.Slice(ev, func(i, j int) bool { return ev[i].Type < ev[j].Type })
+	// Stable + a deterministic tiebreak: two events of the same Type
+	// (e.g. two demotions) must have a fixed order for byte-identical
+	// assembly across runs (determinism is a §7 design pillar).
+	sort.SliceStable(ev, func(i, j int) bool {
+		if ev[i].Type != ev[j].Type {
+			return ev[i].Type < ev[j].Type
+		}
+		return string(ev[i].Payload) < string(ev[j].Payload)
+	})
 	return ev
 }
