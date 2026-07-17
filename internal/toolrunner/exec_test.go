@@ -4,7 +4,35 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
+
+// execWithDeadline runs fam.Execute in a goroutine and fails the test
+// (rather than hanging the suite) if it doesn't return within bound —
+// review finding #1: a backgrounded grandchild holding the output pipe, or
+// a killed-but-un-reaped child, must never hang Execute forever.
+func execWithDeadline(t *testing.T, fam *ExecFamily, call Call, bound time.Duration) Result {
+	t.Helper()
+	type outcome struct {
+		res Result
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := fam.Execute(context.Background(), call)
+		done <- outcome{res, err}
+	}()
+	select {
+	case o := <-done:
+		if o.err != nil {
+			t.Fatalf("unexpected Go error: %v", o.err)
+		}
+		return o.res
+	case <-time.After(bound):
+		t.Fatalf("Execute did not return within %s — hung on an orphaned/backgrounded child", bound)
+		return Result{}
+	}
+}
 
 func newExecFamily(t *testing.T) *ExecFamily {
 	t.Helper()
@@ -89,4 +117,65 @@ func newExecFamilyWithRoots(t *testing.T) (*ExecFamily, Roots) {
 	t.Helper()
 	roots := newTestRoots(t)
 	return NewExecFamily(roots), roots
+}
+
+// --- review fix 1: timeout escapable + orphaned processes ---
+
+// TestRunCommandBackgroundedChildDoesNotHang: the foreground shell
+// backgrounds a child and exits almost immediately, but the backgrounded
+// child still holds the inherited stdout/stderr pipe open. Without
+// Setpgid+WaitDelay, Execute blocks forever waiting for pipe EOF even
+// though the timeout has long since passed and the foreground command
+// exited cleanly.
+func TestRunCommandBackgroundedChildDoesNotHang(t *testing.T) {
+	fam := newExecFamily(t)
+	call := Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: "sleep 5 &", TimeoutMs: 300})}
+	res := execWithDeadline(t, fam, call, 3*time.Second)
+	_ = res // returning at all (within the bound) is the fix; content is secondary
+}
+
+// TestRunCommandGrandchildKilled: a nested shell means the timed-out
+// process has a live grandchild; without a process-group kill, killing
+// only the direct child leaves the grandchild running and can still hang
+// Execute on the inherited pipe.
+func TestRunCommandGrandchildKilled(t *testing.T) {
+	fam := newExecFamily(t)
+	call := Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: "sh -c 'sleep 5'", TimeoutMs: 100})}
+	res := execWithDeadline(t, fam, call, 3*time.Second)
+	if !res.IsError {
+		t.Fatal("expected IsError for a killed grandchild-holding command")
+	}
+}
+
+// TestRunCommandNoFalsePositiveNearDeadline: a fast command comfortably
+// inside its timeout budget must report success, never a spurious timeout
+// — the defect the brief calls out with checking runCtx.Err() after Run()
+// returns, which races independently of whether the command actually
+// finished in time.
+func TestRunCommandNoFalsePositiveNearDeadline(t *testing.T) {
+	fam := newExecFamily(t)
+	res := execWithDeadline(t, fam, Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: "true", TimeoutMs: 500})}, 2*time.Second)
+	if res.IsError {
+		t.Fatalf("expected success, got IsError: %+v", res)
+	}
+	if strings.Contains(res.Content, "timed out") {
+		t.Fatalf("spurious timeout report: %+v", res)
+	}
+}
+
+// --- review fix 4 (exec half): unbounded output cap ---
+
+func TestRunCommandOutputCapped(t *testing.T) {
+	fam := newExecFamily(t)
+	// Emit well over execOutputCap bytes without needing `yes`/`dd`
+	// (keeps the test itself fast and portable): a shell loop.
+	res := execWithDeadline(t, fam, Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{
+		Command: "head -c 2000000 /dev/zero | tr '\\0' 'a'",
+	})}, 5*time.Second)
+	if len(res.Content) > execOutputCap+200 {
+		t.Fatalf("content len = %d, expected capped near %d", len(res.Content), execOutputCap)
+	}
+	if !strings.Contains(res.Content, "truncated") {
+		t.Fatalf("expected a truncation note, content len=%d", len(res.Content))
+	}
 }
