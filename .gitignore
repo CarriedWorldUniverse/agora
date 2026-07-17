@@ -1,1 +1,5 @@
 bin/
+
+# Root build artifact — `go build` drops the CLI binary here; never commit it.
+/agora
+/agora.exe
