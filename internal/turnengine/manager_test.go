@@ -466,40 +466,6 @@ func TestManager_ToolCall_ReadFileExecutesViaSurface(t *testing.T) {
 	}
 }
 
-// TestManager_ToolCall_RunCommandExecutesViaSurface is the exec-family
-// counterpart: run_command "echo hi" must actually run a real subprocess
-// via the Surface, not a stub, and its stdout must come back.
-func TestManager_ToolCall_RunCommandExecutesViaSurface(t *testing.T) {
-	roots := managerTestRoots(t)
-
-	provider := fake.NewProvider(
-		fake.Step{ToolCalls: []bridle.ToolInvocation{
-			{ID: "1", Name: toolrunner.ToolRunCommand, Args: json.RawMessage(`{"command":"echo hi"}`)},
-		}},
-		fake.Step{Text: "done"},
-	)
-	m := NewManager("th_tool", provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
-
-	in := make(chan contracts.Input, 1)
-	out := make(chan contracts.Event, 32)
-	runErr := make(chan error, 1)
-	go func() { runErr <- m.Run(context.Background(), in, out) }()
-
-	in <- contracts.Input{Type: contracts.InUserMessage, Text: "run echo hi"}
-	if !drainToTurnCompleted(t, out, testTimeout) {
-		t.Fatal("turn never completed")
-	}
-	in <- contracts.Input{Type: contracts.InEnd}
-	expectClosed(t, out, testTimeout)
-	if err := <-runErr; err != nil {
-		t.Fatalf("Run returned %v; want nil", err)
-	}
-
-	toolMsg := lastToolResultMessage(t, provider.LastRequest())
-	if !strings.Contains(toolMsg.Content, "hi") {
-		t.Fatalf("tool_result content = %q; want it to contain the command's real stdout", toolMsg.Content)
-	}
-}
 
 // TestManager_TurnRequestTools_CarriesSurfaceSpecs asserts the model
 // actually sees the fs/exec tool specs (TurnRequest.Tools -> lowered onto

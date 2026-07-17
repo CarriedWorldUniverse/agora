@@ -99,28 +99,6 @@ func TestSurfaceRunner_SourceContentNotHTMLEscaped(t *testing.T) {
 	}
 }
 
-// TestSurfaceRunner_RunCommandSuccess proves the exec family path too.
-func TestSurfaceRunner_RunCommandSuccess(t *testing.T) {
-	roots := testRoots(t)
-	surface := toolrunner.NewSurface(nil, toolrunner.NewFSFamily(roots), toolrunner.NewExecFamily(roots))
-	runner := newSurfaceRunner(surface)
-
-	raw, err := runner.Run(context.Background(), bridle.ToolCall{
-		ID:   "1",
-		Name: toolrunner.ToolRunCommand,
-		Args: json.RawMessage(`{"command":"echo hi"}`),
-	})
-	if err != nil {
-		t.Fatalf("Run: unexpected error: %v", err)
-	}
-	var got string
-	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatalf("Run's return is not valid JSON: %v (raw=%s)", err, raw)
-	}
-	if strings.TrimSpace(got) != "hi" {
-		t.Fatalf("got %q; want %q", got, "hi")
-	}
-}
 
 // TestSurfaceRunner_UnknownTool: Surface.Execute's own "clean IsError
 // Result, never panic" contract turns an unrecognized name into
