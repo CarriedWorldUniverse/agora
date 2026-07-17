@@ -87,9 +87,12 @@ func TestSurfaceExecuteRoutesNative(t *testing.T) {
 	mcp := &fakeMCPSource{}
 	s := NewSurface(mcp, fs, ex)
 
-	res, err := s.Execute(context.Background(), Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: "echo hi"})})
+	// Route to a cross-platform native tool (list_dir on the working root):
+	// this proves native-vs-mcp dispatch on every OS. exec routing (run_command
+	// → /bin/sh) is unix-only and covered in exec_test.go (//go:build !windows).
+	res, err := s.Execute(context.Background(), Call{Name: ToolListDir, Args: []byte(`{"path":"."}`)})
 	if err != nil || res.IsError {
-		t.Fatalf("Execute run_command: err=%v res=%+v", err, res)
+		t.Fatalf("Execute list_dir: err=%v res=%+v", err, res)
 	}
 	if len(mcp.calls) != 0 {
 		t.Fatal("native call incorrectly routed to mcp source")

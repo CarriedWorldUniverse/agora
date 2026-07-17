@@ -3,6 +3,7 @@ package toolrunner
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -14,6 +15,18 @@ func newTestRoots(t *testing.T) Roots {
 		t.Fatalf("NewRoots: %v", err)
 	}
 	return roots
+}
+
+// absOutsideRoots returns an absolute path outside any t.TempDir-based root,
+// using OS-appropriate syntax: a Unix path like "/etc/passwd" is NOT absolute
+// on Windows, so filepath.IsAbs treats it as relative and joins it INTO the
+// root — making a would-be "outside" fixture land inside. t.TempDir lives
+// under the temp dir on every OS, never under C:\Windows.
+func absOutsideRoots() string {
+	if runtime.GOOS == "windows" {
+		return `C:\Windows\System32\drivers\etc\hosts`
+	}
+	return "/etc/passwd"
 }
 
 func TestContainsLexical(t *testing.T) {
@@ -28,7 +41,7 @@ func TestContainsLexical(t *testing.T) {
 		{"absolute inside", filepath.Join(roots.WorkingDir, "foo.txt"), true},
 		{"dotdot escape", "../escape.txt", false},
 		{"nested dotdot escape", "foo/../../escape.txt", false},
-		{"absolute outside", "/etc/passwd", false},
+		{"absolute outside", absOutsideRoots(), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

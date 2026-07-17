@@ -90,7 +90,7 @@ func TestClassifyEditFileDiff(t *testing.T) {
 
 func TestClassifyEditFileOutsideRoots(t *testing.T) {
 	roots := newTestRoots(t)
-	kind, _ := Classify(Call{Name: ToolEditFile, Args: mustArgs(t, editFileArgs{Path: "/etc/passwd", OldString: "a", NewString: "b"})}, roots)
+	kind, _ := Classify(Call{Name: ToolEditFile, Args: mustArgs(t, editFileArgs{Path: absOutsideRoots(), OldString: "a", NewString: "b"})}, roots)
 	if kind != contracts.KindEscalation {
 		t.Fatalf("kind = %v, want %v", kind, contracts.KindEscalation)
 	}
