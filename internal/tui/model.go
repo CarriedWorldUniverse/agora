@@ -211,6 +211,12 @@ func (m *Model) renderModal(e approvalEntry) string {
 	default:
 		b.WriteString(m.cfg.Theme.Header.Render(fmt.Sprintf("approve %s?", e.Kind)))
 		b.WriteString("\n")
+		// §3: "Body shows the highlighted command or the diff" — this is
+		// the core trust function of the gate (the operator must see WHAT
+		// they approve, not just its kind), see finding #2.
+		for _, line := range renderApprovalSubject(e, m.cfg.Theme, m.width) {
+			b.WriteString(line + "\n")
+		}
 		for i, opt := range ApprovalModalOptions(e.Kind) {
 			cursor := "  "
 			if i == m.modalCursor {
@@ -239,9 +245,18 @@ func (m *Model) handleEvent(ev contracts.Event) []tea.Cmd {
 	case contracts.EvThreadStarted:
 		cmds = append(cmds, m.cfg.Printer(Cell{Kind: CellSessionHeader, AgentID: m.cfg.AgentID, Model: m.cfg.Model}.Render(m.width, m.cfg.Theme)[0]))
 	case contracts.EvTurnStarted:
+		// Finalize/flush a prior non-nil stream before replacing it — a
+		// double EvTurnStarted (e.g. a retried/duplicated event) must not
+		// silently drop a buffered tail that was never committed.
+		if m.stream != nil {
+			for _, line := range m.stream.Finalize() {
+				cmds = append(cmds, m.cfg.Printer(line))
+			}
+		}
 		m.running = true
 		m.turnID = ev.TurnID
 		m.stream = NewStreamState()
+		m.composer.SetRunning(true)
 	case contracts.EvAgentMessageDelta:
 		var p struct {
 			Delta string `json:"delta"`
@@ -262,12 +277,29 @@ func (m *Model) handleEvent(ev contracts.Event) []tea.Cmd {
 			m.stream = nil
 		}
 		m.running = false
+		m.composer.SetRunning(false)
 		for _, q := range m.composer.DrainQueued() {
 			cmds = append(cmds, m.cfg.Printer("› "+q))
 		}
 	case contracts.EvApprovalRequested:
-		entry := decodeApprovalRequest(ev.Payload)
-		m.queue = append(m.queue, entry)
+		entry, ok := decodeApprovalRequest(ev.Payload)
+		if !ok {
+			// Fail closed (security): a malformed kind-specific sub-payload
+			// must never be queued for View()/renderModal to dereference —
+			// mirror EvQuestionAsked's already-safe "drop on decode
+			// failure" behavior, but go further and resolve the dangling
+			// server-side request with an explicit auto-deny rather than
+			// silently dropping it (a stuck-forever pending request is its
+			// own kind of failure).
+			m.statusErr = fmt.Sprintf("malformed approval request (kind=%q): auto-denied", entry.Kind)
+			if entry.ID != "" {
+				if c := m.send(autoDenyInput(entry)); c != nil {
+					cmds = append(cmds, c)
+				}
+			}
+		} else {
+			m.queue = append(m.queue, entry)
+		}
 	case contracts.EvQuestionAsked:
 		var q contracts.QuestionAsked
 		if err := json.Unmarshal(ev.Payload, &q); err == nil {
@@ -289,27 +321,55 @@ func (m *Model) handleEvent(ev contracts.Event) []tea.Cmd {
 	return cmds
 }
 
-func decodeApprovalRequest(raw json.RawMessage) approvalEntry {
+// decodeApprovalRequest decodes an EvApprovalRequested payload. The second
+// return is false when a kind that renderModal dereferences a typed pointer
+// for (question, plan) failed to decode its kind-specific sub-payload — the
+// caller must NOT queue such an entry (see the EvApprovalRequested case in
+// handleEvent: a nil Question/Plan on a queued entry is exactly the
+// nil-deref crash this guards against, mirroring EvQuestionAsked's existing
+// "drop on decode failure" safety).
+func decodeApprovalRequest(raw json.RawMessage) (approvalEntry, bool) {
 	var wire struct {
 		ID      string                 `json:"id"`
 		Kind    contracts.ApprovalKind `json:"kind"`
 		Payload json.RawMessage        `json:"payload"`
 	}
-	_ = json.Unmarshal(raw, &wire)
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return approvalEntry{}, false
+	}
 	entry := approvalEntry{ID: wire.ID, Kind: wire.Kind, Raw: wire.Payload}
 	switch wire.Kind {
 	case contracts.KindQuestion:
 		var q contracts.QuestionAsked
-		if json.Unmarshal(wire.Payload, &q) == nil {
-			entry.Question = &q
+		if err := json.Unmarshal(wire.Payload, &q); err != nil {
+			return entry, false
 		}
+		entry.Question = &q
 	case contracts.KindPlan:
 		var p contracts.PlanArtifact
-		if json.Unmarshal(wire.Payload, &p) == nil {
-			entry.Plan = &p
+		if err := json.Unmarshal(wire.Payload, &p); err != nil {
+			return entry, false
+		}
+		entry.Plan = &p
+	}
+	return entry, true
+}
+
+// autoDenyInput builds the fail-closed response for a malformed approval
+// request: a question-shaped request declines to answer (mirroring
+// EscQuestionAnswer); every other kind resolves as an explicit deny (the
+// same decision Esc sends, agora-spec-tui.md §3's "every exit is an
+// explicit decision" — a malformed frame is not an exception).
+func autoDenyInput(e approvalEntry) contracts.Input {
+	if e.Kind == contracts.KindQuestion {
+		return contracts.Input{
+			Type:   contracts.InQuestionResponse,
+			ID:     e.ID,
+			Answer: &contracts.AnswerInput{Text: "(auto-denied: malformed approval payload)"},
 		}
 	}
-	return entry
+	in, _ := ResolveApproval(e.ID, EscDecision(), "malformed approval payload: auto-denied")
+	return in
 }
 
 func (m *Model) removeFromQueue(id string) {
@@ -332,6 +392,20 @@ func (m *Model) removeFromQueue(id string) {
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if e := m.activeModal(); e != nil {
 		return m.handleModalKey(msg, *e)
+	}
+	if m.pendingDeny != nil && msg.String() == "esc" {
+		// §3: "every exit is an explicit decision" — Esc here must not be
+		// silently dropped (finding: no "esc" case in the composer key path
+		// left the operator trapped, forced to type text + Enter to
+		// escape). Cancel the pending deny and return focus to the
+		// approval modal; the underlying queue entry was never removed
+		// (chooseOption only sets pendingDeny, it does not dequeue), so
+		// clearing pendingDeny alone restores activeModal().
+		m.pendingDeny = nil
+		m.pendingDenyOpt = ModalOption{}
+		m.modalCursor = 0
+		m.composer.SetValue("")
+		return m, nil
 	}
 	switch msg.String() {
 	case "enter":
@@ -464,13 +538,7 @@ func (m *Model) submitComposer() tea.Cmd {
 		if !sent {
 			return nil
 		}
-		in, err := ResolveApproval(m.pendingDeny.ID, m.pendingDenyOpt, text)
-		m.removeFromQueue(m.pendingDeny.ID)
-		if err != nil {
-			m.statusErr = err.Error()
-			return nil
-		}
-		return m.send(in)
+		return m.resolvePendingDeny(text)
 	}
 	text, sent := m.composer.Submit()
 	if !sent {
@@ -485,6 +553,26 @@ func (m *Model) submitComposer() tea.Cmd {
 		return m.send(contracts.Input{Type: contracts.InUserMessage, Text: rest, Model: model, Effort: effort})
 	}
 	return m.send(contracts.Input{Type: contracts.InUserMessage, Text: text})
+}
+
+// resolvePendingDeny builds and sends the deny-with-feedback response for
+// m.pendingDeny. It ONLY removes the entry from the queue / clears
+// pendingDeny AFTER ResolveApproval succeeds — on error the pending state
+// is left intact and the error surfaced, so a would-be error can never
+// silently drop the decision (finding: previously removeFromQueue ran
+// before the err check; currently unreachable in practice since Submit()
+// only returns sent=true for non-empty text and pendingDenyOpt always
+// RequiresMessage, but fragile — kept correct defensively, and split out
+// so the ordering itself is directly unit-testable without needing to
+// coax the composer into an otherwise-unreachable state).
+func (m *Model) resolvePendingDeny(text string) tea.Cmd {
+	in, err := ResolveApproval(m.pendingDeny.ID, m.pendingDenyOpt, text)
+	if err != nil {
+		m.statusErr = err.Error()
+		return nil
+	}
+	m.removeFromQueue(m.pendingDeny.ID)
+	return m.send(in)
 }
 
 func (m *Model) send(in contracts.Input) tea.Cmd {

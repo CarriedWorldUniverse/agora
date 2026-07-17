@@ -38,11 +38,18 @@ func NewStreamState() *StreamState { return &StreamState{} }
 // Finalize has been called (documented terminal state — callers construct a
 // fresh StreamState per active cell/turn rather than reusing a finalized
 // one).
+//
+// delta is sanitized (finding #3, security) before it ever lands in raw:
+// this is the single entry point every byte of agent-message content flows
+// through on its way to the real terminal (both the live Tail() and the
+// Commit()/Finalize()-stabilized lines handed to Printer), so it is the one
+// place that needs to strip control/escape bytes to keep prompt-injected
+// ANSI/OSC out of the operator's scrollback.
 func (s *StreamState) Append(delta string) {
 	if s.done {
 		return
 	}
-	s.raw.WriteString(delta)
+	s.raw.WriteString(sanitizeTerminalText(delta))
 }
 
 // Raw returns the entire append-only source seen so far (committed + tail).
@@ -67,9 +74,13 @@ func (s *StreamState) TableHeld() bool { return s.tableHeld }
 
 // looksLikeTableHeader is a deliberately permissive (false-positive-safe)
 // check: any line containing a pipe defers one line's worth of commit
-// latency while we wait to see whether the next line is a delimiter row. A
-// plain sentence with a stray "|" just costs one extra Commit tick before it
-// stabilizes with its neighbour — harmless. Spec: agora-spec-tui.md §2.
+// latency while we wait to see whether the next line is a delimiter row. On
+// its own this line-latency claim ("harmless, one extra tick") does NOT
+// hold — the confirmation step below (Commit's caller, gated on
+// tableCellCount matching) is what keeps a false positive from actually
+// arming holdback and freezing the rest of the turn; looksLikeTableHeader
+// alone only decides whether to LOOK at the next line, never whether to
+// hold back. Spec: agora-spec-tui.md §2.
 func looksLikeTableHeader(line string) bool {
 	return strings.Contains(line, "|")
 }
@@ -85,6 +96,20 @@ func isTableDelimiterRow(line string) bool {
 		return false
 	}
 	return tableDelimRe.MatchString(line)
+}
+
+// tableCellCount counts a markdown table row's cells: trim a single
+// leading/trailing "|" (rows may or may not be pipe-bounded), then split on
+// "|". Used to disambiguate a REAL table header+delimiter pair from a false
+// positive (finding #4): a prose line that happens to contain a pipe (e.g.
+// a backtick-quoted "ls | grep foo") followed by an unrelated bare "---"
+// divider or setext underline is NOT a table — its "header" and
+// "delimiter" cell counts won't match.
+func tableCellCount(line string) int {
+	t := strings.TrimSpace(line)
+	t = strings.TrimPrefix(t, "|")
+	t = strings.TrimSuffix(t, "|")
+	return len(strings.Split(t, "|"))
 }
 
 // splitComplete splits pending text into newline-terminated complete lines
@@ -122,7 +147,12 @@ func (s *StreamState) Commit() []string {
 		line := complete[k]
 		if looksLikeTableHeader(line) {
 			if k+1 < len(complete) {
-				if isTableDelimiterRow(complete[k+1]) {
+				// A real table's delimiter row has the SAME cell count as
+				// its header row (finding #4) — "contains dashes" alone
+				// (isTableDelimiterRow) is not sufficient: a bare "---"
+				// divider after an unrelated pipe-containing prose line
+				// must not arm holdback.
+				if isTableDelimiterRow(complete[k+1]) && tableCellCount(line) == tableCellCount(complete[k+1]) {
 					// Confirmed table start at k: freeze the boundary here
 					// (a later row can still reshape every column) — hold
 					// everything from the header onward until Finalize.

@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	stdio "io"
 	"net"
 	"sync"
 
@@ -42,10 +41,13 @@ type ioBackend struct {
 	writeMu sync.Mutex
 
 	events chan contracts.Event
+	// done is closed by Close() so readLoop's blocking `events <- ...` send
+	// (finding #7) has an escape: without it, a full events buffer plus a
+	// wedged consumer leaks the read goroutine forever even after Close().
+	done chan struct{}
 
 	closeOnce sync.Once
 	closeErr  error
-	readErr   chan error
 }
 
 // DialUnixBackend dials a unix-socket session-protocol listener at path and
@@ -74,10 +76,10 @@ func DialWSBackend(ctx context.Context, url string, attach agoraio.AttachRequest
 // in-process net.Pipe without a real listener.
 func newIOBackend(conn net.Conn, attach agoraio.AttachRequest) (Backend, error) {
 	b := &ioBackend{
-		conn:    conn,
-		sc:      bufio.NewScanner(conn),
-		events:  make(chan contracts.Event, 256),
-		readErr: make(chan error, 1),
+		conn:   conn,
+		sc:     bufio.NewScanner(conn),
+		events: make(chan contracts.Event, 256),
+		done:   make(chan struct{}),
 	}
 	b.sc.Buffer(make([]byte, 0, 64*1024), maxServerFrameBytes)
 
@@ -108,15 +110,16 @@ func (b *ioBackend) readLoop() {
 		if err := json.Unmarshal(b.sc.Bytes(), &f); err != nil {
 			continue // malformed frame: drop, keep the connection alive
 		}
+		// finding #7 (security): without the b.done case this send blocks
+		// unconditionally — a full events buffer plus a wedged consumer
+		// leaks this goroutine forever, even after Close(). Close() closes
+		// b.done, giving the send an escape.
 		select {
 		case b.events <- f.Event:
+		case <-b.done:
+			return
 		}
 	}
-	err := b.sc.Err()
-	if err == nil {
-		err = stdio.EOF
-	}
-	b.readErr <- err
 }
 
 func (b *ioBackend) Send(ctx context.Context, in contracts.Input) error {
@@ -134,6 +137,7 @@ func (b *ioBackend) Events() <-chan contracts.Event { return b.events }
 
 func (b *ioBackend) Close() error {
 	b.closeOnce.Do(func() {
+		close(b.done)
 		b.closeErr = b.conn.Close()
 	})
 	return b.closeErr

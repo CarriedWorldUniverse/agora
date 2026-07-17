@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"net"
 	"path/filepath"
 	"testing"
 	"time"
@@ -71,6 +73,61 @@ func TestIOBackend_RoundTrip(t *testing.T) {
 		if got[i] != w {
 			t.Fatalf("event[%d] = %v, want %v (all: %v)", i, got[i], w, got)
 		}
+	}
+}
+
+// TestIOBackend_ReadLoopExitsOnCloseEvenWithFullEventsBuffer is finding #7
+// (security/LOW): readLoop's `events <- f.Event` send was unconditional
+// (one-case select) — with an unbuffered/full events channel and a wedged
+// consumer, the goroutine leaked forever even after Close(). The events
+// channel here is deliberately unbuffered and NOTHING ever reads from it,
+// so the send can only ever complete via the new b.done escape.
+func TestIOBackend_ReadLoopExitsOnCloseEvenWithFullEventsBuffer(t *testing.T) {
+	client, server := net.Pipe()
+	defer server.Close()
+
+	b := &ioBackend{
+		conn:   client,
+		sc:     bufio.NewScanner(client),
+		events: make(chan contracts.Event), // unbuffered: any send blocks
+		done:   make(chan struct{}),
+	}
+	b.sc.Buffer(make([]byte, 0, 1024), maxServerFrameBytes)
+
+	// exited is a dedicated signal, deliberately NOT b.events itself: if the
+	// test read from b.events to detect the exit, that read would itself be
+	// a receiver able to pair with readLoop's blocked send, racing against
+	// the b.done case instead of proving it's the only viable path.
+	exited := make(chan struct{})
+	go func() {
+		b.readLoop()
+		close(exited)
+	}()
+
+	frame := agoraio.ServerFrame{Event: contracts.Event{Type: contracts.EvTurnStarted}}
+	raw, err := json.Marshal(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = append(raw, '\n')
+	// net.Pipe's Write blocks until the matching Read completes — this
+	// proves readLoop's Scan() actually consumed the frame before we ever
+	// call Close(), so the goroutine is genuinely stuck trying to send to
+	// the (unread) events channel, not just blocked in Scan().
+	if _, err := server.Write(raw); err != nil {
+		t.Fatalf("server.Write: %v", err)
+	}
+
+	if err := b.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Nobody ever reads b.events, so the ONLY way readLoop's blocked send
+	// resolves is via the b.done case.
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("readLoop did not exit after Close() (goroutine leaked)")
 	}
 }
 

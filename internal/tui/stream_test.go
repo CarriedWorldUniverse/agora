@@ -137,6 +137,40 @@ func TestStream_TableHoldback_HeaderLookingLineWithoutDelimiterCommitsNormally(t
 	}
 }
 
+// TestStream_TableHoldback_BarePipeInProseThenDashDividerDoesNotFreeze is
+// finding #4 (CONFIRMED regression): a prose line containing a pipe (e.g. a
+// backtick-quoted shell pipeline) followed by an unrelated bare "---"
+// divider/setext-underline must NOT arm table holdback — before the fix,
+// isTableDelimiterRow alone (any dash/colon/pipe/space line) false-positive
+// matched "---" and froze the rest of the turn until Finalize.
+func TestStream_TableHoldback_BarePipeInProseThenDashDividerDoesNotFreeze(t *testing.T) {
+	s := NewStreamState()
+	s.Append("ran `ls | grep foo`\n---\nnormal paragraph\nmore\n")
+	got := s.Commit()
+	want := []string{"ran `ls | grep foo`", "---", "normal paragraph", "more"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Commit() = %v, want %v (must not freeze)", got, want)
+	}
+	if s.TableHeld() {
+		t.Fatalf("table holdback armed for a non-table (bare pipe in prose + unrelated divider)")
+	}
+}
+
+// TestStream_TableHoldback_GenuineTableStillHoldsBack proves the column-
+// count tightening didn't break real table detection: a genuine
+// `col|col` / `---|---` pair (matching cell counts) still arms holdback.
+func TestStream_TableHoldback_GenuineTableStillHoldsBack(t *testing.T) {
+	s := NewStreamState()
+	s.Append("col|col\n---|---\n")
+	got := s.Commit()
+	if got != nil {
+		t.Fatalf("Commit() = %v, want nil (table held)", got)
+	}
+	if !s.TableHeld() {
+		t.Fatalf("expected table holdback armed for a genuine table")
+	}
+}
+
 func TestStream_Finalize_CommitsTrailingIncompleteLine(t *testing.T) {
 	s := NewStreamState()
 	s.Append("committed\npartial tail no newline")

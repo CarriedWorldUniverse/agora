@@ -16,11 +16,15 @@ const (
 
 // DiffLine is one line of a rendered diff/patch: OldNo/NewNo are the
 // right-aligned line numbers (0 = blank, e.g. an added line has no OldNo).
+// JSON tags: this is also the wire shape a KindPatch approval payload's
+// "lines" field decodes into (subject.go, finding #2) — no producer of
+// that event exists yet in this repo, so these are this package's own
+// contract for it.
 type DiffLine struct {
-	Kind  DiffLineKind
-	OldNo int
-	NewNo int
-	Text  string
+	Kind  DiffLineKind `json:"kind"`
+	OldNo int          `json:"oldNo"`
+	NewNo int          `json:"newNo"`
+	Text  string       `json:"text"`
 }
 
 // DiffCell is the diff/patch cell (§1, §7): appears both in the apply-patch
@@ -73,7 +77,10 @@ func (d DiffCell) Render(width int, th Theme) []string {
 
 	var out []string
 	if d.Path != "" {
-		out = append(out, th.Header.Render(d.Path))
+		// finding #3 (security): Path/Text ultimately originate from a
+		// patch-approval payload — agent/tool-supplied content — sanitize
+		// before it reaches the terminal, same boundary rule as stream.go.
+		out = append(out, th.Header.Render(sanitizeTerminalText(d.Path)))
 	}
 	for _, l := range d.Lines {
 		prefix := fmt.Sprintf("%*s %*s %s ", numWidth, lineNoCol(l.OldNo), numWidth, lineNoCol(l.NewNo), gutterSign(l.Kind))
@@ -84,7 +91,7 @@ func (d DiffCell) Render(width int, th Theme) []string {
 		case DiffDel:
 			style = th.DiffDel
 		}
-		for _, chunk := range wrapText(l.Text, contentWidth) {
+		for _, chunk := range wrapText(sanitizeTerminalText(l.Text), contentWidth) {
 			out = append(out, prefix+style.Render(chunk))
 			prefix = strings.Repeat(" ", numWidth*2+3) + gutterSign(l.Kind) + " "
 		}

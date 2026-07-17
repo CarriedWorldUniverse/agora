@@ -60,18 +60,25 @@ type Cell struct {
 // Render turns the cell into plain styled lines at the given width. Never
 // mutates the Cell.
 func (c Cell) Render(width int, th Theme) []string {
+	// finding #3 (security): Text/Command/Output/DecisionLabel ultimately
+	// originate from the LLM or a tool (or, for DecisionLabel, may embed
+	// operator-typed deny feedback echoed back) — sanitize before this
+	// content reaches a style renderer or the real terminal. Sanitizing the
+	// INPUT here (not the final lipgloss-rendered frame) is what keeps this
+	// safe without stripping the TUI's own intended styling escapes.
 	switch c.Kind {
 	case CellSessionHeader:
 		return []string{th.Header.Render(fmt.Sprintf("── %s · %s ──", c.AgentID, c.Model))}
 	case CellUserMessage:
-		return wrapPrefixed("›", c.Text, width)
+		return wrapPrefixed("›", sanitizeTerminalText(c.Text), width)
 	case CellAgentMessage:
-		return renderMarkdown(c.Text, width)
+		return renderMarkdown(sanitizeTerminalText(c.Text), width)
 	case CellReasoning:
+		text := sanitizeTerminalText(c.Text)
 		if !c.Expanded {
-			return []string{th.Muted.Render(summarizeReasoning(c.Text))}
+			return []string{th.Muted.Render(summarizeReasoning(text))}
 		}
-		lines := strings.Split(c.Text, "\n")
+		lines := strings.Split(text, "\n")
 		out := make([]string, len(lines))
 		for i, l := range lines {
 			out[i] = th.Muted.Render(l)
@@ -82,7 +89,7 @@ func (c Cell) Render(width int, th Theme) []string {
 	case CellDiffCell:
 		return c.Diff.Render(width, th)
 	case CellApprovalDecision:
-		return []string{th.Muted.Render("• " + c.DecisionLabel)}
+		return []string{th.Muted.Render("• " + sanitizeTerminalText(c.DecisionLabel))}
 	default:
 		return nil
 	}
@@ -115,13 +122,13 @@ func renderExec(c Cell, th Theme) []string {
 	if c.ExecDone {
 		status = fmt.Sprintf("exit %d", c.ExitCode)
 	}
-	out = append(out, th.Bold.Render("$ "+c.Command)+"  "+th.Muted.Render("("+status+")"))
+	out = append(out, th.Bold.Render("$ "+sanitizeTerminalText(c.Command))+"  "+th.Muted.Render("("+status+")"))
 	lines := c.Output
 	if !c.ExecDone && len(lines) > execTailLines {
 		lines = lines[len(lines)-execTailLines:]
 	}
 	for _, l := range lines {
-		out = append(out, "  "+l)
+		out = append(out, "  "+sanitizeTerminalText(l))
 	}
 	return out
 }

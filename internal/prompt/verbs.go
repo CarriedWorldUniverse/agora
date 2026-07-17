@@ -147,6 +147,14 @@ func ContainDestDir(baseDir, name string) (string, error) {
 	if name == "" {
 		return "", ErrDestDirEmpty
 	}
+	// A "name" is documented as a single package name, not a path — reject
+	// an absolute name up front rather than relying on filepath.Join's
+	// (correct, but non-obvious) behavior of treating a later absolute
+	// argument as just another path component (finding #8's missing
+	// regression test).
+	if filepath.IsAbs(name) {
+		return "", fmt.Errorf("%w: %q is an absolute path", ErrDestDirTraversal, name)
+	}
 	baseClean := filepath.Clean(baseDir)
 	joined := filepath.Clean(filepath.Join(baseClean, name))
 	rel, err := filepath.Rel(baseClean, joined)
@@ -156,7 +164,51 @@ func ContainDestDir(baseDir, name string) (string, error) {
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return "", fmt.Errorf("%w: %q escapes %q", ErrDestDirTraversal, name, baseDir)
 	}
+	// Defense-in-depth (finding #8): the lexical check above can't catch a
+	// pre-planted symlink INSIDE baseDir whose target escapes it (e.g.
+	// baseDir/name is itself a symlink to /etc) — lexically "name" has no
+	// ".." component, but resolving it lands outside baseDir. Resolve
+	// symlinks on whatever prefix of each path already exists on disk and
+	// re-check containment; if joined doesn't exist yet at all (the common
+	// New() case — nothing has been written there yet), there is no
+	// symlink to have escaped through, so fall back to the lexical result.
+	if resolvedJoined, err := resolveExistingAncestor(joined); err == nil {
+		if resolvedBase, err := resolveExistingAncestor(baseClean); err == nil {
+			rel2, err2 := filepath.Rel(resolvedBase, resolvedJoined)
+			if err2 != nil || rel2 == ".." || strings.HasPrefix(rel2, ".."+string(filepath.Separator)) || filepath.IsAbs(rel2) {
+				return "", fmt.Errorf("%w: %q escapes %q (symlink)", ErrDestDirTraversal, name, baseDir)
+			}
+		}
+	}
 	return joined, nil
+}
+
+// resolveExistingAncestor resolves symlinks on the longest prefix of p that
+// actually exists on disk, then re-appends the (necessarily symlink-free,
+// since it doesn't exist yet) remaining suffix — filepath.EvalSymlinks
+// itself requires every component to exist, which the destination half of
+// a not-yet-created package path usually doesn't.
+func resolveExistingAncestor(p string) (string, error) {
+	cur := p
+	var suffix []string
+	for {
+		if _, err := os.Lstat(cur); err == nil {
+			resolved, err := filepath.EvalSymlinks(cur)
+			if err != nil {
+				return "", err
+			}
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return resolved, nil
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", fmt.Errorf("prompt: no existing ancestor for %q", p)
+		}
+		suffix = append(suffix, filepath.Base(cur))
+		cur = parent
+	}
 }
 
 // collapseControlChars replaces control bytes (except tab) with spaces so a

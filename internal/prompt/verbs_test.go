@@ -271,3 +271,61 @@ func TestContainDestDir_RejectsEmptyName(t *testing.T) {
 		t.Fatalf("err = %v, want ErrDestDirEmpty", err)
 	}
 }
+
+// finding #8 (LOW, security): the missing absolute-path `name` regression
+// test the reviewer noted. A "name" is documented as a single package
+// name, not a path — ContainDestDir must reject an absolute one rather
+// than silently accepting it as just another path component.
+func TestContainDestDir_RejectsAbsoluteName(t *testing.T) {
+	base := t.TempDir()
+	if _, err := ContainDestDir(base, "/etc/passwd"); !errors.Is(err, ErrDestDirTraversal) {
+		t.Fatalf("ContainDestDir err = %v, want ErrDestDirTraversal", err)
+	}
+}
+
+// finding #8 (LOW, security): ContainDestDir was lexical-only — a
+// pre-planted symlink INSIDE baseDir whose target escapes baseDir has no
+// literal ".." for the lexical check to catch, but resolving it lands
+// outside baseDir. Defense-in-depth: EvalSymlinks on the resolved
+// existing-ancestor prefix must catch it too.
+func TestContainDestDir_RejectsSymlinkEscapeInsideBaseDir(t *testing.T) {
+	base := t.TempDir()
+	outside := t.TempDir()
+	target := filepath.Join(outside, "escaped")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatalf("Mkdir target: %v", err)
+	}
+	link := filepath.Join(base, "planted-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks not supported on this filesystem: %v", err)
+	}
+
+	_, err := ContainDestDir(base, "planted-link")
+	if !errors.Is(err, ErrDestDirTraversal) {
+		t.Fatalf("ContainDestDir err = %v, want ErrDestDirTraversal (symlink escape)", err)
+	}
+}
+
+// A symlink that stays WITHIN baseDir must still be accepted — the
+// defense-in-depth check must not reject every symlink, only ones that
+// resolve outside baseDir.
+func TestContainDestDir_AcceptsSymlinkThatStaysWithinBaseDir(t *testing.T) {
+	base := t.TempDir()
+	realDir := filepath.Join(base, "real")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	link := filepath.Join(base, "inside-link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Skipf("symlinks not supported on this filesystem: %v", err)
+	}
+
+	got, err := ContainDestDir(base, "inside-link")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	want := filepath.Join(base, "inside-link")
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
