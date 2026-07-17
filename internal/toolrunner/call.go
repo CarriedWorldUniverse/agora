@@ -23,7 +23,7 @@ type Result struct {
 	IsError bool
 }
 
-// errorResultf builds an IsError Result from an error, never panicking the
+// errorResult builds an IsError Result from an error, never panicking the
 // caller — the "unknown name -> a clean error Result, never panic" rule.
 func errorResult(err error) Result {
 	return Result{Content: err.Error(), IsError: true}

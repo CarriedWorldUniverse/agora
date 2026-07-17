@@ -25,6 +25,19 @@ func TestClassifyMCPTool(t *testing.T) {
 	assertJSONExact(t, payload, `{"tool":"mcp__github__search","args":{"q":"foo"}}`)
 }
 
+// TestClassifyMCPToolNilArgs: DEVIATIONS.md §5's mcp_tool shape is exactly
+// {tool, args} — a nil/omitted args must still marshal the key as
+// "args":null, not drop it, since the TUI's decode side (and any other
+// consumer) expects the field to always be present.
+func TestClassifyMCPToolNilArgs(t *testing.T) {
+	roots := newTestRoots(t)
+	kind, payload := Classify(Call{Name: "mcp__github__search"}, roots)
+	if kind != contracts.KindMCPTool {
+		t.Fatalf("kind = %v, want %v", kind, contracts.KindMCPTool)
+	}
+	assertJSONExact(t, payload, `{"tool":"mcp__github__search","args":null}`)
+}
+
 func TestClassifyWriteFileInsideRoots(t *testing.T) {
 	roots := newTestRoots(t)
 	kind, payload := Classify(Call{Name: ToolWriteFile, Args: mustArgs(t, writeFileArgs{Path: "a.txt", Content: "hello\nworld"})}, roots)

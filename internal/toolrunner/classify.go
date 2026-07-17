@@ -57,9 +57,12 @@ type EscalationPayload struct {
 
 // MCPToolPayload is the "mcp_tool" approval payload shape (DEVIATIONS.md
 // §5).
+// Args deliberately has NO omitempty: DEVIATIONS.md §5's shape is exactly
+// {tool, args} — a nil Args must still marshal as "args":null (the field
+// present, decodable as null) rather than dropping the key entirely.
 type MCPToolPayload struct {
 	Tool string          `json:"tool"`
-	Args json.RawMessage `json:"args,omitempty"`
+	Args json.RawMessage `json:"args"`
 }
 
 // mcpPrefix mirrors internal/mcp.ToolNamePrefix ("mcp__") without importing
