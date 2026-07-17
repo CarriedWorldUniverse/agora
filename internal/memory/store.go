@@ -3,6 +3,7 @@ package memory
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,6 +13,44 @@ import (
 
 // indexFilename is the injected-catalog source file. Spec §1.
 const indexFilename = indexBasename + ".md"
+
+// MaxMemoryFileBytes caps a single memory file read (and, via the rendered
+// file, a Write). It bounds two review findings at once: a symlink planted in
+// the memory dir cannot stream an unbounded external file into the process, and
+// — since rebuildIndexLocked re-reads EVERY entry on every mutation — one
+// oversized entry cannot inflate the cost of every subsequent write. Review
+// (U13): security MED. No legitimate memory approaches this (a memory is a
+// short note).
+const MaxMemoryFileBytes = 1 << 20 // 1 MiB
+
+// readMemoryFile reads a memory file with the containment a store dir that is
+// "operator-readable/writable like any notes dir" needs: it REFUSES a
+// non-regular file (a symlink planted in the dir must not exfiltrate an
+// external file into a Read or the auto-injected index — the analogous NEX-750
+// skills hardening; memory.write never creates a symlink but the dir is
+// writable by other tools/the operator), and caps the read. Security review (U13).
+func readMemoryFile(path string) ([]byte, error) {
+	li, err := os.Lstat(path)
+	if err != nil {
+		return nil, err // preserves os.IsNotExist for a missing entry
+	}
+	if !li.Mode().IsRegular() {
+		return nil, fmt.Errorf("memory: %s is not a regular file", filepath.Base(path))
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, MaxMemoryFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > MaxMemoryFileBytes {
+		return nil, fmt.Errorf("%w: %s exceeds %d bytes", ErrTooLarge, filepath.Base(path), MaxMemoryFileBytes)
+	}
+	return data, nil
+}
 
 // DefaultDir returns the production per-identity memory dir: an identity is
 // scoped by NAME (not fingerprint) "for human editability — the dir is
@@ -53,6 +92,14 @@ func NewStore(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("memory: create store dir: %w", err)
 	}
+	// Sweep any temp files a prior process left behind by crashing between
+	// CreateTemp and Rename (scanLocked already ignores non-.md files, so
+	// these never corrupt the index, but they'd accumulate). Review (U13) LOW.
+	if leftovers, gerr := filepath.Glob(filepath.Join(dir, ".tmp-*")); gerr == nil {
+		for _, l := range leftovers {
+			_ = os.Remove(l)
+		}
+	}
 	return &Store{dir: dir}, nil
 }
 
@@ -71,7 +118,7 @@ func (s *Store) Read(name string) (Entry, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	data, err := os.ReadFile(s.entryPath(name))
+	data, err := readMemoryFile(s.entryPath(name))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return Entry{}, fmt.Errorf("%w: %s", ErrNotFound, name)
@@ -102,6 +149,11 @@ func (s *Store) Write(name string, fm Frontmatter, body string) error {
 	data, err := renderEntryFile(fm, body)
 	if err != nil {
 		return err
+	}
+	// Cap the rendered file so it round-trips through the capped reader and so
+	// one oversized entry can't inflate every future index rebuild (U13 review).
+	if len(data) > MaxMemoryFileBytes {
+		return fmt.Errorf("%w: memory %q is %d bytes", ErrTooLarge, name, len(data))
 	}
 
 	s.mu.Lock()
@@ -163,7 +215,9 @@ func (s *Store) scanLocked() ([]IndexEntry, error) {
 			continue
 		}
 		name := e.Name()
-		if !strings.HasSuffix(name, ".md") || name == indexFilename {
+		// Case-fold the index-file exclusion: on a case-insensitive FS a
+		// case-variant of MEMORY.md IS the index file (U13 review).
+		if !strings.HasSuffix(name, ".md") || strings.EqualFold(name, indexFilename) {
 			continue
 		}
 		slug := strings.TrimSuffix(name, ".md")
@@ -175,7 +229,9 @@ func (s *Store) scanLocked() ([]IndexEntry, error) {
 		if err != nil {
 			continue
 		}
-		data, err := os.ReadFile(path)
+		// readMemoryFile rejects a symlinked/oversized entry, so it can't
+		// exfiltrate an external file into the index (U13 review).
+		data, err := readMemoryFile(path)
 		if err != nil {
 			continue
 		}

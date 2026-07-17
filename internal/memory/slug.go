@@ -1,6 +1,9 @@
 package memory
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // indexBasename is MEMORY.md's stem — reserved, never an individual
 // memory's slug (§1).
@@ -32,7 +35,7 @@ func validateSlug(name string) error {
 	if !slugPattern.MatchString(name) {
 		return ErrInvalidName
 	}
-	if name == indexBasename {
+	if strings.EqualFold(name, indexBasename) {
 		return ErrReservedName
 	}
 	return nil

@@ -19,6 +19,9 @@ var (
 	// ErrInvalidType is returned when frontmatter.Type is not one of the
 	// four allowed values (§1: "type: user|feedback|project|reference").
 	ErrInvalidType = errors.New("memory: invalid frontmatter type")
+	// ErrTooLarge is returned when a memory file exceeds MaxMemoryFileBytes
+	// (on Write, or when reading a symlinked/oversized file). Review (U13).
+	ErrTooLarge = errors.New("memory: file too large")
 	// ErrEmptyName is returned when frontmatter.Name (the display title
 	// used in the index) is empty.
 	ErrEmptyName = errors.New("memory: frontmatter name is required")

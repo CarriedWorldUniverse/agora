@@ -17,7 +17,11 @@ var frontmatterDelim = func(l string) bool { return strings.TrimSpace(l) == "---
 // text plus the remaining body. The opening `---` must be the first
 // non-empty line of the file.
 func splitFrontmatter(data []byte) (fm string, body string, err error) {
-	lines := strings.Split(string(data), "\n")
+	// Strip a leading UTF-8 BOM (else the first line is not "---" and the
+	// file is silently skipped) and normalize CRLF so a Windows-authored
+	// memory parses and its body carries no leading/embedded \r (U13 review).
+	text := strings.ReplaceAll(strings.TrimPrefix(string(data), "\ufeff"), "\r\n", "\n")
+	lines := strings.Split(text, "\n")
 
 	start := -1
 	for i, l := range lines {
