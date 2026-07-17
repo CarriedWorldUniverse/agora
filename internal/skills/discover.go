@@ -290,6 +290,19 @@ func scanRoot(root Root) ([]*Skill, []Warning) {
 		return nil, nil // missing root = empty, no error (§2)
 	}
 
+	// If the discovery root ITSELF is a symlink escaping the containment
+	// boundary (a malicious clone committing `.agora/skills` as a symlink out
+	// of the project), refuse it before walking — the per-entry walk check only
+	// covers child symlinks, so without this the escaped tree is enumerated
+	// (bounded, content-safe, since safeReadUnder still blocks every read) but
+	// wastefully and with per-file warnings. This closes the walk-side
+	// asymmetry with a single root-escape warning (NEX-750 delta review).
+	if pol := root.symlinkPolicy(); pol.contained {
+		if resolved, rerr := filepath.EvalSymlinks(root.Path); rerr != nil || !pathWithinRoot(resolved, pol.boundary) {
+			return nil, []Warning{{Root: root.Path, Message: "discovery: root path escapes containment boundary, skipped"}}
+		}
+	}
+
 	dirCount := 0
 	entryCount := 0
 	guardHit := false

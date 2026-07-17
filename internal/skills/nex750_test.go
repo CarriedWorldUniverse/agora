@@ -112,3 +112,37 @@ func TestDiscoverAGENTSMD_ParentDirSymlinkEscapeRejected(t *testing.T) {
 		}
 	}
 }
+
+// A Repo root whose PATH is itself a symlink escaping the boundary (a malicious
+// clone committing .agora/skills as a symlink out of the project) must be
+// refused at the root — not enumerated tree-wide until the read layer blocks
+// each file. Content was already safe (safeReadUnder blocks it); this closes
+// the walk-side asymmetry with a single root-escape warning (NEX-750 delta).
+func TestScanRoot_RepoRootPathSymlinkEscapeRejected(t *testing.T) {
+	tmp := t.TempDir()
+	outside := filepath.Join(tmp, "outside")
+	writeSkill(t, filepath.Join(outside, "evil"), "ROOT-ESCAPE-LEAK")
+	proj := filepath.Join(tmp, "proj")
+	if err := os.MkdirAll(filepath.Join(proj, ".agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rootPath := filepath.Join(proj, ".agents", "skills")
+	if err := os.Symlink(outside, rootPath); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	found, warns := skills.Discover([]skills.Root{{Path: rootPath, Scope: skills.ScopeRepo, FollowSymlinks: true, ContainWithin: proj}})
+	for _, sk := range found {
+		if strings.Contains(sk.Description, "ROOT-ESCAPE-LEAK") {
+			t.Fatalf("symlinked root path escaping the project was read")
+		}
+	}
+	var refused bool
+	for _, w := range warns {
+		if strings.Contains(w.Message, "root path escapes") {
+			refused = true
+		}
+	}
+	if !refused {
+		t.Fatalf("expected a single root-escape warning (not tree enumeration), got: %+v", warns)
+	}
+}
