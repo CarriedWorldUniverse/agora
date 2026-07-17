@@ -164,7 +164,18 @@ func (e *ExecFamily) Execute(ctx context.Context, call Call) (Result, error) {
 		if content != "" {
 			content += "\n"
 		}
-		content += fmt.Sprintf("command timed out after %s", timeout)
+		// timedOut means Cancel fired, i.e. runCtx is done — but for either
+		// reason: the deadline OR a parent-ctx cancellation (session
+		// shutdown / interrupt). runCtx.Err() is authoritative HERE (unlike
+		// as a primary timeout signal — see the Cancel comment) precisely
+		// because Cancel firing guarantees runCtx.Done(). Report the true
+		// cause: calling an interrupt "timed out" is misleading narrative
+		// that would send debugging the wrong way.
+		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+			content += fmt.Sprintf("command timed out after %s", timeout)
+		} else {
+			content += "command cancelled"
+		}
 		return Result{Content: content, IsError: true}, nil
 
 	case errors.Is(runErr, exec.ErrWaitDelay):

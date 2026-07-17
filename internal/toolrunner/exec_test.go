@@ -163,6 +163,33 @@ func TestRunCommandNoFalsePositiveNearDeadline(t *testing.T) {
 	}
 }
 
+// TestRunCommandParentCancelNotMislabeledTimeout: when the PARENT ctx is
+// cancelled (session shutdown / interrupt) while a command runs, it must be
+// reported as cancelled, not "timed out" (delta-review LOW: Cancel fires for
+// any runCtx.Done(), so the timed-out branch must distinguish the cause).
+func TestRunCommandParentCancelNotMislabeledTimeout(t *testing.T) {
+	fam := newExecFamily(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+	res, err := fam.Execute(ctx, Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: "sleep 5", TimeoutMs: 60000})})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected IsError on cancellation, got: %+v", res)
+	}
+	if strings.Contains(res.Content, "timed out") {
+		t.Fatalf("parent cancellation mislabeled as timeout: %+v", res)
+	}
+	if !strings.Contains(res.Content, "cancelled") {
+		t.Fatalf("expected 'cancelled' in message, got: %+v", res)
+	}
+}
+
 // --- review fix 4 (exec half): unbounded output cap ---
 
 func TestRunCommandOutputCapped(t *testing.T) {
