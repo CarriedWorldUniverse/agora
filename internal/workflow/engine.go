@@ -132,7 +132,12 @@ func newGuardedThread(goCtx context.Context, name string, maxSteps uint64) (*sta
 		case <-done:
 		}
 	}()
-	return th, func() { close(done) }
+	// stop is idempotent (sync.Once) so callers can BOTH stop promptly after
+	// the thread finishes AND `defer stop()` as a panic-safety net without
+	// risking a double close(done) panic — a bare call that skips on a
+	// starlark panic would otherwise leak this watcher goroutine.
+	var once sync.Once
+	return th, func() { once.Do(func() { close(done) }) }
 }
 
 // defaultMaxConcurrent implements spec §3: "min(16, cores-2)".
@@ -475,6 +480,7 @@ func Run(ctx context.Context, opts RunOptions) (Outcome, error) {
 	// and observes ctx cancellation — loadThread included, since script
 	// TOP-LEVEL code (not just main()) can in principle loop too.
 	loadThread, stopLoad := newGuardedThread(ctx, "wf-load:"+opts.RunID, opts.MaxSteps)
+	defer stopLoad() // panic-safety net; the bare stopLoad() below stops it promptly on the normal path
 	predeclared := starlark.StringDict{
 		"workflow_meta": starlark.NewBuiltin("workflow_meta", workflowMetaBuiltin),
 	}
@@ -549,6 +555,7 @@ func Run(ctx context.Context, opts RunOptions) (Outcome, error) {
 	cObj := &ctxObj{rs: rs, args: argsVal, now: nowVal, budget: &budgetObj{}}
 
 	mainThread, stopMain := rs.newGuardedThread("wf-main:" + opts.RunID)
+	defer stopMain() // panic-safety net; the bare stopMain() below stops it promptly on the normal path
 	mainThread.SetLocal(branchLocalKey, &branchState{path: ""})
 
 	result, callErr := starlark.Call(mainThread, mainFn, starlark.Tuple{cObj, argsVal}, nil)
