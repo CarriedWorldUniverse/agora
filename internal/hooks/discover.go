@@ -77,7 +77,7 @@ func (rh RegisteredHandler) PositionalKey() string {
 // ContentHash computes rh's trust hash (§4.4) via ContentHash(event,
 // matcher, command) — normalized event+matcher+command identity.
 func (rh RegisteredHandler) ContentHash() string {
-	return ContentHash(rh.Event, rh.Matcher, rh.Handler.Command)
+	return ContentHash(rh.Event, rh.Matcher, rh.Handler.Command, rh.Handler.CommandWindows)
 }
 
 // Registry accumulates handlers from config layers in a deterministic

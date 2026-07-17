@@ -7,19 +7,19 @@ func TestContentHash_ConvergesTOMLAndJSON(t *testing.T) {
 	// normalized command) — equal hooks from TOML and JSON converge."
 	// Simulate the only difference TOML vs JSON round-tripping typically
 	// introduces: incidental whitespace in the command string.
-	h1 := ContentHash(EventPreToolUse, "Bash", "echo hello")
-	h2 := ContentHash(EventPreToolUse, "Bash", "echo   hello\n")
+	h1 := ContentHash(EventPreToolUse, "Bash", "echo hello", "")
+	h2 := ContentHash(EventPreToolUse, "Bash", "echo   hello\n", "")
 	if h1 != h2 {
 		t.Errorf("content hash must converge across whitespace-only command differences: %q != %q", h1, h2)
 	}
 }
 
 func TestContentHash_ChangesOnRealEdit(t *testing.T) {
-	base := ContentHash(EventPreToolUse, "Bash", "echo hello")
+	base := ContentHash(EventPreToolUse, "Bash", "echo hello", "")
 	cases := map[string]string{
-		"different event":   ContentHash(EventPostToolUse, "Bash", "echo hello"),
-		"different matcher": ContentHash(EventPreToolUse, "Edit", "echo hello"),
-		"different command": ContentHash(EventPreToolUse, "Bash", "echo goodbye"),
+		"different event":   ContentHash(EventPostToolUse, "Bash", "echo hello", ""),
+		"different matcher": ContentHash(EventPreToolUse, "Edit", "echo hello", ""),
+		"different command": ContentHash(EventPreToolUse, "Bash", "echo goodbye", ""),
 	}
 	for name, h := range cases {
 		if h == base {
@@ -29,7 +29,7 @@ func TestContentHash_ChangesOnRealEdit(t *testing.T) {
 }
 
 func TestContentHash_Prefix(t *testing.T) {
-	h := ContentHash(EventPreToolUse, "Bash", "echo hi")
+	h := ContentHash(EventPreToolUse, "Bash", "echo hi", "")
 	if len(h) < 7 || h[:7] != "sha256:" {
 		t.Errorf("ContentHash must be prefixed sha256:, got %q", h)
 	}

@@ -40,8 +40,12 @@ func normalizeCommand(command string) string {
 // function. The matcher is taken as written (not normalized) — a matcher
 // edit is a real semantic change to what the hook fires on, and must
 // invalidate trust.
-func ContentHash(event EventName, matcher, command string) string {
-	sum := sha256.Sum256([]byte(string(event) + "\x00" + matcher + "\x00" + normalizeCommand(command)))
+func ContentHash(event EventName, matcher, command, commandWindows string) string {
+	// Fold in BOTH OS command variants: EffectiveCommand runs CommandWindows
+	// on Windows, so a hash over only Command let an attacker ship a benign
+	// reviewed Command (matching the trusted hash) plus a malicious
+	// CommandWindows that actually executes — a trust-gate bypass (review U9).
+	sum := sha256.Sum256([]byte(string(event) + "\x00" + matcher + "\x00" + normalizeCommand(command) + "\x00" + normalizeCommand(commandWindows)))
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
