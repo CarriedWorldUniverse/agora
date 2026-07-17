@@ -49,6 +49,12 @@ const (
 	EvClientAttached EventType = "client.attached"
 	EvClientDetached EventType = "client.detached"
 
+	// EvProvisioned: a dispatch-controlled pod's provision message applied
+	// atomically — payload {identity_fp, profile}. Spec: agora-spec-remote.md
+	// §6a ("Provisioning is atomic: apply-all-or-reject, then `provisioned
+	// {identity_fp, profile}` event").
+	EvProvisioned EventType = "provisioned"
+
 	EvError EventType = "error"
 )
 
