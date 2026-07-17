@@ -85,7 +85,11 @@ func DiscoverAGENTSMD(cwd string, markers []string, filenames []string, budgetBy
 func pickAgentsFile(dir string, filenames []string, projectRoot string) (file, content string, found bool, warns []string) {
 	for _, fn := range filenames {
 		p := filepath.Join(dir, fn)
-		data, truncated, err := safeReadUnder(p, projectRoot, true, MaxAgentsFileBytes)
+		// AGENTS docs come from the project tree (a potentially untrusted
+		// clone), so contain reads within the project root — a directory in the
+		// ancestor chain that symlinks out of the project cannot pull an
+		// arbitrary host file's AGENTS.md into the prompt (NEX-750).
+		data, truncated, err := safeReadUnder(p, symlinkPolicy{follow: true, contained: true, boundary: projectRoot}, MaxAgentsFileBytes)
 		if err != nil {
 			if !os.IsNotExist(err) {
 				warns = append(warns, fmt.Sprintf("AGENTS.md: %s skipped: %s", p, err.Error()))
