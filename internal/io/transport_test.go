@@ -16,6 +16,25 @@ import (
 	"github.com/CarriedWorldUniverse/agora/contracts"
 )
 
+// shortSockPath returns a unix-socket path short enough for AF_UNIX's sun_path
+// limit (~104 bytes on macOS/BSD). t.TempDir() on macOS lives under
+// /var/folders/... which overflows that limit ("bind: invalid argument"), so on
+// macOS we anchor the socket under /tmp (-> /private/tmp, short). Linux/Windows
+// temp paths are already short enough.
+func shortSockPath(t *testing.T, name string) string {
+	t.Helper()
+	base := ""
+	if runtime.GOOS == "darwin" {
+		base = "/tmp"
+	}
+	dir, err := os.MkdirTemp(base, "agio")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, name)
+}
+
 // sessionMap is the trivial SessionLookup a real daemon (U18) generalizes
 // into a full thread registry; tests only need "one thread_id -> one
 // Session".
@@ -118,7 +137,7 @@ func (c *dialClient) recvEvent(t *testing.T, d time.Duration) contracts.Event {
 // backlog. This is the same Session mechanics session_test.go exercises
 // in-process, proved here over the wire framing too.
 func TestServeUnix_MultiAttachOverRealSocket(t *testing.T) {
-	sockPath := filepath.Join(t.TempDir(), "agora.sock")
+	sockPath := shortSockPath(t, "agora.sock")
 	ln, err := ListenUnix(sockPath)
 	if err != nil {
 		if runtime.GOOS == "windows" {
@@ -202,7 +221,7 @@ func TestListenUnix_SocketPermissionHardened(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix socket permission bits aren't meaningful on Windows")
 	}
-	sockPath := filepath.Join(t.TempDir(), "agora-perm.sock")
+	sockPath := shortSockPath(t, "agora-perm.sock")
 	ln, err := ListenUnix(sockPath)
 	if err != nil {
 		t.Fatalf("ListenUnix: %v", err)
@@ -222,7 +241,7 @@ func TestListenUnix_SocketPermissionHardened(t *testing.T) {
 // maxClientFrameBytes makes readClient/ServeConn return an error instead of
 // growing memory without bound (FIX 2).
 func TestServeConn_OversizedFrameRejected(t *testing.T) {
-	sockPath := filepath.Join(t.TempDir(), "agora3.sock")
+	sockPath := shortSockPath(t, "agora3.sock")
 	ln, err := ListenUnix(sockPath)
 	if err != nil {
 		if runtime.GOOS == "windows" {
@@ -308,7 +327,7 @@ func TestFrameCodec_NormalFrameRoundTrips(t *testing.T) {
 // TestServeConn_FirstFrameMustBeAttach: a connection that sends an Input
 // before ever attaching is rejected (§2 framing invariant).
 func TestServeConn_FirstFrameMustBeAttach(t *testing.T) {
-	sockPath := filepath.Join(t.TempDir(), "agora2.sock")
+	sockPath := shortSockPath(t, "agora2.sock")
 	ln, err := ListenUnix(sockPath)
 	if err != nil {
 		if runtime.GOOS == "windows" {
