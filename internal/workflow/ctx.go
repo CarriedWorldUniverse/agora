@@ -137,12 +137,15 @@ func (c *ctxObj) agentBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args
 		return nil, fmt.Errorf("workflow: hash agent call: %w", err)
 	}
 
-	if cached, ok := rs.tryReplay(branch.path, localSeq, EntryAgent, hash); ok {
+	// Finding 6: a cached ERROR entry is treated as a cache MISS, never
+	// replayed as a permanent failure — a transient invoker error (rate
+	// limit, blip) must not become a terminal cached failure that
+	// suppresses a live retry on resume (the most common resume: retry
+	// after failure). Only a SUCCESSFUL prior result (ResultErr=="") is a
+	// real cache hit here.
+	if cached, ok := rs.tryReplay(branch.path, localSeq, EntryAgent, hash); ok && cached.ResultErr == "" {
 		if err := rs.record(cached); err != nil {
 			return nil, err
-		}
-		if cached.ResultErr != "" {
-			return nil, errors.New(cached.ResultErr)
 		}
 		goVal, err := jsonRawToGo(cached.Result)
 		if err != nil {
@@ -157,8 +160,12 @@ func (c *ctxObj) agentBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args
 	if err := rs.beginAgentCall(); err != nil {
 		return nil, err
 	}
-	result, invokeErr := rs.invoker.InvokeAgent(rs.goCtx, prompt, opts)
-	rs.endAgentCall()
+	// Finding 7: recover a panic in the invoker into a stage error instead
+	// of letting it crash the whole process as an unrecovered goroutine
+	// panic; rs.endAgentCall is deferred (not called unconditionally AFTER
+	// InvokeAgent) so the concurrency-cap semaphore slot is released even
+	// on panic/early-return, never leaking it.
+	result, invokeErr := invokeAgentSafely(rs, prompt, opts)
 
 	if invokeErr != nil {
 		if err := rs.record(Entry{Branch: branch.path, LocalSeq: localSeq, Kind: EntryAgent, Hash: hash, ResultErr: invokeErr.Error()}); err != nil {
@@ -170,21 +177,38 @@ func (c *ctxObj) agentBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args
 	if result.Question != nil {
 		// Bubbled question (spec §2: "Questions raised by agents inside a
 		// stage bubble to the engine first ... else the run parks"). v1
-		// scope note (see the build report): this does not inject the
-		// eventual answer back into the child as a real continuation — a
-		// resume after it's answered re-invokes the agent fresh rather
-		// than continuing the parked child. That's a documented gap, not
-		// an oversight; see subagent.Manager.Continue for the primitive a
-		// future unit would wire this through.
+		// has no primitive to re-invoke/continue the underlying agent WITH
+		// the answer as a real subagent continuation (subagent.Manager.
+		// Continue is a future unit's wiring), so — per finding 10's
+		// minimum bar — askOrApprove either parks (askErr is *errParked;
+		// propagated below, unchanged from before) or, once a human HAS
+		// answered, returns a real ans here. Previously that answer was
+		// discarded (`_ = ans`) and the call journaled with NO Result,
+		// which permanently cached None on every later replay — silent,
+		// unrecoverable data loss for the calling script. Now the answer
+		// itself becomes ctx.agent()'s result, and is journaled as a real
+		// EntryAgent Result so every future replay returns that SAME
+		// answer, never a silently-cached None.
 		ans, askErr := rs.askOrApprove(EntryQuestion, branch.path, localSeq, result.Question.Args, contracts.QuestionFromAgent)
 		if askErr != nil {
 			return nil, askErr
 		}
-		_ = ans
-		if err := rs.record(Entry{Branch: branch.path, LocalSeq: localSeq, Kind: EntryAgent, Hash: hash}); err != nil {
+		ansVal, err := answerToStarlark(ans)
+		if err != nil {
 			return nil, err
 		}
-		return starlark.None, nil
+		ansGo, err := toGo(ansVal)
+		if err != nil {
+			return nil, err
+		}
+		resultJSON, err := canonicalJSON(ansGo)
+		if err != nil {
+			return nil, err
+		}
+		if err := rs.record(Entry{Branch: branch.path, LocalSeq: localSeq, Kind: EntryAgent, Hash: hash, Result: resultJSON}); err != nil {
+			return nil, err
+		}
+		return ansVal, nil
 	}
 
 	if err := rs.record(Entry{Branch: branch.path, LocalSeq: localSeq, Kind: EntryAgent, Hash: hash, Result: result.Output}); err != nil {
@@ -198,6 +222,20 @@ func (c *ctxObj) agentBuiltin(thread *starlark.Thread, _ *starlark.Builtin, args
 		return nil, fmt.Errorf("workflow: decode agent result: %w", err)
 	}
 	return toStarlark(goVal)
+}
+
+// invokeAgentSafely calls rs.invoker.InvokeAgent, converting a panic into an
+// ordinary error (finding 7) and always releasing the concurrency-cap
+// semaphore slot rs.beginAgentCall acquired (via defer, so a panic can never
+// leak it).
+func invokeAgentSafely(rs *runState, prompt string, opts AgentCallOpts) (result AgentCallResult, err error) {
+	defer rs.endAgentCall()
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("workflow: agent invoker panicked: %v", r)
+		}
+	}()
+	return rs.invoker.InvokeAgent(rs.goCtx, prompt, opts)
 }
 
 // parallelBuiltin implements ctx.parallel(thunks) — spec §2: "run
@@ -224,12 +262,31 @@ func (c *ctxObj) parallelBuiltin(thread *starlark.Thread, _ *starlark.Builtin, a
 	results := make([]starlark.Value, len(items))
 	errs := make([]error, len(items))
 	var wg sync.WaitGroup
+	var spawnErr error
 	for i, thunk := range items {
+		// Finding 3: run-lifetime branch-spawn cap, checked BEFORE every
+		// `go func` (never a blocking semaphore held across await-children,
+		// which would deadlock on nested fan-out). Once exceeded, stop
+		// spawning further branches (already-spawned siblings still run to
+		// completion below) and fail the whole call closed.
+		if err := c.rs.beginBranchSpawn(); err != nil {
+			spawnErr = err
+			break
+		}
 		thunk.Freeze()
 		wg.Add(1)
 		go func(i int, thunk starlark.Value) {
 			defer wg.Done()
-			childThread := &starlark.Thread{Name: fmt.Sprintf("wf-parallel:%s.%d", prefix, i)}
+			// Finding 7: recover a panic in this branch into a stage error
+			// instead of an unrecovered goroutine panic, which would crash
+			// the whole process (every concurrent run, not just this one).
+			defer func() {
+				if r := recover(); r != nil {
+					errs[i] = fmt.Errorf("workflow: parallel branch %d panicked: %v", i, r)
+				}
+			}()
+			childThread, stop := c.rs.newGuardedThread(fmt.Sprintf("wf-parallel:%s.%d", prefix, i))
+			defer stop()
 			childThread.SetLocal(branchLocalKey, &branchState{path: fmt.Sprintf("%s.%d", prefix, i)})
 			v, err := starlark.Call(childThread, thunk, nil, nil)
 			results[i] = v
@@ -237,6 +294,9 @@ func (c *ctxObj) parallelBuiltin(thread *starlark.Thread, _ *starlark.Builtin, a
 		}(i, thunk)
 	}
 	wg.Wait()
+	if spawnErr != nil {
+		return nil, spawnErr
+	}
 
 	for _, err := range errs {
 		var pe *errParked
@@ -301,11 +361,29 @@ func (c *ctxObj) pipelineBuiltin(thread *starlark.Thread, _ *starlark.Builtin, a
 	results := make([]starlark.Value, len(items))
 	parkedErrs := make([]error, len(items))
 	var wg sync.WaitGroup
+	var spawnErr error
 	for i, original := range items {
+		// Finding 3: same run-lifetime branch-spawn cap as parallelBuiltin
+		// — checked before every `go func`, never a blocking semaphore.
+		if err := c.rs.beginBranchSpawn(); err != nil {
+			spawnErr = err
+			break
+		}
 		wg.Add(1)
 		go func(i int, original starlark.Value) {
 			defer wg.Done()
-			childThread := &starlark.Thread{Name: fmt.Sprintf("wf-pipeline:%s.%d", prefix, i)}
+			// Finding 7: recover a panic in this item's pipeline into a
+			// dropped-to-None result (spec's own "a stage error drops that
+			// item to None" contract — a panic is just the most severe
+			// stage error) instead of an unrecovered goroutine panic,
+			// which would crash the whole process.
+			defer func() {
+				if r := recover(); r != nil {
+					results[i] = starlark.None
+				}
+			}()
+			childThread, stop := c.rs.newGuardedThread(fmt.Sprintf("wf-pipeline:%s.%d", prefix, i))
+			defer stop()
 			childThread.SetLocal(branchLocalKey, &branchState{path: fmt.Sprintf("%s.%d", prefix, i)})
 			idx := starlark.MakeInt(i)
 			prev := original
@@ -328,6 +406,9 @@ func (c *ctxObj) pipelineBuiltin(thread *starlark.Thread, _ *starlark.Builtin, a
 		}(i, original)
 	}
 	wg.Wait()
+	if spawnErr != nil {
+		return nil, spawnErr
+	}
 
 	for _, err := range parkedErrs {
 		if err != nil {

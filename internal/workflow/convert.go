@@ -24,6 +24,15 @@ func jsonRawToGo(raw json.RawMessage) (any, error) {
 	return v, nil
 }
 
+// maxConvertDepth bounds toGo's native-Go recursion over a script-controlled
+// starlark.Value (review finding: "unbounded native-Go recursion -> process
+// crash" — a self-referencing-via-growth value like `x=[]; for i in
+// range(2_000_000): x=[x]` drives millions of native Go call frames, which
+// panic/recover CANNOT catch: a real stack overflow is fatal to the whole
+// process, not just this run). 10_000 is deep enough for any legitimate
+// script value while staying far below the actual crash threshold.
+const maxConvertDepth = 10_000
+
 // toGo converts a starlark.Value into a plain Go value built only from
 // nil/bool/int64/float64/string/[]any/map[string]any — the JSON-shaped
 // universe canon.go and encoding/json both understand. Dict key order is
@@ -31,6 +40,13 @@ func jsonRawToGo(raw json.RawMessage) (any, error) {
 // for determinism, canonicalJSON re-sorts explicitly (ground rule: sort
 // keys, never trust map iteration order).
 func toGo(v starlark.Value) (any, error) {
+	return toGoDepth(v, 0)
+}
+
+func toGoDepth(v starlark.Value, depth int) (any, error) {
+	if depth > maxConvertDepth {
+		return nil, fmt.Errorf("%w: starlark value nesting exceeds %d", ErrMaxDepthExceeded, maxConvertDepth)
+	}
 	switch t := v.(type) {
 	case starlark.NoneType, nil:
 		return nil, nil
@@ -49,7 +65,7 @@ func toGo(v starlark.Value) (any, error) {
 	case *starlark.List:
 		out := make([]any, 0, t.Len())
 		for e := range t.Elements() {
-			ev, err := toGo(e)
+			ev, err := toGoDepth(e, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -59,7 +75,7 @@ func toGo(v starlark.Value) (any, error) {
 	case starlark.Tuple:
 		out := make([]any, 0, len(t))
 		for e := range t.Elements() {
-			ev, err := toGo(e)
+			ev, err := toGoDepth(e, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -73,7 +89,7 @@ func toGo(v starlark.Value) (any, error) {
 			if !ok {
 				return nil, fmt.Errorf("workflow: dict key %s is not a string", item[0].String())
 			}
-			vv, err := toGo(item[1])
+			vv, err := toGoDepth(item[1], depth+1)
 			if err != nil {
 				return nil, err
 			}

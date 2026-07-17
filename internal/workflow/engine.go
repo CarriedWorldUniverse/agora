@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
+	"github.com/CarriedWorldUniverse/agora/internal/planning"
 	"go.starlark.net/starlark"
 )
 
@@ -80,12 +81,59 @@ type RunOptions struct {
 	MaxConcurrent    int
 	LifetimeAgentCap int
 	PerCallItemCap   int
+	// LifetimeBranchCap bounds the TOTAL number of ctx.parallel/ctx.pipeline
+	// goroutines a run may spawn across its whole lifetime, at any nesting
+	// depth — review finding: "nested parallel/pipeline goroutine
+	// explosion." PerCallItemCap alone only bounds a single call's width; a
+	// script that recursively fans out (each leaf calling ctx.parallel
+	// again) can still spawn goroutines exponentially in depth before any
+	// one call's item count or the agent lifetime cap is ever hit. Default
+	// defaultLifetimeBranchCap if unset/non-positive.
+	LifetimeBranchCap int
+	// MaxSteps bounds the number of starlark abstract-computation steps any
+	// ONE starlark.Thread this run creates may execute before it is
+	// force-canceled — review finding: "no starlark step budget /
+	// uncancellable infinite loop." Applies to loadThread, mainThread, and
+	// every ctx.parallel/ctx.pipeline child thread. Default defaultMaxSteps
+	// if unset/zero.
+	MaxSteps uint64
 }
 
 const (
-	defaultLifetimeAgentCap = 1000
-	defaultPerCallItemCap   = 4096
+	defaultLifetimeAgentCap  = 1000
+	defaultPerCallItemCap    = 4096
+	defaultLifetimeBranchCap = 10_000
+	// defaultMaxSteps: a sane backstop against a runaway loop
+	// (`while True: pass`) that doesn't break any legitimate script — 1e9
+	// abstract computation steps is orders of magnitude more than any
+	// workflow script's control flow should need.
+	defaultMaxSteps uint64 = 1_000_000_000
 )
+
+// newGuardedThread builds a starlark.Thread with this run's step budget
+// (finding 1) and wires goCtx's cancellation into it: a watcher goroutine
+// calls thread.Cancel as soon as goCtx is Done, which starlark's
+// interpreter observes on its next step (thread.Cancel/SetMaxExecutionSteps
+// are both documented goroutine-safe). The caller MUST invoke the returned
+// stop func once the thread is done running (normally via defer) to release
+// the watcher goroutine — every starlark.Thread this package creates goes
+// through here, so a run never has an uncancellable, unbounded thread.
+func newGuardedThread(goCtx context.Context, name string, maxSteps uint64) (*starlark.Thread, func()) {
+	if maxSteps == 0 {
+		maxSteps = defaultMaxSteps
+	}
+	th := &starlark.Thread{Name: name}
+	th.SetMaxExecutionSteps(maxSteps)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-goCtx.Done():
+			th.Cancel("workflow: context canceled: " + goCtx.Err().Error())
+		case <-done:
+		}
+	}()
+	return th, func() { close(done) }
+}
 
 // defaultMaxConcurrent implements spec §3: "min(16, cores-2)".
 func defaultMaxConcurrent() int {
@@ -117,10 +165,15 @@ func currentBranch(thread *starlark.Thread) *branchState {
 	if b, ok := thread.Local(branchLocalKey).(*branchState); ok && b != nil {
 		return b
 	}
-	// Defensive fallback: Run/parallel/pipeline always seed this before
-	// calling into script code, so this only fires if a builtin is somehow
-	// invoked from a Thread the engine didn't set up.
-	return &branchState{path: ""}
+	// Unreachable in normal operation: Run/parallel/pipeline always seed
+	// this before calling into script code. Review finding: a silent
+	// &branchState{path:""} fallback here would let multiple concurrent
+	// callers collide at the SAME (Branch="", LocalSeq=0) journal key,
+	// silently corrupting the journal — a loud panic is strictly safer
+	// than that silent corruption, since this can only mean an internal
+	// invariant was violated (a builtin invoked from a starlark.Thread the
+	// engine itself never set up).
+	panic("workflow: internal invariant violated: currentBranch called on a starlark.Thread with no branchState — every Thread this package creates must SetLocal(branchLocalKey, ...) before running script code")
 }
 
 // errParked is the sentinel a ctx.question/ctx.approval call (directly, or
@@ -152,16 +205,57 @@ type runState struct {
 	identity  string
 	meta      *Meta
 
-	perCallItemCap int
-	lifetimeCap    int
-	sem            chan struct{}
+	perCallItemCap    int
+	lifetimeCap       int
+	lifetimeBranchCap int
+	maxSteps          uint64
+	sem               chan struct{}
 
 	oldIndex map[key]Entry
 
-	mu            sync.Mutex
-	out           []Entry
-	nextGlobalSeq int64
-	agentCount    int64
+	mu             sync.Mutex
+	out            []Entry
+	nextGlobalSeq  int64
+	agentCount     int64
+	branchSpawnCnt int64
+
+	// saveMu serializes record()'s ENTIRE snapshot+persist sequence — held
+	// across both the rs.mu-guarded append/snapshot AND the journal.Save
+	// call itself. Finding 11 ("concurrent FileJournalStore.Save races"):
+	// without this, two goroutines' record() calls could snapshot rs.out
+	// under rs.mu, release it, and then call journal.Save in the OPPOSITE
+	// order from the order they snapshotted — an older/shorter snapshot
+	// landing on disk AFTER a newer/longer one, silently losing whatever
+	// entry only the newer snapshot had. Holding saveMu across the whole
+	// sequence makes "snapshot" and "Save" one atomic unit per run, so
+	// Save calls for this run are strictly ordered by recency and can
+	// never race each other.
+	saveMu sync.Mutex
+}
+
+// newGuardedThread is rs's convenience wrapper around the package-level
+// newGuardedThread — every ctx.parallel/ctx.pipeline child thread goes
+// through here so it inherits this run's step budget and cancellation
+// (finding 1).
+func (rs *runState) newGuardedThread(name string) (*starlark.Thread, func()) {
+	return newGuardedThread(rs.goCtx, name, rs.maxSteps)
+}
+
+// beginBranchSpawn enforces the run-lifetime branch-goroutine cap (finding
+// 3): called BEFORE every `go func` in parallel/pipeline, never as a
+// blocking semaphore (a blocking semaphore a parent holds while awaiting
+// its children would deadlock on nested fan-out) — just a monotonic,
+// mutex-guarded counter that fails closed once the run-wide total is
+// exceeded.
+func (rs *runState) beginBranchSpawn() error {
+	rs.mu.Lock()
+	rs.branchSpawnCnt++
+	n := rs.branchSpawnCnt
+	rs.mu.Unlock()
+	if n > int64(rs.lifetimeBranchCap) {
+		return fmt.Errorf("%w: %d > %d", ErrLifetimeBranchCapExceeded, n, rs.lifetimeBranchCap)
+	}
+	return nil
 }
 
 // tryReplay looks up (branch, localSeq, kind) in the prior journal;
@@ -183,6 +277,9 @@ func (rs *runState) tryReplay(branch string, localSeq int64, kind EntryKind, has
 // persists the whole journal so far — see journal.go's FileJournalStore
 // doc comment for the incremental-Save tradeoff this accepts.
 func (rs *runState) record(e Entry) error {
+	rs.saveMu.Lock()
+	defer rs.saveMu.Unlock()
+
 	rs.mu.Lock()
 	e.Seq = rs.nextGlobalSeq
 	rs.nextGlobalSeq++
@@ -234,35 +331,37 @@ func (rs *runState) askOrApprove(kind EntryKind, branch string, localSeq int64, 
 	}
 
 	if cached, ok := rs.tryReplay(branch, localSeq, kind, hash); ok {
-		if len(cached.Answer) > 0 {
-			var ans contracts.Answer
-			if err := json.Unmarshal(cached.Answer, &ans); err != nil {
-				return contracts.Answer{}, fmt.Errorf("workflow: decode cached answer: %w", err)
-			}
-			if err := rs.record(cached); err != nil {
-				return contracts.Answer{}, err
-			}
-			return ans, nil
+		if cached.QuestionID == "" {
+			// Finding 8: this position previously tried to raise a
+			// question but lost the race for the thread's single
+			// blocking-question slot (planning.ErrAlreadyParked — a
+			// sibling ctx.parallel/pipeline branch got there first) — no
+			// question id was ever minted, so there is nothing to look up.
+			// Retry live now: the sibling that DID park may have been
+			// answered (and un-parked the thread) since.
+			return rs.raiseNow(kind, branch, localSeq, hash, args, source)
 		}
 
-		// A still-parked marker from a previous attempt at this exact
-		// position: check whether it has since been answered (spec §2's
-		// "a daemon restart mid-question replays to the unanswered call
-		// and re-raises it" fallback — this is the branch that lets a
-		// resume pick up a real answer instead of just re-raising).
+		// Finding 4: an answered/still-parked cached entry is ALWAYS
+		// re-derived from the authoritative planning store, never trusted
+		// from the journal's own Answer bytes — cached.Answer is an audit
+		// copy only. (The replay key (branch,localSeq,kind,hash) is
+		// offline-computable and FileJournalStore writes 0644 with no
+		// integrity binding, so a tampered journal.jsonl could otherwise
+		// forge cached.Answer bytes and bypass the human-approval gate.)
 		ans, answered, err := rs.questions.lookupAnswer(rs.threadID, cached.QuestionID)
 		if err != nil {
 			return contracts.Answer{}, err
 		}
 		if answered {
-			answered := cached
+			answeredEntry := cached
 			ab, err := json.Marshal(ans)
 			if err != nil {
 				return contracts.Answer{}, err
 			}
-			answered.Answer = ab
-			answered.By = ans.By
-			if err := rs.record(answered); err != nil {
+			answeredEntry.Answer = ab
+			answeredEntry.By = ans.By
+			if err := rs.record(answeredEntry); err != nil {
 				return contracts.Answer{}, err
 			}
 			return ans, nil
@@ -279,15 +378,38 @@ func (rs *runState) askOrApprove(kind EntryKind, branch string, localSeq int64, 
 		return contracts.Answer{}, &errParked{Kind: kind, QuestionID: cached.QuestionID, Args: args}
 	}
 
-	// Never asked before at this position: raise it now (always parks —
-	// askContext resolves to DispositionPark unconditionally).
-	outcome, err := rs.questions.Ask(rs.threadID, rs.identity, args, source, rs.clock.Now())
-	if err != nil {
-		return contracts.Answer{}, fmt.Errorf("workflow: ask: %w", err)
-	}
+	// Never asked before at this position: raise it now.
+	return rs.raiseNow(kind, branch, localSeq, hash, args, source)
+}
+
+// raiseNow raises args as a brand-new question against the planning store —
+// either genuinely never asked before at this position, or a finding-8
+// retry of a position that previously lost the single-parked-slot race.
+// Always parks (askContext resolves to DispositionPark unconditionally),
+// UNLESS the thread is already parked on a DIFFERENT question
+// (planning.ErrAlreadyParked: this thread allows only one blocking question
+// at a time), in which case a "pending" marker (QuestionID=="") is
+// journaled instead of letting the question vanish with no trace (finding
+// 8: previously this returned a plain error that ctx.parallel's error scan
+// didn't recognize as a park, so the losing sibling's question was silently
+// dropped — the thunk failed to None with zero journal trace).
+func (rs *runState) raiseNow(kind EntryKind, branch string, localSeq int64, hash string, args contracts.QuestionArgs, source contracts.QuestionSource) (contracts.Answer, error) {
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
 		return contracts.Answer{}, err
+	}
+
+	outcome, err := rs.questions.Ask(rs.threadID, rs.identity, args, source, rs.clock.Now())
+	if err != nil {
+		if errors.Is(err, planning.ErrAlreadyParked) {
+			if err := rs.record(Entry{
+				Branch: branch, LocalSeq: localSeq, Kind: kind, Hash: hash, Args: argsJSON,
+			}); err != nil {
+				return contracts.Answer{}, err
+			}
+			return contracts.Answer{}, &errParked{Kind: kind, QuestionID: "", Args: args}
+		}
+		return contracts.Answer{}, fmt.Errorf("workflow: ask: %w", err)
 	}
 	if err := rs.record(Entry{
 		Branch: branch, LocalSeq: localSeq, Kind: kind, Hash: hash,
@@ -331,6 +453,12 @@ func Run(ctx context.Context, opts RunOptions) (Outcome, error) {
 	if opts.PerCallItemCap <= 0 {
 		opts.PerCallItemCap = defaultPerCallItemCap
 	}
+	if opts.LifetimeBranchCap <= 0 {
+		opts.LifetimeBranchCap = defaultLifetimeBranchCap
+	}
+	if opts.MaxSteps == 0 {
+		opts.MaxSteps = defaultMaxSteps
+	}
 	if opts.Journal == nil {
 		opts.Journal = NewMemJournalStore()
 	}
@@ -343,11 +471,15 @@ func Run(ctx context.Context, opts RunOptions) (Outcome, error) {
 		return Outcome{}, fmt.Errorf("workflow: read prior journal: %w", err)
 	}
 
-	loadThread := &starlark.Thread{Name: "wf-load:" + opts.RunID}
+	// Finding 1: every starlark.Thread this run creates gets a step budget
+	// and observes ctx cancellation — loadThread included, since script
+	// TOP-LEVEL code (not just main()) can in principle loop too.
+	loadThread, stopLoad := newGuardedThread(ctx, "wf-load:"+opts.RunID, opts.MaxSteps)
 	predeclared := starlark.StringDict{
 		"workflow_meta": starlark.NewBuiltin("workflow_meta", workflowMetaBuiltin),
 	}
 	globals, err := starlark.ExecFile(loadThread, opts.Filename, opts.Script, predeclared)
+	stopLoad()
 	if err != nil {
 		return Outcome{}, fmt.Errorf("workflow: exec script: %w", err)
 	}
@@ -374,28 +506,53 @@ func Run(ctx context.Context, opts RunOptions) (Outcome, error) {
 	argsVal.Freeze()
 
 	rs := &runState{
-		goCtx:          ctx,
-		clock:          opts.Clock,
-		invoker:        opts.Invoker,
-		questions:      opts.Questions,
-		journal:        opts.Journal,
-		runID:          opts.RunID,
-		threadID:       opts.ThreadID,
-		identity:       opts.Identity,
-		meta:           meta,
-		perCallItemCap: opts.PerCallItemCap,
-		lifetimeCap:    opts.LifetimeAgentCap,
-		sem:            make(chan struct{}, opts.MaxConcurrent),
-		oldIndex:       indexEntries(old),
+		goCtx:             ctx,
+		clock:             opts.Clock,
+		invoker:           opts.Invoker,
+		questions:         opts.Questions,
+		journal:           opts.Journal,
+		runID:             opts.RunID,
+		threadID:          opts.ThreadID,
+		identity:          opts.Identity,
+		meta:              meta,
+		perCallItemCap:    opts.PerCallItemCap,
+		lifetimeCap:       opts.LifetimeAgentCap,
+		lifetimeBranchCap: opts.LifetimeBranchCap,
+		maxSteps:          opts.MaxSteps,
+		sem:               make(chan struct{}, opts.MaxConcurrent),
+		oldIndex:          indexEntries(old),
 	}
 
-	nowVal := starlark.String(opts.Clock.Now().UTC().Format(time.RFC3339Nano))
+	// Finding 9: ctx.now must be the SAME frozen instant across every
+	// resume of this run (spec §2: "ctx.now ... the only clock" —
+	// otherwise a resume that reconstructs a different `now` busts every
+	// ctx.now-dependent hash). Reuse the instant a prior attempt already
+	// persisted (EntryRunStart), if any; a fresh run mints one now from
+	// opts.Clock and persists it as the very first thing this attempt
+	// records, so every later Save (including the final one below) carries
+	// it forward regardless of what Clock a FUTURE resume is given.
+	var frozenNowStr string
+	for _, e := range old {
+		if e.Kind == EntryRunStart {
+			frozenNowStr = e.Message
+			break
+		}
+	}
+	if frozenNowStr == "" {
+		frozenNowStr = opts.Clock.Now().UTC().Format(time.RFC3339Nano)
+	}
+	if err := rs.record(Entry{Branch: "", LocalSeq: 0, Kind: EntryRunStart, Message: frozenNowStr}); err != nil {
+		return Outcome{}, fmt.Errorf("workflow: persist run start: %w", err)
+	}
+
+	nowVal := starlark.String(frozenNowStr)
 	cObj := &ctxObj{rs: rs, args: argsVal, now: nowVal, budget: &budgetObj{}}
 
-	mainThread := &starlark.Thread{Name: "wf-main:" + opts.RunID}
+	mainThread, stopMain := rs.newGuardedThread("wf-main:" + opts.RunID)
 	mainThread.SetLocal(branchLocalKey, &branchState{path: ""})
 
 	result, callErr := starlark.Call(mainThread, mainFn, starlark.Tuple{cObj, argsVal}, nil)
+	stopMain()
 
 	rs.mu.Lock()
 	entries := make([]Entry, len(rs.out))

@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"sync"
+	"sync/atomic"
 )
 
 // EntryKind tags one journal.jsonl line's shape.
@@ -26,6 +28,12 @@ const (
 	EntryLog EntryKind = "log"
 	// EntryPhase: a ctx.phase()/phase= progress-grouping event.
 	EntryPhase EntryKind = "phase"
+	// EntryRunStart: the run's frozen ctx.now instant (Message holds the
+	// RFC3339Nano string), recorded once per run at Branch="",LocalSeq=0 —
+	// review finding: "frozen instant not persisted for resume." Kept
+	// distinct from every other kind so it never collides with a script's
+	// own (Branch, LocalSeq) call positions.
+	EntryRunStart EntryKind = "run_start"
 )
 
 // Entry is one journal.jsonl line. Branch/LocalSeq together are the cache
@@ -137,6 +145,24 @@ func (m *MemJournalStore) Save(runID string, entries []Entry) error {
 // append is a future perf refinement, not a correctness requirement here.
 type FileJournalStore struct {
 	dir string
+
+	// mu serializes the whole write+rename (review finding: "concurrent
+	// FileJournalStore.Save races") — combined with the unique tmp
+	// filename below, this removes the shared-".tmp"-file race (two
+	// concurrent Saves opening the SAME tmp path, one's O_TRUNC clobbering
+	// the other's in-flight write, then a Rename failing ENOENT, which
+	// propagated as an error that got swallowed as None for an agent call
+	// that actually completed). This alone does NOT protect against a
+	// stale snapshot overwriting a newer one written first — that half of
+	// the finding is fixed at the source instead: runState.record (engine.
+	// go) now holds its own mutex across the ENTIRE snapshot+Save call, so
+	// two record() calls for the same run can never race each other's
+	// Save at all (Save calls for one run are strictly ordered by
+	// snapshot recency). This store-level mu still matters for any OTHER
+	// concurrent caller of the same runID outside a single runState (e.g.
+	// two independent Run() invocations racing the same runID, or a
+	// future non-workflow caller of JournalStore directly).
+	mu sync.Mutex
 }
 
 // NewFileJournalStore builds a FileJournalStore rooted at dir (the parent
@@ -147,11 +173,32 @@ func NewFileJournalStore(dir string) *FileJournalStore {
 
 var _ JournalStore = (*FileJournalStore)(nil)
 
+// runIDPattern is the single-path-component allowlist a runID must match —
+// review finding: "FileJournalStore runID path traversal." runID is joined
+// directly into a filesystem path (journalPath); without this, a runID of
+// "../../etc" or an absolute path would escape f.dir entirely (no caller
+// does this today, but the spec plans a user-facing `--resume <run_id>`).
+var runIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+func validateRunID(runID string) error {
+	if !runIDPattern.MatchString(runID) {
+		return fmt.Errorf("workflow: invalid run id %q: must match %s (single path component, no slashes/dots)", runID, runIDPattern.String())
+	}
+	return nil
+}
+
 func (f *FileJournalStore) journalPath(runID string) string {
 	return filepath.Join(f.dir, runID, "journal.jsonl")
 }
 
+// tmpSeq gives every FileJournalStore.Save call its own tmp filename (review
+// finding 11's other half — see the struct doc comment above).
+var tmpSeq int64
+
 func (f *FileJournalStore) Read(runID string) ([]Entry, error) {
+	if err := validateRunID(runID); err != nil {
+		return nil, err
+	}
 	path := f.journalPath(runID)
 	file, err := os.Open(path)
 	if os.IsNotExist(err) {
@@ -183,12 +230,21 @@ func (f *FileJournalStore) Read(runID string) ([]Entry, error) {
 }
 
 func (f *FileJournalStore) Save(runID string, entries []Entry) error {
+	if err := validateRunID(runID); err != nil {
+		return err
+	}
+
+	// Serialize the whole write+rename per store (see the struct doc
+	// comment).
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	dir := filepath.Join(f.dir, runID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("workflow: mkdir run dir %s: %w", dir, err)
 	}
 	path := f.journalPath(runID)
-	tmp := path + ".tmp"
+	tmp := fmt.Sprintf("%s.tmp.%d", path, atomic.AddInt64(&tmpSeq, 1))
 	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return fmt.Errorf("workflow: create journal tmp %s: %w", tmp, err)

@@ -24,11 +24,26 @@ func canonicalJSON(v any) ([]byte, error) {
 	return json.Marshal(norm)
 }
 
+// maxCanonicalizeDepth bounds canonicalize's native-Go recursion over a
+// script-controlled value — the same "unbounded native-Go recursion ->
+// process crash" backstop as convert.go's maxConvertDepth (a deeply
+// self-nesting value passed as an agent schema/args or main()'s return
+// value reaches here too). Kept at the same 10_000 bound for one shared,
+// easy-to-reason-about story across both native-recursion entry points.
+const maxCanonicalizeDepth = 10_000
+
 // canonicalize walks v, turning any map[string]any into an
 // orderedObject (a slice of key/value pairs sorted by key) that
 // orderedObject.MarshalJSON then emits in that fixed order — sidestepping
 // any reliance on encoding/json's incidental map-sorting behavior.
 func canonicalize(v any) (any, error) {
+	return canonicalizeDepth(v, 0)
+}
+
+func canonicalizeDepth(v any, depth int) (any, error) {
+	if depth > maxCanonicalizeDepth {
+		return nil, fmt.Errorf("%w: value nesting exceeds %d", ErrMaxDepthExceeded, maxCanonicalizeDepth)
+	}
 	switch t := v.(type) {
 	case map[string]any:
 		keys := make([]string, 0, len(t))
@@ -38,7 +53,7 @@ func canonicalize(v any) (any, error) {
 		sort.Strings(keys)
 		obj := make(orderedObject, 0, len(keys))
 		for _, k := range keys {
-			cv, err := canonicalize(t[k])
+			cv, err := canonicalizeDepth(t[k], depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -48,7 +63,7 @@ func canonicalize(v any) (any, error) {
 	case []any:
 		out := make([]any, len(t))
 		for i, e := range t {
-			cv, err := canonicalize(e)
+			cv, err := canonicalizeDepth(e, depth+1)
 			if err != nil {
 				return nil, err
 			}
