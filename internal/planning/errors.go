@@ -34,6 +34,11 @@ var (
 	// already resumed).
 	ErrNotWaiting = errors.New("planning: thread is not parked waiting on this question")
 
+	// ErrAlreadyParked is returned by Ask when the thread is already parked
+	// on an unresolved blocking question — one blocking question per thread
+	// (§4 "one thing at a time"); parking a second would orphan the first.
+	ErrAlreadyParked = errors.New("planning: thread already parked on an unresolved question")
+
 	// ErrUnattributedAnswer guards the never-fabricate boundary at the API
 	// surface: an Answer's By must be set by the caller from the
 	// authenticated connection identity, never left blank (contracts.Answer,

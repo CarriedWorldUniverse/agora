@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
@@ -56,11 +57,33 @@ type Outcome struct {
 type QuestionLog struct {
 	store contracts.ThreadStore
 	park  *ParkLog
+
+	// mu guards locks; each thread gets its own mutex so Ask/Answer's
+	// check-then-act (IsWaiting -> append -> Park/Resume) is atomic PER
+	// THREAD — two concurrent answers to the same parked question cannot both
+	// resume it, and a second Ask cannot park over an unresolved one (review
+	// HIGH TOCTOU + MED park-over-park). A per-thread mutex (rather than one
+	// global lock) keeps unrelated threads concurrent.
+	mu    sync.Mutex
+	locks map[string]*sync.Mutex
 }
 
 // NewQuestionLog builds a QuestionLog over store.
 func NewQuestionLog(store contracts.ThreadStore) *QuestionLog {
-	return &QuestionLog{store: store, park: NewParkLog(store)}
+	return &QuestionLog{store: store, park: NewParkLog(store), locks: make(map[string]*sync.Mutex)}
+}
+
+// threadLock returns the per-thread serialization mutex, creating it on first
+// use. Held across the whole Ask/Answer critical section.
+func (l *QuestionLog) threadLock(threadID string) *sync.Mutex {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	m, ok := l.locks[threadID]
+	if !ok {
+		m = &sync.Mutex{}
+		l.locks[threadID] = m
+	}
+	return m
 }
 
 // Ask raises a question: mints its ID, resolves the escalation ladder for
@@ -76,6 +99,21 @@ func (l *QuestionLog) Ask(req AskRequest) (Outcome, error) {
 	disp, err := Resolve(req.Context, req.Blocking)
 	if err != nil {
 		return Outcome{}, err
+	}
+
+	tl := l.threadLock(req.ThreadID)
+	tl.Lock()
+	defer tl.Unlock()
+
+	if disp == DispositionPark {
+		// One blocking question per thread (§4 "one thing at a time"): refuse
+		// to park a second over an unresolved one — checked BEFORE appending
+		// the audit item, so a rejected Ask leaves no partial state (review MED).
+		if _, waiting, werr := l.park.IsWaiting(req.ThreadID); werr != nil {
+			return Outcome{}, werr
+		} else if waiting {
+			return Outcome{}, ErrAlreadyParked
+		}
 	}
 
 	if err := l.store.Append(req.ThreadID, []contracts.ThreadItem{{
@@ -130,6 +168,19 @@ func (l *QuestionLog) Answer(threadID, questionID string, ans contracts.Answer, 
 		return ErrUnattributedAnswer
 	}
 
+	// Serialize the whole check-then-act per thread: two concurrent answers to
+	// the same parked question must resume it exactly once, not twice (review
+	// HIGH TOCTOU — the losing answer still records its audit item but does not
+	// re-resume the already-un-parked thread).
+	tl := l.threadLock(threadID)
+	tl.Lock()
+	defer tl.Unlock()
+
+	waiting, ok, err := l.park.IsWaiting(threadID)
+	if err != nil {
+		return err
+	}
+
 	if err := l.store.Append(threadID, []contracts.ThreadItem{{
 		TS: ts, Type: contracts.TIQuestionAnswered, Identity: identity,
 		Payload: questionAnsweredPayload{QuestionID: questionID, Answer: ans},
@@ -137,14 +188,8 @@ func (l *QuestionLog) Answer(threadID, questionID string, ans contracts.Answer, 
 		return fmt.Errorf("planning: append question_answered: %w", err)
 	}
 
-	waiting, ok, err := l.park.IsWaiting(threadID)
-	if err != nil {
-		return err
-	}
 	if ok && waiting.Question.ID == questionID {
-		if err := l.park.Resume(threadID, questionID, ans, ts, identity); err != nil {
-			return err
-		}
+		return l.park.Resume(threadID, questionID, ans, ts, identity)
 	}
 	return nil
 }
