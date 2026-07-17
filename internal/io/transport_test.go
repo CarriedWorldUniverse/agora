@@ -277,9 +277,12 @@ func TestServeConn_OversizedFrameRejected(t *testing.T) {
 		oversized[i] = ' '
 	}
 	oversized = append(oversized, '\n')
-	if _, err := conn.Write(oversized); err != nil {
-		t.Fatalf("write oversized frame: %v", err)
-	}
+	// The server may reject-and-close before this whole (multi-MiB) write
+	// drains into the socket buffer, so a short write / broken pipe here is an
+	// EXPECTED consequence of the rejection (seen on macOS, where the socket
+	// buffer is smaller than the frame). The authoritative assertion is that
+	// ServeConn returns an error below, not that the client write completed.
+	_, _ = conn.Write(oversized)
 
 	select {
 	case err := <-serveErr:
