@@ -1,0 +1,10 @@
+{"type":"thread.started","thread_id":"th_0005","payload":{"identity_fp":"agora:k5xw3zjanfzsa2lt","profile":"dev","working_dir":"/work/demo"}}
+{"type":"turn.started","thread_id":"th_0005","turn_id":"tu_0001"}
+{"type":"item.started","thread_id":"th_0005","turn_id":"tu_0001","item":{"seq":1,"type":"mcp_tool_call"}}
+{"type":"item.completed","thread_id":"th_0005","turn_id":"tu_0001","item":{"seq":1,"type":"mcp_tool_call"},"payload":{"path":"file/a.txt","bytes":700}}
+{"type":"item.started","thread_id":"th_0005","turn_id":"tu_0001","item":{"seq":2,"type":"mcp_tool_call"}}
+{"type":"item.completed","thread_id":"th_0005","turn_id":"tu_0001","item":{"seq":2,"type":"mcp_tool_call"},"payload":{"path":"file/b.txt","bytes":700}}
+{"type":"thread.curation.demoted","thread_id":"th_0005","payload":{"keys":["file:file/a.txt"],"tokens_freed":175}}
+{"type":"thread.compaction.started","thread_id":"th_0005","payload":{"trigger":"manual"}}
+{"type":"thread.compaction.completed","thread_id":"th_0005","payload":{"tokens_before":227,"tokens_after":227}}
+{"type":"turn.completed","thread_id":"th_0005","turn_id":"tu_0001","payload":{"usage":{"input":900,"output":40}}}

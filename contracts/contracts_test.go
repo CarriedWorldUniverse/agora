@@ -19,7 +19,13 @@ var knownEvents = map[EventType]bool{
 	EvQuestionAsked: true, EvQuestionAnswered: true,
 	EvThreadWaiting: true, EvThreadResumed: true,
 	EvClientAttached: true, EvClientDetached: true,
-	EvError: true,
+	// EvProvisioned: gap found grounding U18's pod_provision.jsonl fixture
+	// against this glob-walked invariant (event.go's doc comment already
+	// specs it; it was simply never added here) — added so the U17 pod-mode
+	// wire event this unit's own DoD requires in the fixture actually
+	// validates, per event.go's EvProvisioned doc comment.
+	EvProvisioned: true,
+	EvError:       true,
 }
 
 var knownItems = map[ItemType]bool{
