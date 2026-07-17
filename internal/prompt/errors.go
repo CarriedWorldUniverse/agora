@@ -30,4 +30,13 @@ var (
 	// ErrNotImplemented marks a documented stub (Compile, §2a — build-time
 	// only, out of scope for this unit).
 	ErrNotImplemented = errors.New("prompt: not implemented")
+
+	// ErrDestDirTraversal is returned by New when destDir still contains a
+	// ".." path component after filepath.Clean — e.g. a caller building
+	// destDir by joining cores/<name> with a hostile, CLI-supplied name
+	// like "../../etc" (U4 deferred this hardening to U15).
+	ErrDestDirTraversal = errors.New("prompt: destDir contains a path-traversal component")
+
+	// ErrDestDirEmpty is returned by New when destDir is empty.
+	ErrDestDirEmpty = errors.New("prompt: destDir must not be empty")
 )

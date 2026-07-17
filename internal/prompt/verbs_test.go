@@ -1,6 +1,7 @@
 package prompt
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -190,5 +191,83 @@ func TestCompile_NotImplemented(t *testing.T) {
 	_, err := Compile(eff, contracts.ModelInfo{ID: "ornith"})
 	if err == nil {
 		t.Fatalf("Compile should return ErrNotImplemented (documented stub)")
+	}
+}
+
+// U4 leftover, absorbed into U15: New must refuse a destDir that STILL
+// carries a literal ".." after cleaning (the raw-user-input-as-destDir
+// case) instead of writing outside the caller's intended location.
+func TestNew_RejectsPathTraversalInDestDir(t *testing.T) {
+	builtin := testBuiltin()
+
+	cases := []string{
+		"../../etc/agora-evil",
+		"cores/../../../etc",
+	}
+	for _, dest := range cases {
+		if err := New(dest, builtin, "1.0.0", NewOptions{Name: "evil"}); !errors.Is(err, ErrDestDirTraversal) {
+			t.Errorf("New(%q) err = %v, want ErrDestDirTraversal", dest, err)
+		}
+	}
+}
+
+func TestNew_RejectsEmptyDestDir(t *testing.T) {
+	builtin := testBuiltin()
+	if err := New("", builtin, "1.0.0", NewOptions{Name: "x"}); !errors.Is(err, ErrDestDirEmpty) {
+		t.Fatalf("New(\"\") err = %v, want ErrDestDirEmpty", err)
+	}
+}
+
+func TestNew_CleanPathWithDotDotThatCollapsesIsAccepted(t *testing.T) {
+	// "a/b/../c" cleans to "a/c" — no traversal remains, so this is a
+	// legitimate path a caller might pass, not an attack.
+	builtin := testBuiltin()
+	dest := filepath.Join(t.TempDir(), "a", "b", "..", "c")
+	if err := New(dest, builtin, "1.0.0", NewOptions{Name: "clean"}); err != nil {
+		t.Fatalf("New with a self-collapsing dotdot should succeed: %v", err)
+	}
+	want := filepath.Clean(dest)
+	if _, err := os.Stat(filepath.Join(want, "manifest.toml")); err != nil {
+		t.Fatalf("expected package written at cleaned path %s: %v", want, err)
+	}
+}
+
+// ContainDestDir is the containment check the real `agora prompt new`
+// callsite needs: joining baseDir+name with plain filepath.Join silently
+// collapses a traversal against baseDir's own components before New (and
+// its literal-".." guard) ever sees the result — this is exactly the case
+// TestNew_RejectsPathTraversalInDestDir's cases can't cover.
+func TestContainDestDir_RejectsEscapeEvenThoughJoinWouldCollapseIt(t *testing.T) {
+	base := filepath.Join(string(filepath.Separator), "home", "operator", ".agora", "prompt", "cores")
+	joined := filepath.Clean(filepath.Join(base, "../../etc/agora-evil"))
+	if !strings.HasPrefix(joined, base) {
+		// Sanity check on the test's own premise: Join really did collapse
+		// the traversal to somewhere outside base, with no literal ".."
+		// left for a naive check to catch.
+		if strings.Contains(joined, "..") {
+			t.Fatalf("test premise broken: Join left a literal .. in %q", joined)
+		}
+	}
+	_, err := ContainDestDir(base, "../../etc/agora-evil")
+	if !errors.Is(err, ErrDestDirTraversal) {
+		t.Fatalf("ContainDestDir err = %v, want ErrDestDirTraversal", err)
+	}
+}
+
+func TestContainDestDir_AcceptsAndJoinsAnOrdinaryName(t *testing.T) {
+	base := t.TempDir()
+	got, err := ContainDestDir(base, "mycore")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	want := filepath.Join(base, "mycore")
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestContainDestDir_RejectsEmptyName(t *testing.T) {
+	if _, err := ContainDestDir(t.TempDir(), ""); !errors.Is(err, ErrDestDirEmpty) {
+		t.Fatalf("err = %v, want ErrDestDirEmpty", err)
 	}
 }

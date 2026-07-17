@@ -1,0 +1,7 @@
+internal/tui/stream.go
+   1    1   package tui
+   2    2   
+   3      - func old() {}
+        3 + func newer() {}
+        4 + func alsoNew() {}
+   4    5   // trailing context

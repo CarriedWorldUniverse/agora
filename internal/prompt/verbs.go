@@ -32,6 +32,11 @@ type NewOptions struct {
 // base_version honestly from builtinVersion.
 // Spec: agora-spec-prompt.md §2a (`agora prompt new`).
 func New(destDir string, builtin CorePackage, builtinVersion string, opts NewOptions) error {
+	destDir, err := sanitizeDestDir(destDir)
+	if err != nil {
+		return err
+	}
+
 	// Refuse to clobber an existing package: silently overwriting hand edits,
 	// or leaving a mixed core.md + segments/ layout that LoadPackage then
 	// rejects as ErrPackageAmbiguous, is worse than erroring (review, U4).
@@ -98,6 +103,60 @@ func New(destDir string, builtin CorePackage, builtinVersion string, opts NewOpt
 		}
 	}
 	return nil
+}
+
+// sanitizeDestDir cleans destDir and refuses one that still carries a ".."
+// path-traversal component after cleaning (U4 leftover, absorbed into
+// U15) — defense-in-depth against a caller passing raw, unjoined user
+// input straight through as destDir (e.g. New(userSuppliedName, ...)).
+// filepath.Clean alone does not reject a traversal that survives to the
+// front of the path (Clean("../../etc") is still "../../etc" — there's
+// nothing above it to collapse against), so this walks the cleaned path's
+// components explicitly and rejects any ".." that remains.
+//
+// This alone is NOT sufficient containment for the realistic callsite
+// (a `agora prompt new <name>` CLI verb building destDir by joining a
+// fixed base cores directory with a user-supplied name): filepath.Join
+// COLLAPSES "../../etc" against the base's own components before New ever
+// sees the result, so no literal ".." survives to catch here even though
+// the final path escaped the intended base. See ContainDestDir, the
+// containment check that callsite is expected to use BEFORE the base and
+// name are joined into one string.
+func sanitizeDestDir(destDir string) (string, error) {
+	if destDir == "" {
+		return "", ErrDestDirEmpty
+	}
+	clean := filepath.Clean(destDir)
+	for _, part := range strings.Split(filepath.ToSlash(clean), "/") {
+		if part == ".." {
+			return "", fmt.Errorf("%w: %q", ErrDestDirTraversal, destDir)
+		}
+	}
+	return clean, nil
+}
+
+// ContainDestDir joins name under baseDir and verifies the result stays
+// within baseDir, returning the safe destDir to pass to New. This is the
+// check a `agora prompt new <name>` CLI verb (not yet wired — see this
+// file's header comment) should use: a naive filepath.Join(baseDir, name)
+// silently collapses a traversal like "../../etc" against baseDir's own
+// path components, so containment must be verified with baseDir and name
+// still separate, before New (and its own, weaker literal-".." guard) ever
+// sees a single already-joined string.
+func ContainDestDir(baseDir, name string) (string, error) {
+	if name == "" {
+		return "", ErrDestDirEmpty
+	}
+	baseClean := filepath.Clean(baseDir)
+	joined := filepath.Clean(filepath.Join(baseClean, name))
+	rel, err := filepath.Rel(baseClean, joined)
+	if err != nil {
+		return "", fmt.Errorf("%w: %q (%v)", ErrDestDirTraversal, name, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("%w: %q escapes %q", ErrDestDirTraversal, name, baseDir)
+	}
+	return joined, nil
 }
 
 // collapseControlChars replaces control bytes (except tab) with spaces so a
@@ -273,9 +332,17 @@ func Rebase(pkg CorePackage, builtin CorePackage, builtinVersion string) (Rebase
 }
 
 // Compile writes a compiled rendition for (core, model) — a build-time,
-// eval-gated step (§2a, §4). NOT IMPLEMENTED in this build unit: compilation
-// is LLM-assisted build tooling outside internal/prompt's scope (rendering
-// pipeline + package format), tracked as follow-on work.
+// eval-gated step (§2a, §4). STILL NOT IMPLEMENTED as of U15: U4 deferred
+// it as out of internal/prompt's scope (rendering pipeline + package
+// format, not LLM-assisted build tooling); U15 re-examined the deferral
+// per its brief ("wire the real rendering path if the TUI needs it") and
+// it does not — the TUI (internal/tui) consumes an already-Resolved
+// Effective core via the daemon/engine (not built yet, U18) and never
+// calls Compile directly; Compile is a `agora prompt compile` CLI/build-
+// tooling concern with its own eval gate (§4: "models × core eval" is
+// listed as an INTERACTIVE exception in agora-spec-build.md §0 ground rule
+// 5, never one-shot). Remains a documented stub; the CLI verb that would
+// call it doesn't exist yet either (see this file's header comment).
 // Spec: agora-spec-prompt.md §2a (`agora prompt compile`), §4.
 func Compile(eff Effective, model contracts.ModelInfo) (Rendition, error) {
 	return Rendition{}, ErrNotImplemented
