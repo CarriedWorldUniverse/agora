@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
+	"github.com/CarriedWorldUniverse/agora/internal/toolrunner"
 	bridle "github.com/CarriedWorldUniverse/bridle"
 	"github.com/CarriedWorldUniverse/bridle/fake"
 )
@@ -390,5 +394,277 @@ func TestManager_InterruptMidTurn(t *testing.T) {
 	expectClosed(t, out, testTimeout)
 	if err := <-runErr; err != nil {
 		t.Fatalf("Run returned %v; want nil", err)
+	}
+}
+
+// --- U-C2: the tool surface actually executes ---
+
+// managerTestRoots builds a toolrunner.Roots over a fresh t.TempDir(), for
+// WithRoots — never the process's real cwd, so these tests can never
+// touch a file outside their own sandbox.
+func managerTestRoots(t *testing.T) toolrunner.Roots {
+	t.Helper()
+	roots, err := toolrunner.NewRoots(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRoots: %v", err)
+	}
+	return roots
+}
+
+// lastToolResultMessage returns the tool_result ProviderMessage from req's
+// Messages (the message run.go appends after executeToolCall runs), or
+// fails the test if none is present.
+func lastToolResultMessage(t *testing.T, req bridle.ProviderRequest) bridle.ProviderMessage {
+	t.Helper()
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if req.Messages[i].Role == "tool_result" {
+			return req.Messages[i]
+		}
+	}
+	t.Fatalf("no tool_result message in %+v", req.Messages)
+	return bridle.ProviderMessage{}
+}
+
+// TestManager_ToolCall_ReadFileExecutesViaSurface drives a fake Step whose
+// ToolCalls names read_file on a file this test seeded — the harness's
+// executeToolCall dispatches it through Manager's surfaceRunner into the
+// real toolrunner.Surface (fs family), NOT a stub: the file's actual disk
+// content must come back in the next round's tool_result message, and the
+// turn must complete normally.
+func TestManager_ToolCall_ReadFileExecutesViaSurface(t *testing.T) {
+	roots := managerTestRoots(t)
+	if err := os.WriteFile(filepath.Join(roots.WorkingDir, "hello.txt"), []byte("hello from disk"), 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	provider := fake.NewProvider(
+		fake.Step{ToolCalls: []bridle.ToolInvocation{
+			{ID: "1", Name: toolrunner.ToolReadFile, Args: json.RawMessage(`{"path":"hello.txt"}`)},
+		}},
+		fake.Step{Text: "done"},
+	)
+	m := NewManager("th_tool", provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
+
+	in := make(chan contracts.Input, 1)
+	out := make(chan contracts.Event, 32)
+	runErr := make(chan error, 1)
+	go func() { runErr <- m.Run(context.Background(), in, out) }()
+
+	in <- contracts.Input{Type: contracts.InUserMessage, Text: "read hello.txt"}
+	if !drainToTurnCompleted(t, out, testTimeout) {
+		t.Fatal("turn never completed")
+	}
+	in <- contracts.Input{Type: contracts.InEnd}
+	expectClosed(t, out, testTimeout)
+	if err := <-runErr; err != nil {
+		t.Fatalf("Run returned %v; want nil", err)
+	}
+
+	toolMsg := lastToolResultMessage(t, provider.LastRequest())
+	if toolMsg.Content != `"hello from disk"` {
+		t.Fatalf("tool_result content = %q; want the file's real content (JSON-encoded)", toolMsg.Content)
+	}
+}
+
+// TestManager_ToolCall_RunCommandExecutesViaSurface is the exec-family
+// counterpart: run_command "echo hi" must actually run a real subprocess
+// via the Surface, not a stub, and its stdout must come back.
+func TestManager_ToolCall_RunCommandExecutesViaSurface(t *testing.T) {
+	roots := managerTestRoots(t)
+
+	provider := fake.NewProvider(
+		fake.Step{ToolCalls: []bridle.ToolInvocation{
+			{ID: "1", Name: toolrunner.ToolRunCommand, Args: json.RawMessage(`{"command":"echo hi"}`)},
+		}},
+		fake.Step{Text: "done"},
+	)
+	m := NewManager("th_tool", provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
+
+	in := make(chan contracts.Input, 1)
+	out := make(chan contracts.Event, 32)
+	runErr := make(chan error, 1)
+	go func() { runErr <- m.Run(context.Background(), in, out) }()
+
+	in <- contracts.Input{Type: contracts.InUserMessage, Text: "run echo hi"}
+	if !drainToTurnCompleted(t, out, testTimeout) {
+		t.Fatal("turn never completed")
+	}
+	in <- contracts.Input{Type: contracts.InEnd}
+	expectClosed(t, out, testTimeout)
+	if err := <-runErr; err != nil {
+		t.Fatalf("Run returned %v; want nil", err)
+	}
+
+	toolMsg := lastToolResultMessage(t, provider.LastRequest())
+	if !strings.Contains(toolMsg.Content, "hi") {
+		t.Fatalf("tool_result content = %q; want it to contain the command's real stdout", toolMsg.Content)
+	}
+}
+
+// TestManager_TurnRequestTools_CarriesSurfaceSpecs asserts the model
+// actually sees the fs/exec tool specs (TurnRequest.Tools -> lowered onto
+// ProviderRequest.Tools) — not an empty list, which is what every turn
+// carried before this unit.
+func TestManager_TurnRequestTools_CarriesSurfaceSpecs(t *testing.T) {
+	roots := managerTestRoots(t)
+	provider := fake.NewProvider(fake.Step{Text: "hi"})
+	m := NewManager("th_tools", provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
+
+	in := make(chan contracts.Input, 1)
+	out := make(chan contracts.Event, 32)
+	runErr := make(chan error, 1)
+	go func() { runErr <- m.Run(context.Background(), in, out) }()
+
+	in <- contracts.Input{Type: contracts.InUserMessage, Text: "hi"}
+	if !drainToTurnCompleted(t, out, testTimeout) {
+		t.Fatal("turn never completed")
+	}
+	in <- contracts.Input{Type: contracts.InEnd}
+	expectClosed(t, out, testTimeout)
+	if err := <-runErr; err != nil {
+		t.Fatalf("Run returned %v; want nil", err)
+	}
+
+	surface := toolrunner.NewSurface(nil, toolrunner.NewFSFamily(roots), toolrunner.NewExecFamily(roots))
+	wantSpecs, err := surface.Specs(context.Background())
+	if err != nil {
+		t.Fatalf("Specs: %v", err)
+	}
+
+	gotTools := provider.LastRequest().Tools
+	if len(gotTools) != len(wantSpecs) {
+		t.Fatalf("ProviderRequest.Tools len = %d; want %d (fs+exec specs)", len(gotTools), len(wantSpecs))
+	}
+	found := false
+	for _, td := range gotTools {
+		if td.Name == toolrunner.ToolReadFile {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ProviderRequest.Tools = %+v; want read_file present", gotTools)
+	}
+}
+
+// TestManager_ToolCall_UnknownToolIsGoErrorNotSilentSuccess: the model
+// calling a tool name no family/MCP handles must NOT look like a silent
+// success (an empty tool_result with no error signal) — it must surface
+// as bridle's "error: ..." tool_result text, driven by surfaceRunner
+// returning a Go error for the dispatch failure (see surfacerunner.go).
+// The turn still completes normally — a ToolRunner.Run error never aborts
+// bridle's round loop (only Before/AfterToolCall hook errors do, and this
+// runner never touches those).
+func TestManager_ToolCall_UnknownToolIsGoErrorNotSilentSuccess(t *testing.T) {
+	roots := managerTestRoots(t)
+
+	provider := fake.NewProvider(
+		fake.Step{ToolCalls: []bridle.ToolInvocation{
+			{ID: "1", Name: "does_not_exist", Args: json.RawMessage(`{}`)},
+		}},
+		fake.Step{Text: "done"},
+	)
+	m := NewManager("th_tool", provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
+
+	in := make(chan contracts.Input, 1)
+	out := make(chan contracts.Event, 32)
+	runErr := make(chan error, 1)
+	go func() { runErr <- m.Run(context.Background(), in, out) }()
+
+	in <- contracts.Input{Type: contracts.InUserMessage, Text: "call a bogus tool"}
+
+	var sawFailed, sawCompleted bool
+	deadline := time.After(testTimeout)
+loop:
+	for {
+		select {
+		case ev := <-out:
+			switch ev.Type {
+			case contracts.EvTurnFailed:
+				sawFailed = true
+				break loop
+			case contracts.EvTurnCompleted:
+				sawCompleted = true
+				break loop
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for the turn to end")
+		}
+	}
+	if sawFailed || !sawCompleted {
+		t.Fatalf("turn ended abnormally (failed=%v completed=%v); want a normal turn.completed — a dispatch error must not abort the turn", sawFailed, sawCompleted)
+	}
+
+	in <- contracts.Input{Type: contracts.InEnd}
+	expectClosed(t, out, testTimeout)
+	if err := <-runErr; err != nil {
+		t.Fatalf("Run returned %v; want nil", err)
+	}
+
+	toolMsg := lastToolResultMessage(t, provider.LastRequest())
+	if !strings.HasPrefix(toolMsg.Content, "error: ") || !strings.Contains(toolMsg.Content, "unknown tool") {
+		t.Fatalf("tool_result content = %q; want an \"error: ...unknown tool...\" message, not a silent success", toolMsg.Content)
+	}
+}
+
+// TestManager_ToolCall_ProtectedPathErrorDoesNotAbortTurn: a tool-level
+// failure (Result.IsError — read_file on a protected .git path) must
+// surface to the model as a normal tool_result ("error: ..."), NOT abort
+// the turn (turn.failed) — matching bridle's own executeToolCall doc:
+// "the model should see the error string and decide what to do."
+func TestManager_ToolCall_ProtectedPathErrorDoesNotAbortTurn(t *testing.T) {
+	roots := managerTestRoots(t)
+	if err := os.MkdirAll(filepath.Join(roots.WorkingDir, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(roots.WorkingDir, ".git", "config"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed .git/config: %v", err)
+	}
+
+	provider := fake.NewProvider(
+		fake.Step{ToolCalls: []bridle.ToolInvocation{
+			{ID: "1", Name: toolrunner.ToolReadFile, Args: json.RawMessage(`{"path":".git/config"}`)},
+		}},
+		fake.Step{Text: "done"},
+	)
+	m := NewManager("th_tool", provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
+
+	in := make(chan contracts.Input, 1)
+	out := make(chan contracts.Event, 32)
+	runErr := make(chan error, 1)
+	go func() { runErr <- m.Run(context.Background(), in, out) }()
+
+	in <- contracts.Input{Type: contracts.InUserMessage, Text: "read .git/config"}
+
+	var sawFailed, sawCompleted bool
+	deadline := time.After(testTimeout)
+loop:
+	for {
+		select {
+		case ev := <-out:
+			switch ev.Type {
+			case contracts.EvTurnFailed:
+				sawFailed = true
+				break loop
+			case contracts.EvTurnCompleted:
+				sawCompleted = true
+				break loop
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for the turn to end")
+		}
+	}
+	if sawFailed || !sawCompleted {
+		t.Fatalf("turn ended abnormally (failed=%v completed=%v); want a normal turn.completed — a tool-level error must not abort the turn", sawFailed, sawCompleted)
+	}
+
+	in <- contracts.Input{Type: contracts.InEnd}
+	expectClosed(t, out, testTimeout)
+	if err := <-runErr; err != nil {
+		t.Fatalf("Run returned %v; want nil", err)
+	}
+
+	toolMsg := lastToolResultMessage(t, provider.LastRequest())
+	if !strings.HasPrefix(toolMsg.Content, "error: ") || !strings.Contains(toolMsg.Content, "protected") {
+		t.Fatalf("tool_result content = %q; want an \"error: ...protected...\" message", toolMsg.Content)
 	}
 }
