@@ -99,7 +99,6 @@ func TestSurfaceRunner_SourceContentNotHTMLEscaped(t *testing.T) {
 	}
 }
 
-
 // TestSurfaceRunner_UnknownTool: Surface.Execute's own "clean IsError
 // Result, never panic" contract turns an unrecognized name into
 // Result{IsError:true}, nil error — surfaceRunner maps THAT (a dispatch

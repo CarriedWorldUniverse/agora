@@ -466,7 +466,6 @@ func TestManager_ToolCall_ReadFileExecutesViaSurface(t *testing.T) {
 	}
 }
 
-
 // TestManager_TurnRequestTools_CarriesSurfaceSpecs asserts the model
 // actually sees the fs/exec tool specs (TurnRequest.Tools -> lowered onto
 // ProviderRequest.Tools) — not an empty list, which is what every turn
