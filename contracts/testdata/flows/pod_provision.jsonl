@@ -1,0 +1,3 @@
+{"type":"provisioned","thread_id":"th_pod0001","payload":{"identity_fp":"agora:k5xw3zjanfzsa2lt","profile":"aspect-builder"}}
+{"type":"item.started","thread_id":"th_pod0001","item":{"seq":1,"type":"agent_message"}}
+{"type":"question.asked","thread_id":"th_pod0001","payload":{"id":"q_pod0001stub","source":"agent","blocking":true,"payload":{"text":"the ticket doesn't say which environment to deploy to — staging or prod?","options":[{"label":"staging"},{"label":"prod"}]}}}

@@ -7,6 +7,7 @@ package conformance
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -14,8 +15,20 @@ import (
 	"time"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
+	agoraio "github.com/CarriedWorldUniverse/agora/internal/io"
 	"github.com/CarriedWorldUniverse/agora/internal/persistence"
 )
+
+// rawFlow reads a contracts/testdata/flows fixture's raw bytes (for a
+// byte-for-byte golden comparison, as opposed to loadFlow's decoded form).
+func rawFlow(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "contracts", "testdata", "flows", name))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	return b
+}
 
 func loadFlow(t *testing.T, name string) []contracts.Event {
 	t.Helper()
@@ -44,33 +57,46 @@ func loadFlow(t *testing.T, name string) []contracts.Event {
 }
 
 // TestFlowTurn — pipe mode: user_message in, the turn.jsonl event sequence
-// out (stub engine). Flips live at U2 (io).
+// out (stub engine). Pure item/turn wire mechanics (blueprint §3.1); reuses
+// agoraio.RunPipe + agoraio.ScriptedEngine per blueprint's explicit "REUSE"
+// call — there is no approval/planning/ctxmgr seam in this flow to prove
+// against a real implementation, unlike every other flow in this file.
 func TestFlowTurn(t *testing.T) {
-	_ = loadFlow(t, "turn.jsonl")
-	t.Skip("pending U2: daemon + pipe runner")
+	events := loadFlow(t, "turn.jsonl")
+	got := driveFlowTurn(t, []agoraio.ScriptedTurn{{Events: events}})
+	want := rawFlow(t, "turn.jsonl")
+	if !bytes.Equal(got, want) {
+		t.Fatalf("stdout mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
 }
 
 // TestFlowApproval — exec approval fan-out, first-answer-wins, attributed
-// resolution. Flips live at U7 (approvals engine) over U2.
+// resolution. Two sub-drives (blueprint §3.2): 3.2a pipe mode, byte-for-byte
+// against the golden fixture, attribution via a fixed pipe-mode constant
+// (no arbitration to resolve — one implicit client); 3.2b session protocol,
+// TWO real clients racing a genuine first-answer-wins resolution over a real
+// daemon + unix socket, plus the U16 third-device attach-refusal handoff
+// (TestFlowApproval_SessionProtocolFanOut, its own top-level test — Go test
+// output needs it addressable/skippable on its own, but it is the second
+// half of this flow's DoD).
 func TestFlowApproval(t *testing.T) {
-	_ = loadFlow(t, "approval.jsonl")
-	t.Skip("pending U7: approvals engine (over U2)")
+	t.Run("pipe", func(t *testing.T) {
+		got := driveFlowApprovalPipe(t)
+		want := rawFlow(t, "approval.jsonl")
+		if !bytes.Equal(got, want) {
+			t.Fatalf("stdout mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+		}
+	})
+	t.Run("session_protocol_fanout", sessionProtocolFanOut)
 }
 
 // TestFlowQuestionParkResume — blocking question parks the thread durably
-// (daemon restart inside this test once live), answer resumes it. Flips live
-// at U11 (planning+questions).
-func TestFlowQuestionParkResume(t *testing.T) {
-	_ = loadFlow(t, "question_park_resume.jsonl")
-	t.Skip("pending U11: question ladder + waiting-on-answer state")
-}
+// (a real daemon restart inside this test), answer resumes it. Live drive in
+// flow_question_park_resume_test.go (blueprint §3.3).
 
 // TestFlowPlanGate — plan submit raises the gate; allow refused while
-// open_questions remain; answered → allow → exit. Flips live at U11.
-func TestFlowPlanGate(t *testing.T) {
-	_ = loadFlow(t, "plan_gate.jsonl")
-	t.Skip("pending U11: planning posture + plan gate")
-}
+// open_questions remain; answered → allow → exit. Live drive in
+// flow_plan_gate_test.go (blueprint §3.4).
 
 // resumeForkOp is one line of resume_fork.jsonl — a scripted ThreadStore
 // operation (this flow drives a store, not the io event stream, so its
@@ -277,13 +303,9 @@ func stringSetsEqual(a, b []string) bool {
 }
 
 // TestFlowCompactionCuration — compaction pair + curation demote/readmit
-// events under forced pressure. Flips live at U12 (context).
-func TestFlowCompactionCuration(t *testing.T) {
-	t.Skip("pending U12: context manager + curation (fixture lands with the unit)")
-}
+// events under forced pressure. Live drive in
+// flow_compaction_curation_test.go (blueprint §3.5).
 
 // TestFlowPodProvision — blank pod boots, atomic provision, drive a turn,
-// blocked:needs-input round-trip. Flips live at U17.
-func TestFlowPodProvision(t *testing.T) {
-	t.Skip("pending U17: pod mode + provision (fixture lands with the unit)")
-}
+// blocked:needs-input round-trip. Live drive in flow_pod_provision_test.go
+// (blueprint §3.6).

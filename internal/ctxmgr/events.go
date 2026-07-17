@@ -50,3 +50,40 @@ func NewCurationReadmittedEvent(threadID string, k Key) contracts.Event {
 		Payload:  payload,
 	}
 }
+
+// CompactionStartedPayload is the thread.compaction.started event body
+// (context spec §2 contract 4; io spec §52: "thread.compaction.started
+// {trigger}").
+type CompactionStartedPayload struct {
+	Trigger contracts.CompactionTrigger `json:"trigger"`
+}
+
+// CompactionCompletedPayload is the thread.compaction.completed event body
+// (io spec §52: "thread.compaction.completed {tokens_before,tokens_after}").
+type CompactionCompletedPayload struct {
+	TokensBefore int64 `json:"tokens_before"`
+	TokensAfter  int64 `json:"tokens_after"`
+}
+
+// NewCompactionStartedEvent builds the wire event a caller emits BEFORE
+// invoking Manager.Compact — the compaction pair's opening half (U18 gap:
+// the curation pair existed, this one didn't; §3.5).
+func NewCompactionStartedEvent(threadID string, trigger contracts.CompactionTrigger) contracts.Event {
+	payload, _ := json.Marshal(CompactionStartedPayload{Trigger: trigger})
+	return contracts.Event{
+		Type:     contracts.EvCompactionStarted,
+		ThreadID: threadID,
+		Payload:  payload,
+	}
+}
+
+// NewCompactionCompletedEvent builds the wire event from a real
+// Manager.Compact call's contracts.CompactionResult.
+func NewCompactionCompletedEvent(threadID string, result contracts.CompactionResult) contracts.Event {
+	payload, _ := json.Marshal(CompactionCompletedPayload{TokensBefore: result.TokensBefore, TokensAfter: result.TokensAfter})
+	return contracts.Event{
+		Type:     contracts.EvCompactionCompleted,
+		ThreadID: threadID,
+		Payload:  payload,
+	}
+}

@@ -37,6 +37,16 @@ func defaultSocketPath() string {
 }
 
 func main() {
+	// arg0-style dispatch (U18, blueprint §6 q4): `agora daemon` boots the
+	// internal/daemon runtime instead of the TUI client; bare `agora` (or
+	// any other first arg) is unaffected — the client's own flag set never
+	// sees "daemon" as a stray positional argument because this check runs
+	// before flag.Parse() below.
+	if len(os.Args) > 1 && os.Args[1] == "daemon" {
+		runDaemon(os.Args[2:])
+		return
+	}
+
 	var (
 		socketPath  = flag.String("socket", defaultSocketPath(), "agora daemon unix socket path")
 		wsURL       = flag.String("ws", "", "agora daemon session-protocol websocket URL (overrides -socket if set)")
