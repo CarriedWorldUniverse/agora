@@ -70,6 +70,15 @@ type errorPayload struct {
 //	StepBoundary/MCPServerFailed -> no agora wire equivalent this slice;
 //	                 dropped (documented, not silently forgotten: neither
 //	                 has a contracts.EventType to land on yet).
+//
+// Note on the interrupted case: an aborted turn never reaches emitDone
+// (bridle's abort path returns without emitting TurnDone — see the
+// TurnDone bullet above), so an item.started with no matching
+// item.completed is a normal, expected artifact of interruption, not a
+// bug — there is no item-cancelled event in the contracts vocabulary.
+// turn.failed{interrupted:true} (emitted by Manager, not this sink) is
+// the terminal signal a consumer should key off of; it does not imply
+// every open item was cleanly closed out.
 type turnSink struct {
 	threadID string
 	turnID   string

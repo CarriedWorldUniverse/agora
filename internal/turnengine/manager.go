@@ -96,17 +96,45 @@ func NewManager(threadID string, provider bridle.Provider, opts ...Option) *Mana
 // be serviced while Harness.RunTurn blocks), and emits Event to out. Run
 // closes out before returning, satisfying the io.Engine contract
 // (internal/io/engine.go's doc comment; mirrored from
-// internal/io/scripted_engine.go's Run).
+// internal/io/scripted_engine.go's Run). Note this is only half the
+// contract: Run guarantees it WILL close out, but relies on the consumer
+// (RunPipe, Session, or a test) draining out until that close is observed —
+// a consumer that stops reading early can make Run's own sends block
+// forever against a full, unread channel.
 func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<- contracts.Event) error {
 	defer close(out)
 
 	var turnCancel context.CancelFunc
-	var turnDone chan struct{}
+	// turnDone carries the in-flight turn's TERMINAL event (turn.completed
+	// or turn.failed), not just a bare "done" signal. runOneTurn computes
+	// that event but does NOT send it to out itself — it hands it to Run
+	// via this channel, and Run is the one that forwards it to out, in the
+	// SAME select-case step that resets turnCancel/turnDone. This makes
+	// "the terminal event becomes visible on out" and "bookkeeping says
+	// the turn is over" a single atomic action from Run's single-threaded
+	// perspective: no InUserMessage arriving on `in` can ever land in the
+	// gap between them, because there IS no gap — earlier revisions had
+	// runOneTurn emit the terminal event to out directly and separately
+	// close a bare struct{} channel, which left exactly that gap (the few
+	// instructions between "the emit's send lands" and "the deferred
+	// close(done) actually runs" on a DIFFERENT goroutine); an
+	// adversarial stress test (10k+ rapid turn-completion/next-message
+	// cycles under -race) reproduced it at roughly 1-2 per 10000 attempts
+	// — rare enough to look "fixed" against a modest iteration count, but
+	// a real, reproducible silent message drop, not scheduler noise.
+	var turnDone chan contracts.Event
+
+	forward := func(ev contracts.Event) {
+		select {
+		case out <- ev:
+		case <-ctx.Done():
+		}
+	}
 
 	stopInFlight := func() {
 		if turnCancel != nil {
 			turnCancel()
-			<-turnDone
+			forward(<-turnDone)
 			turnCancel, turnDone = nil, nil
 		}
 	}
@@ -117,12 +145,22 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 			stopInFlight()
 			return ctx.Err()
 
-		case <-turnDone:
+		case ev := <-turnDone:
 			// The in-flight turn's goroutine finished on its own (no
-			// interrupt/end involved) — clear the bookkeeping so the
-			// next user_message can start a new turn. A nil turnDone
-			// makes this case permanently non-firing until a turn is
-			// started again (a nil channel in a select never fires).
+			// interrupt/end involved): forward its terminal event and
+			// cancel its now-finished turnCtx (cancelling an
+			// already-finished context is documented-safe; NOT calling
+			// it here would leak that context.WithCancel's child
+			// registration into ctx's children set for as long as this
+			// Manager runs — one leak per completed turn, over a whole
+			// thread's lifetime, since a Manager is reused across every
+			// turn on a thread) in the SAME step, so no other case of
+			// this select can interleave between "event visible" and
+			// "bookkeeping reset". A nil turnDone makes this case
+			// permanently non-firing until a turn is started again (a
+			// nil channel in a select never fires).
+			forward(ev)
+			turnCancel()
 			turnCancel, turnDone = nil, nil
 
 		case input, ok := <-in:
@@ -132,18 +170,39 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 			}
 			switch input.Type {
 			case contracts.InUserMessage:
+				if turnDone != nil {
+					// A finished turn's terminal event may already be
+					// sitting ready alongside this very user_message in
+					// Go's pseudo-random select (both this case and the
+					// case above can be simultaneously ready when a turn
+					// completes right before the next message arrives)
+					// — if `in` happens to win that draw, reap the
+					// finished turn HERE (forward its event, same as
+					// the case above) before deciding whether this is a
+					// genuine mid-turn message. Non-blocking: if the
+					// turn is still genuinely running, this default-cases
+					// out and falls through to the mid-turn check below
+					// unchanged.
+					select {
+					case ev := <-turnDone:
+						forward(ev)
+						turnCancel()
+						turnCancel, turnDone = nil, nil
+					default:
+					}
+				}
 				if turnCancel != nil {
-					// A turn is already in flight. Queuing/steering a
-					// second turn is out of scope for this slice
-					// (later: approval_response/question_response resume
-					// the SAME turn per the blueprint's TUI event
+					// A turn is GENUINELY still in flight. Queuing/
+					// steering a second turn is out of scope for this
+					// slice (later: approval_response/question_response
+					// resume the SAME turn per the blueprint's TUI event
 					// mapping notes; a brand new user_message mid-turn
 					// is a UI-level concern this unit doesn't model).
 					continue
 				}
 				turnCtx, cancel := context.WithCancel(ctx)
 				turnCancel = cancel
-				done := make(chan struct{})
+				done := make(chan contracts.Event)
 				turnDone = done
 				go m.runOneTurn(ctx, turnCtx, input, out, done)
 
@@ -166,16 +225,25 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 }
 
 // runOneTurn drives exactly one bridle.Harness.RunTurn call and maps its
-// outcome onto the agora event stream. sendCtx gates event DELIVERY (the
-// outer Run-level ctx — see turnSink's doc comment: it must NOT be the
+// outcome onto the agora event stream. sendCtx gates event DELIVERY for
+// every NON-terminal event this function emits directly (turn.started,
+// plus everything the sink writes) — the outer Run-level ctx, not the
 // interrupt-scoped turnCtx, because bridle's own abort path returns
-// StopReasonAborted from an already-canceled ctx, and this function still
-// needs to deliver the resulting turn.failed{interrupted:true} event).
-// turnCtx gates the Harness.RunTurn call itself and is what
-// Manager.Run's InInterrupt case cancels.
-func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, input contracts.Input, out chan<- contracts.Event, done chan<- struct{}) {
-	defer close(done)
-
+// StopReasonAborted from an already-canceled ctx and this function still
+// needs those earlier events to have had a chance to deliver. turnCtx
+// gates the Harness.RunTurn call itself and is what Manager.Run's
+// InInterrupt case cancels.
+//
+// The TERMINAL event (turn.completed/turn.failed) is different: it is not
+// sent to out here at all. It's handed to done, and Manager.Run is the one
+// that forwards it to out — see Run's doc comment on turnDone for why
+// (closing the TOCTOU gap a stress test found between "terminal event
+// visible" and "bookkeeping says the turn is over"). done is unbuffered
+// and always has exactly one send on every path through this function;
+// Run always eventually receives it (stopInFlight/the turnDone case/the
+// InUserMessage reap all drain it), so this never leaks a blocked
+// goroutine.
+func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, input contracts.Input, out chan<- contracts.Event, done chan<- contracts.Event) {
 	turnID := m.idGen.NextTurnID()
 	emit := func(ev contracts.Event) {
 		ev.ThreadID = m.threadID
@@ -184,6 +252,11 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, input contracts.I
 		case out <- ev:
 		case <-sendCtx.Done():
 		}
+	}
+	terminal := func(ev contracts.Event) {
+		ev.ThreadID = m.threadID
+		ev.TurnID = turnID
+		done <- ev
 	}
 
 	emit(contracts.Event{Type: contracts.EvTurnStarted})
@@ -201,13 +274,13 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, input contracts.I
 
 	switch result.StopReason {
 	case bridle.StopReasonModelDone, bridle.StopReasonMaxSteps:
-		emit(contracts.Event{
+		terminal(contracts.Event{
 			Type:    contracts.EvTurnCompleted,
 			Payload: mustMarshal(usagePayload{Usage: mapUsage(result.Usage)}),
 		})
 
 	case bridle.StopReasonAborted:
-		emit(contracts.Event{
+		terminal(contracts.Event{
 			Type:    contracts.EvTurnFailed,
 			Payload: mustMarshal(turnFailedPayload{Interrupted: true}),
 		})
@@ -218,11 +291,13 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, input contracts.I
 		// err) and was translated to an `error` event by turnSink. The
 		// one path that bypasses the sink entirely is RunTurn's own
 		// preflight check (empty req.Model) — surface that explicitly
-		// so an empty-model bug doesn't fail silently on the wire.
+		// so an empty-model bug doesn't fail silently on the wire. This
+		// is a non-terminal event so it goes through emit (out), not
+		// terminal (done) — the actual terminal turn.failed follows it.
 		if errors.Is(err, bridle.ErrModelRequired) {
 			emit(contracts.Event{Type: contracts.EvError, Payload: mustMarshal(errorPayload{Message: err.Error()})})
 		}
-		emit(contracts.Event{
+		terminal(contracts.Event{
 			Type:    contracts.EvTurnFailed,
 			Payload: mustMarshal(turnFailedPayload{Interrupted: false}),
 		})
