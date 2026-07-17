@@ -152,7 +152,12 @@ func ContainDestDir(baseDir, name string) (string, error) {
 	// (correct, but non-obvious) behavior of treating a later absolute
 	// argument as just another path component (finding #8's missing
 	// regression test).
-	if filepath.IsAbs(name) {
+	// filepath.IsAbs is platform-specific ("/etc/passwd" is absolute on Unix
+	// but not on Windows), so ALSO reject any name beginning with a path
+	// separator ('/' or '\') — an absolute-style name is never a legitimate
+	// single package name on any platform, and this keeps the guard's
+	// behavior (and its test) consistent cross-platform.
+	if filepath.IsAbs(name) || strings.HasPrefix(name, "/") || strings.HasPrefix(name, `\`) {
 		return "", fmt.Errorf("%w: %q is an absolute path", ErrDestDirTraversal, name)
 	}
 	baseClean := filepath.Clean(baseDir)
