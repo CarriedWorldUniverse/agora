@@ -1,0 +1,9 @@
+anvil-builder · frontier:high · Esc to quit
+approve patch?
+main.go
+        3 + func main() {}
+   3      - func old() {}
+> Approve once
+  Approve for session
+  Deny — tell the agent what to do differently
+
