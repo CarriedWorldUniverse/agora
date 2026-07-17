@@ -52,6 +52,53 @@ func TestSurfaceRunner_ReadFileSuccess(t *testing.T) {
 	}
 }
 
+// TestSurfaceRunner_SourceContentNotHTMLEscaped pins the tool-result wire
+// format decision (U-C2): reading real source code (which is full of < > &&)
+// must reach the model faithfully. The runner's return must be VALID JSON
+// (the claudesdk lane embeds it and marshals) that DECODES back to the exact
+// bytes, and must NOT carry Go's default HTML-escapes (< etc.) in its
+// on-the-wire form — because the direct-api/fake lane stringifies it verbatim.
+func TestSurfaceRunner_SourceContentNotHTMLEscaped(t *testing.T) {
+	roots := testRoots(t)
+	src := "if a < b && c > d {\n\tfoo(\"x&y\")\n}\n"
+	if err := os.WriteFile(filepath.Join(roots.WorkingDir, "code.go"), []byte(src), 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	surface := toolrunner.NewSurface(nil, toolrunner.NewFSFamily(roots), toolrunner.NewExecFamily(roots))
+	runner := newSurfaceRunner(surface)
+
+	raw, err := runner.Run(context.Background(), bridle.ToolCall{
+		ID:   "1",
+		Name: toolrunner.ToolReadFile,
+		Args: json.RawMessage(`{"path":"code.go"}`),
+	})
+	if err != nil {
+		t.Fatalf("Run: unexpected error: %v", err)
+	}
+	// Valid JSON that round-trips to the exact source.
+	var got string
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Run's return is not valid JSON: %v (raw=%s)", err, raw)
+	}
+	if got != src {
+		t.Fatalf("decoded content = %q; want %q", got, src)
+	}
+	// On the wire, the JSON must contain the LITERAL metacharacters, NOT their
+	// \u00xx HTML-escapes (the corruption default json.Marshal would introduce
+	// on the verbatim-stringified direct-api lane).
+	wire := string(raw)
+	for _, esc := range []string{"\\u003c", "\\u003e", "\\u0026"} {
+		if strings.Contains(wire, esc) {
+			t.Fatalf("wire form HTML-escaped (%s present): %s", esc, wire)
+		}
+	}
+	for _, lit := range []string{"<", ">", "&"} {
+		if !strings.Contains(wire, lit) {
+			t.Fatalf("wire form missing literal metacharacter %q: %s", lit, wire)
+		}
+	}
+}
+
 // TestSurfaceRunner_RunCommandSuccess proves the exec family path too.
 func TestSurfaceRunner_RunCommandSuccess(t *testing.T) {
 	roots := testRoots(t)

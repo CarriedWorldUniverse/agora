@@ -1,6 +1,7 @@
 package turnengine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -84,9 +85,27 @@ func (r *surfaceRunner) Run(ctx context.Context, call bridle.ToolCall) (json.Raw
 	if result.IsError {
 		return nil, errors.New(result.Content)
 	}
-	// json.Marshal, not a raw byte cast: bridle expects Run's return to be
-	// a valid JSON value (see bridle/fake.ToolResult usage — a result of
-	// `"echoed"` is a JSON-encoded string, not the bare bytes echoed), and
-	// Result.Content is a plain Go string, not pre-encoded JSON.
-	return json.Marshal(result.Content)
+	// Encode Content as a JSON string, but WITHOUT Go's default HTML-escaping
+	// (< > & → < > &). Two constraints pin this:
+	//   1. The value MUST be valid JSON. The claudesdk lane embeds it as
+	//      sidecarToolResult.Content (a json.RawMessage field) and marshals the
+	//      whole struct to the sidecar's stdin — invalid JSON (e.g. raw file
+	//      bytes) would fail that marshal. So a bare-bytes return is wrong.
+	//   2. It must reach the model as faithful text. HTML-escaping is harmless
+	//      on the claudesdk lane (the sidecar JSON-DECODES Content, so <
+	//      decodes back to '<'), but the direct-api/fake lane stringifies
+	//      Result VERBATIM (bridle run.go: `string(atc.Result.Result)`), so
+	//      default json.Marshal would hand the model <-mangled source code
+	//      for any read_file on real code. SetEscapeHTML(false) is clean on
+	//      both lanes. This is the tool-result wire format decision U-C2 owns
+	//      (internal/toolrunner/call.go's Result-shape note).
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(result.Content); err != nil {
+		return nil, err
+	}
+	// Encode appends a trailing newline; trim it so the RawMessage is exactly
+	// the JSON string value.
+	return json.RawMessage(bytes.TrimRight(buf.Bytes(), "\n")), nil
 }
