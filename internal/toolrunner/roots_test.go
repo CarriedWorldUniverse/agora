@@ -126,7 +126,14 @@ func TestResolveContainedAddDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveContained: %v", err)
 	}
-	want := filepath.Join(extra, "x.txt")
+	// resolveContained returns the symlink-resolved path; on macOS `extra`
+	// (a t.TempDir under /var) resolves to /private/var, so compare against
+	// the resolved form (identity on Linux, where /tmp isn't a symlink).
+	resolvedExtra, err := filepath.EvalSymlinks(extra)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	want := filepath.Join(resolvedExtra, "x.txt")
 	if got != want {
 		t.Fatalf("resolveContained = %q, want %q", got, want)
 	}

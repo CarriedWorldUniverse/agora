@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
@@ -113,12 +111,13 @@ func (e *ExecFamily) Execute(ctx context.Context, call Call) (Result, error) {
 	cmd := exec.CommandContext(runCtx, "/bin/sh", "-c", a.Command)
 	cmd.Dir = cwd
 
-	// Setpgid makes this child the leader of its OWN new process group, so
-	// a negative-pid kill below reaches every descendant (grandchildren
-	// like a backgrounded `sleep &`, or a nested `sh -c 'sleep 5'`) rather
-	// than only the direct /bin/sh child — review fix 1's orphan-on-timeout
-	// defect.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// setProcGroup puts this child in its OWN new process group (unix), so the
+	// kill on timeout reaches every descendant (a backgrounded `sleep &`, a
+	// nested `sh -c 'sleep 5'`) rather than only the direct /bin/sh child —
+	// review fix 1's orphan-on-timeout defect. Platform-split
+	// (exec_procgroup_{unix,windows}.go) so the package compiles on Windows,
+	// where Setpgid/negative-pid-kill don't exist; run_command is unix-oriented.
+	setProcGroup(cmd)
 
 	// WaitDelay bounds Execute against BOTH known hang sources (os/exec
 	// doc): a child that fails to exit after ctx is canceled, and a child
@@ -146,10 +145,7 @@ func (e *ExecFamily) Execute(ctx context.Context, call Call) (Result, error) {
 	var timedOut atomic.Bool
 	cmd.Cancel = func() error {
 		timedOut.Store(true)
-		if cmd.Process == nil {
-			return os.ErrProcessDone
-		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return killProcGroup(cmd)
 	}
 
 	out := newCappedWriter(execOutputCap)

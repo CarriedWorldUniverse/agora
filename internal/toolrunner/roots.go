@@ -165,9 +165,13 @@ func resolveContained(roots Roots, path string) (string, error) {
 		abs = filepath.Join(roots.WorkingDir, abs)
 	}
 	clean := filepath.Clean(abs)
-	if _, ok := roots.ContainingRoot(clean); !ok {
-		return "", ErrPathEscape
-	}
+	// Containment is judged AFTER symlink resolution below, NOT on the raw
+	// `clean` here: a premature lexical check against the (symlink-resolved)
+	// roots wrongly rejects a valid absolute path given in UNRESOLVED form
+	// when a root's ancestor is a symlink (macOS /var -> /private/var, /tmp ->
+	// /private/tmp). filepath.Clean has already collapsed any ".." segments,
+	// and the resolved-ancestor check below still catches every escape
+	// (../.. , symlinked-dir, and symlinked-file — see roots_test.go).
 
 	// Find the longest existing ancestor directory of clean.
 	dir := clean

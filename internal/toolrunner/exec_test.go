@@ -1,3 +1,10 @@
+//go:build !windows
+
+// The exec family shells out to /bin/sh; these tests use POSIX commands
+// (sleep, true, exit N, pwd) and only run on unix. run_command is
+// unix-oriented — Windows is a build/CI target for the package, not a runtime
+// target for this family (see exec_procgroup_windows.go).
+
 package toolrunner
 
 import (
