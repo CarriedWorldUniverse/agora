@@ -37,6 +37,39 @@ type Root struct {
 	// FollowSymlinks: symlinked dirs are followed for User/Repo/Admin,
 	// ignored for System (§2).
 	FollowSymlinks bool
+	// ContainWithin, when non-empty, is the boundary a followed symlink must
+	// resolve inside of — set to the PROJECT root for Repo-scope roots (an
+	// untrusted clone), so a repo-controlled symlink cannot escape the project
+	// to read an arbitrary host file, while a within-project (monorepo) symlink
+	// store still works. Empty for User/Admin (a trusted machine — symlinks
+	// roam) and irrelevant for System (which never follows a symlink). For a
+	// Repo root with an empty ContainWithin the boundary defaults to Path (the
+	// safe narrow default). Spec: agora-spec-skills.md §2. Review: NEX-750.
+	ContainWithin string
+}
+
+// symlinkPolicy is how a root treats symlinks during discovery: whether a
+// symlink may be followed at all, and (for an untrusted Repo root) the
+// boundary a followed symlink's resolved target must stay within.
+type symlinkPolicy struct {
+	follow    bool
+	contained bool
+	boundary  string
+}
+
+func (r Root) symlinkPolicy() symlinkPolicy {
+	switch r.Scope {
+	case ScopeRepo:
+		b := r.ContainWithin
+		if b == "" {
+			b = r.Path
+		}
+		return symlinkPolicy{follow: r.FollowSymlinks, contained: true, boundary: b}
+	default:
+		// User/Admin roam (trusted machine); System has follow=false so no
+		// symlink is ever followed regardless of containment.
+		return symlinkPolicy{follow: r.FollowSymlinks}
+	}
 }
 
 // Warning is a non-fatal discovery/rendering condition surfaced to the
@@ -55,16 +88,16 @@ type Warning struct {
 func DefaultRoots(projectRoot, cwd, home string) []Root {
 	var roots []Root
 	// 1. Project .agora/skills (Repo).
-	roots = append(roots, Root{Path: filepath.Join(projectRoot, ".agora", "skills"), Scope: ScopeRepo, FollowSymlinks: true})
+	roots = append(roots, Root{Path: filepath.Join(projectRoot, ".agora", "skills"), Scope: ScopeRepo, FollowSymlinks: true, ContainWithin: projectRoot})
 	// 2. Repo .agents/skills at every level root -> cwd (Repo).
 	for _, dir := range ancestorChain(projectRoot, cwd) {
-		roots = append(roots, Root{Path: filepath.Join(dir, ".agents", "skills"), Scope: ScopeRepo, FollowSymlinks: true})
+		roots = append(roots, Root{Path: filepath.Join(dir, ".agents", "skills"), Scope: ScopeRepo, FollowSymlinks: true, ContainWithin: projectRoot})
 	}
 	// 3. User stores + Claude Code compat.
 	roots = append(roots,
 		Root{Path: filepath.Join(home, ".agora", "skills"), Scope: ScopeUser, FollowSymlinks: true},
 		Root{Path: filepath.Join(home, ".agents", "skills"), Scope: ScopeUser, FollowSymlinks: true},
-		Root{Path: filepath.Join(projectRoot, ".claude", "skills"), Scope: ScopeRepo, FollowSymlinks: true},
+		Root{Path: filepath.Join(projectRoot, ".claude", "skills"), Scope: ScopeRepo, FollowSymlinks: true, ContainWithin: projectRoot},
 		Root{Path: filepath.Join(home, ".claude", "skills"), Scope: ScopeUser, FollowSymlinks: true},
 	)
 	// 4. System (bundled), symlinks NOT followed.
@@ -198,21 +231,32 @@ func pathWithinRoot(resolved, root string) bool {
 //   - At most cap bytes are read via io.LimitReader; a larger file is
 //     truncated (truncated=true) rather than fully loaded, so a symlink to
 //     /dev/zero or a huge real file cannot OOM the host (review finding S2).
-func safeReadUnder(path string, root string, followSymlinks bool, capBytes int) (data []byte, truncated bool, err error) {
+func safeReadUnder(path string, pol symlinkPolicy, capBytes int) (data []byte, truncated bool, err error) {
 	li, err := os.Lstat(path)
 	if err != nil {
 		return nil, false, err
 	}
-	if li.Mode()&os.ModeSymlink != 0 {
-		if !followSymlinks {
-			return nil, false, fmt.Errorf("refusing symlinked %s (symlinks disabled for this root)", filepath.Base(path))
-		}
+	isSymlink := li.Mode()&os.ModeSymlink != 0
+	if isSymlink && !pol.follow {
+		return nil, false, fmt.Errorf("refusing symlinked %s (symlinks disabled for this root)", filepath.Base(path))
+	}
+	if pol.contained {
+		// The RESOLVED path — catching a symlinked final component AND any
+		// symlinked PARENT directory the walk followed to get here — must stay
+		// within the containment boundary, so an untrusted (Repo) clone cannot
+		// escape the project to read an arbitrary host file (NEX-750). Applied
+		// to regular files too, not just symlinked final components.
 		resolved, rerr := filepath.EvalSymlinks(path)
 		if rerr != nil {
-			return nil, false, fmt.Errorf("refusing unresolvable symlink %s: %w", filepath.Base(path), rerr)
+			return nil, false, fmt.Errorf("refusing unresolvable path %s: %w", filepath.Base(path), rerr)
 		}
-		if !pathWithinRoot(resolved, root) {
-			return nil, false, fmt.Errorf("refusing symlinked %s escaping discovery root", filepath.Base(path))
+		if !pathWithinRoot(resolved, pol.boundary) {
+			return nil, false, fmt.Errorf("refusing %s escaping the containment boundary", filepath.Base(path))
+		}
+	} else if isSymlink {
+		// User/Admin roam (trusted machine), but a dangling symlink is refused.
+		if _, rerr := filepath.EvalSymlinks(path); rerr != nil {
+			return nil, false, fmt.Errorf("refusing unresolvable symlink %s: %w", filepath.Base(path), rerr)
 		}
 	}
 	f, err := os.Open(path)
@@ -220,6 +264,11 @@ func safeReadUnder(path string, root string, followSymlinks bool, capBytes int) 
 		return nil, false, err
 	}
 	defer f.Close()
+	// TOCTOU note (NEX-750, accepted for the single-owner threat model): a
+	// concurrent local writer could swap the resolved target between
+	// EvalSymlinks above and this Open. A portable O_NOFOLLOW fix isn't
+	// available in the Go stdlib across GOOS; the window is narrow and requires
+	// local write access to the discovery tree.
 	data, err = io.ReadAll(io.LimitReader(f, int64(capBytes)+1))
 	if err != nil {
 		return nil, false, err
@@ -239,6 +288,19 @@ func scanRoot(root Root) ([]*Skill, []Warning) {
 	info, err := os.Stat(root.Path)
 	if err != nil || !info.IsDir() {
 		return nil, nil // missing root = empty, no error (§2)
+	}
+
+	// If the discovery root ITSELF is a symlink escaping the containment
+	// boundary (a malicious clone committing `.agora/skills` as a symlink out
+	// of the project), refuse it before walking — the per-entry walk check only
+	// covers child symlinks, so without this the escaped tree is enumerated
+	// (bounded, content-safe, since safeReadUnder still blocks every read) but
+	// wastefully and with per-file warnings. This closes the walk-side
+	// asymmetry with a single root-escape warning (NEX-750 delta review).
+	if pol := root.symlinkPolicy(); pol.contained {
+		if resolved, rerr := filepath.EvalSymlinks(root.Path); rerr != nil || !pathWithinRoot(resolved, pol.boundary) {
+			return nil, []Warning{{Root: root.Path, Message: "discovery: root path escapes containment boundary, skipped"}}
+		}
 	}
 
 	dirCount := 0
@@ -278,7 +340,7 @@ func scanRoot(root Root) ([]*Skill, []Warning) {
 		}
 		if hasSkillMD {
 			skillPath := filepath.Join(dir, "SKILL.md")
-			data, truncated, err := safeReadUnder(skillPath, root.Path, root.FollowSymlinks, MaxSkillFileBytes)
+			data, truncated, err := safeReadUnder(skillPath, root.symlinkPolicy(), MaxSkillFileBytes)
 			if err != nil {
 				warnings = append(warnings, Warning{Root: root.Path, Path: skillPath, Message: "discovery: " + err.Error()})
 				return
@@ -300,7 +362,7 @@ func scanRoot(root Root) ([]*Skill, []Warning) {
 			// (symlink-escaping / oversized) sidecar is surfaced as a warning
 			// but simply leaves the zero-value Sidecar (§1.2).
 			sidecarPath := filepath.Join(dir, "agents", "openai.yaml")
-			if sidecarData, _, serr := safeReadUnder(sidecarPath, root.Path, root.FollowSymlinks, MaxSkillFileBytes); serr == nil {
+			if sidecarData, _, serr := safeReadUnder(sidecarPath, root.symlinkPolicy(), MaxSkillFileBytes); serr == nil {
 				sk.Sidecar = ParseSidecar(sidecarData)
 			} else if !os.IsNotExist(serr) {
 				warnings = append(warnings, Warning{Root: root.Path, Path: sidecarPath, Message: "discovery: sidecar skipped: " + serr.Error()})
@@ -327,6 +389,16 @@ func scanRoot(root Root) ([]*Skill, []Warning) {
 				st, err := os.Stat(childPath)
 				if err != nil || !st.IsDir() {
 					continue
+				}
+				// Repo scope: don't descend into a directory symlink that
+				// escapes the containment boundary (an untrusted clone
+				// symlinking out of the project). User/Admin roam (NEX-750).
+				if pol := root.symlinkPolicy(); pol.contained {
+					resolved, rerr := filepath.EvalSymlinks(childPath)
+					if rerr != nil || !pathWithinRoot(resolved, pol.boundary) {
+						warnings = append(warnings, Warning{Root: root.Path, Path: childPath, Message: "discovery: symlinked dir escapes containment boundary, skipped"})
+						continue
+					}
 				}
 				isDir = true
 			}
