@@ -3,9 +3,12 @@ package turnengine
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
 	agoraio "github.com/CarriedWorldUniverse/agora/internal/io"
+	"github.com/CarriedWorldUniverse/agora/internal/toolrunner"
 	bridle "github.com/CarriedWorldUniverse/bridle"
 )
 
@@ -22,26 +25,32 @@ const placeholderModel = "claude-placeholder"
 // *bridle.Harness: it drives ONE deliberation turn per user_message input
 // and streams the result as contracts.Event.
 //
-// Scope (Phase 2 U-C1 — the architecture-proving slice, NOT the finished
-// adapter): no tool surface (Tools always empty, ToolRunner is a
-// noop-that-errors-loudly), no approvals, no ctxmap/context assembly
-// (AppendSystemPrompt is caller-supplied verbatim, no per-turn ThreadItem
-// replay), no persistence (nothing survives past one Run call), no
-// in-process launch wiring. One turn in flight at a time — a
+// Scope (Phase 2 U-C1 built the architecture-proving text-only slice;
+// U-C2 — this unit — wires in the Phase 1 tool surface: TurnRequest.Tools
+// now carries the fs/exec specs and tool calls actually EXECUTE via
+// surfaceRunner/toolrunner.Surface). STILL missing: approvals (U-C3 —
+// tool execution is UNGATED this unit, see surfacerunner.go's doc), real
+// MCP wiring (TurnRequest.MCP stays unset — MCP tools ride in Tools, per
+// the blueprint's claudesdk SupportsMCP=false note), ctxmap/context
+// assembly (AppendSystemPrompt is caller-supplied verbatim, no per-turn
+// ThreadItem replay), no persistence (nothing survives past one Run
+// call), no in-process launch wiring. One turn in flight at a time — a
 // user_message arriving while a turn is already running is dropped
 // (steering/queuing a second turn is out of scope; Session's
 // first-answer-wins arbitration one layer up is the only de-duplication
 // this unit relies on, per contracts/event.go and internal/io/session.go's
-// existing design). Those are ALL later build units (U-C2..U-C7, U-D*,
+// existing design). Those are ALL later build units (U-C3..U-C7, U-D*,
 // U-E*) — see doc.go and agora-engine-blueprint.md's build decomposition.
 type Manager struct {
 	threadID string
 	provider bridle.Provider
 	harness  *bridle.Harness
+	surface  *toolrunner.Surface
 
 	model              string
 	appendSystemPrompt string
 	maxSteps           int
+	roots              toolrunner.Roots
 	idGen              IDGen
 }
 
@@ -69,6 +78,15 @@ func WithMaxSteps(n int) Option { return func(m *Manager) { m.maxSteps = n } }
 // deterministic turn ids.
 func WithIDGen(g IDGen) Option { return func(m *Manager) { m.idGen = g } }
 
+// WithRoots sets the writable-root set (agora-spec-io.md §3a) the fs/exec
+// tool families are constrained to. Unset (the default, zero Roots{}) is
+// resolved by NewManager into toolrunner.NewRoots(os.Getwd()) — the
+// process's own current directory, no additional add_dirs. Real
+// per-thread/per-profile root configuration (add_dir, a working dir other
+// than the process cwd) is a later unit; this default is the only sane
+// zero-config choice for a Manager built without one.
+func WithRoots(roots toolrunner.Roots) Option { return func(m *Manager) { m.roots = roots } }
+
 // NewManager builds a Manager for one thread over provider. provider is
 // the injection seam: production callers pass provider/claudesdk.New()
 // (funnel mode, per the blueprint's locked decision #2/#3); tests pass
@@ -87,7 +105,38 @@ func NewManager(threadID string, provider bridle.Provider, opts ...Option) *Mana
 	for _, o := range opts {
 		o(m)
 	}
+	if m.roots.WorkingDir == "" {
+		m.roots = defaultRoots()
+	}
+	// mcp: nil — NewSurface documents nil as "no MCP servers configured/
+	// folded in, Specs/Execute simply skip it", which is exactly this
+	// unit's scope (real MCP wiring is a later ticket; TurnRequest.MCP
+	// also stays unset in runOneTurn, per the blueprint's claudesdk
+	// SupportsMCP=false note — MCP tools ride in Tools, not MCP).
+	m.surface = toolrunner.NewSurface(nil, toolrunner.NewFSFamily(m.roots), toolrunner.NewExecFamily(m.roots))
 	return m
+}
+
+// defaultRoots builds WithRoots's zero-value default: the process's own
+// current working directory, canonicalized via toolrunner.NewRoots. Both
+// os.Getwd and NewRoots (abs + symlink resolution) failing is an
+// environment fault this package has no safe fallback for — silently
+// defaulting to "." would resolve fs/exec tools against a directory that
+// isn't actually where NewManager's caller thought it was, and swallowing
+// the error into an unusable Roots{} would let every fs/exec call fail
+// confusingly downstream instead of loudly at construction time. Panics,
+// matching this package's existing mustMarshal "should never happen"
+// convention (sink.go).
+func defaultRoots() toolrunner.Roots {
+	wd, err := os.Getwd()
+	if err != nil {
+		panic(fmt.Sprintf("turnengine: os.Getwd failed building the default tool Roots: %v", err))
+	}
+	roots, err := toolrunner.NewRoots(wd)
+	if err != nil {
+		panic(fmt.Sprintf("turnengine: toolrunner.NewRoots(%q) failed: %v", wd, err))
+	}
+	return roots
 }
 
 // Run implements agora io.Engine. It owns one thread end-to-end: a reader
@@ -262,15 +311,33 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, input contracts.I
 	emit(contracts.Event{Type: contracts.EvTurnStarted})
 
 	sink := newTurnSink(m.threadID, turnID, out, sendCtx)
+
+	// Specs is fetched fresh per turn (not cached at Manager-construction
+	// time) — the brief calls this out explicitly: Specs can be
+	// ctx-dependent (a future MCPSource's Tools(ctx) may hit the network
+	// or reflect servers that changed between turns), even though today's
+	// fs/exec-only Surface is always static/in-memory (Specs' own doc:
+	// "native family specs are always static/in-memory and cannot fail").
+	// TurnRequest.MCP is deliberately left unset — MCP tools ride in
+	// Tools, not MCP (blueprint: claudesdk SupportsMCP=false).
+	toolSpecs, err := m.surface.Specs(turnCtx)
+	if err != nil {
+		terminal(contracts.Event{
+			Type:    contracts.EvTurnFailed,
+			Payload: mustMarshal(turnFailedPayload{Interrupted: false}),
+		})
+		return
+	}
 	req := bridle.TurnRequest{
 		Provider:           m.provider.Name(),
 		Model:              m.model,
 		AppendSystemPrompt: m.appendSystemPrompt,
 		UserMessage:        input.Text,
 		MaxSteps:           m.maxSteps,
+		Tools:              toolDefsFromSpecs(toolSpecs),
 	}
 
-	result, err := m.harness.RunTurn(turnCtx, req, noopToolRunner{}, sink)
+	result, err := m.harness.RunTurn(turnCtx, req, newSurfaceRunner(m.surface), sink)
 
 	switch result.StopReason {
 	case bridle.StopReasonModelDone, bridle.StopReasonMaxSteps:
