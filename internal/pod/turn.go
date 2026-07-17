@@ -47,6 +47,7 @@ func (p *Pod) RunTurn(ctx context.Context, text string) (TurnResult, error) {
 	threadID := p.info.ThreadID
 	identityFP := p.info.IdentityFP
 	attach := p.attach
+	sessCtx := p.sessionCtx
 	p.mu.Unlock()
 
 	if err := attach.Send(ctx, contracts.Input{Type: contracts.InUserMessage, Text: text}); err != nil {
@@ -67,31 +68,40 @@ func (p *Pod) RunTurn(ctx context.Context, text string) (TurnResult, error) {
 				if err := json.Unmarshal(ev.Payload, &q); err != nil {
 					return TurnResult{}, fmt.Errorf("pod: decode question.asked: %w", err)
 				}
-				if q.Blocking {
-					outcome, err := p.questions.Ask(planning.AskRequest{
-						ThreadID: threadID,
-						Args:     q.Args,
-						Source:   q.Source,
-						Blocking: true,
-						Context:  planning.ContextDispatchPod,
-						TS:       p.clock(),
-						Identity: identityFP,
-					})
-					if err != nil {
-						return TurnResult{}, fmt.Errorf("pod: ladder resolution: %w", err)
-					}
-					if outcome.Disposition != planning.DispositionDieHonestly || outcome.Terminate == nil {
-						// Never reached in practice — ContextDispatchPod always
-						// resolves blocking to die-honestly (planning.Resolve) —
-						// but fail closed rather than silently forwarding the
-						// model past an unanswered question if that invariant
-						// ever breaks.
-						return TurnResult{}, fmt.Errorf("pod: unexpected disposition %q for a blocking question in a dispatch pod", outcome.Disposition)
-					}
-					return TurnResult{Events: result.Events, Blocked: outcome.Terminate}, nil
+				// Route EVERY question (blocking or not) through the ladder so
+				// it is durably recorded (TIQuestionAsked) — §5: a non-blocking
+				// question "skips straight to the queue", which is a real audit
+				// item an operator/orchestrator answers out-of-band, NOT just an
+				// in-memory event that gets discarded when the turn returns.
+				outcome, err := p.questions.Ask(planning.AskRequest{
+					ThreadID: threadID,
+					Args:     q.Args,
+					Source:   q.Source,
+					Blocking: q.Blocking,
+					Context:  planning.ContextDispatchPod,
+					TS:       p.clock(),
+					Identity: identityFP,
+				})
+				if err != nil {
+					return TurnResult{}, fmt.Errorf("pod: ladder resolution: %w", err)
 				}
-				// blocking:false questions queue and the turn continues (§5) —
-				// fall through and record the event like any other.
+				switch outcome.Disposition {
+				case planning.DispositionDieHonestly:
+					if outcome.Terminate == nil {
+						return TurnResult{}, fmt.Errorf("pod: die-honestly disposition with no terminate result for a blocking question")
+					}
+					// The turn does not continue past an unanswered blocking
+					// question; the pod stays warm (§6a), only the turn dies.
+					return TurnResult{Events: result.Events, Blocked: outcome.Terminate}, nil
+				case planning.DispositionQueue:
+					// blocking:false — filed durably, turn continues. Record the
+					// event for the caller and fall through.
+				default:
+					// Fail closed rather than silently forwarding the model past
+					// an unanswered question if the ladder invariant ever breaks
+					// (ContextDispatchPod resolves only to die-honestly/queue).
+					return TurnResult{}, fmt.Errorf("pod: unexpected disposition %q for a question in a dispatch pod", outcome.Disposition)
+				}
 			}
 
 			result.Events = append(result.Events, ev)
@@ -99,6 +109,11 @@ func (p *Pod) RunTurn(ctx context.Context, text string) (TurnResult, error) {
 			if ev.Type == contracts.EvTurnCompleted || ev.Type == contracts.EvTurnFailed {
 				return result, nil
 			}
+		case <-sessCtx.Done():
+			// Session torn down (Deprovision / pod-lifetime cancel) mid-turn.
+			// The attach event channel is never closed on teardown, so this is
+			// what unblocks a turn that would otherwise hang here forever.
+			return TurnResult{}, ErrTurnAborted
 		case <-ctx.Done():
 			return TurnResult{}, ctx.Err()
 		}

@@ -38,4 +38,11 @@ var (
 	// caught during validation (before any mutation), not left to surface
 	// later as a broken turn.
 	ErrResumeThreadUnknown = errors.New("pod: resume thread unknown to the store")
+
+	// ErrTurnAborted is returned by RunTurn when the pod's session is torn
+	// down (Deprovision, or pod-lifetime-context cancel) while the turn is
+	// in flight. RunTurn ties its wait to the session lifetime — the attach
+	// event channel is never closed on teardown, so without this a turn
+	// blocked on it with a deadline-less caller ctx would hang forever.
+	ErrTurnAborted = errors.New("pod: turn aborted — session deprovisioned mid-turn")
 )

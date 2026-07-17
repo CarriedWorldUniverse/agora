@@ -20,7 +20,8 @@ type State string
 const (
 	// StateBlank is the boot state: auto-gen'd local key only, no identity/
 	// profile/workspace/session. The only thing a blank pod can do is
-	// accept a provision message (or be deprovisioned again, a no-op).
+	// accept a provision message; RunTurn and Deprovision both refuse while
+	// blank (ErrNotProvisioned).
 	StateBlank State = "blank"
 	// StateProvisioned: identity/profile/session are set; RunTurn is live.
 	StateProvisioned State = "provisioned"
@@ -75,6 +76,12 @@ type Pod struct {
 	info    ProvisionedInfo
 	session *agoraio.Session
 	attach  *agoraio.Attachment
+	// sessionCtx/sessionCancel bound the live session's lifetime (derived
+	// from baseCtx). Deprovision cancels sessionCtx so an in-flight RunTurn
+	// blocked on the (never-closed) attach event channel unblocks; the
+	// engine goroutine observes the same cancellation.
+	sessionCtx    context.Context
+	sessionCancel context.CancelFunc
 }
 
 // Config is NewPod's dependency set. Identities and EngineFactory are
@@ -145,6 +152,14 @@ type provisionedEngine struct {
 }
 
 func (e provisionedEngine) Run(ctx context.Context, in <-chan contracts.Input, out chan<- contracts.Event) error {
+	// If the session's context is already dead at Run time (pod lifetime
+	// canceled during provisioning), don't let a ready send-slot race the
+	// cancel branch in select and skip the provisioned event silently —
+	// bail deterministically.
+	if err := ctx.Err(); err != nil {
+		close(out)
+		return err
+	}
 	select {
 	case out <- e.payload:
 	case <-ctx.Done():

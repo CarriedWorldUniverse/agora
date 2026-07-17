@@ -67,6 +67,18 @@ func (p *Pod) Provision(ctx context.Context, device remote.Device, msg contracts
 		if _, err := p.store.Meta(threadID); err != nil {
 			return ProvisionedInfo{}, fmt.Errorf("%w: %q: %v", ErrResumeThreadUnknown, threadID, err)
 		}
+	} else {
+		// 4b. A thread-scoped device (non-empty AllowedThreads) is leashed to
+		// specific existing threads — it must NOT mint a brand-new thread via
+		// session.new (a fresh random ID can never be in its allow-list, so
+		// CheckThread on the resume path would refuse it; session.new would
+		// otherwise silently escape the leash). Fail-closed, matching the
+		// file-header invariant "cannot provision a pod into a different
+		// thread no matter what". An unconstrained device (empty
+		// AllowedThreads) is unaffected.
+		if len(device.Constraints.AllowedThreads) > 0 {
+			return ProvisionedInfo{}, fmt.Errorf("%w: thread-scoped device may not create a new thread via session.new", remote.ErrThreadNotAllowed)
+		}
 	}
 
 	// 5. Identity resolution — must succeed before any mutation; a pod
@@ -101,6 +113,7 @@ func (p *Pod) Provision(ctx context.Context, device remote.Device, msg contracts
 		workDir = msg.Workspace.Dir
 	}
 
+	createdNew := false
 	if msg.Session.New {
 		id, err := newThreadID()
 		if err != nil {
@@ -117,6 +130,7 @@ func (p *Pod) Provision(ctx context.Context, device remote.Device, msg contracts
 		}); err != nil {
 			return ProvisionedInfo{}, fmt.Errorf("pod: create thread: %w", err)
 		}
+		createdNew = true
 	}
 
 	if err := p.store.Append(threadID, []contracts.ThreadItem{{
@@ -126,6 +140,14 @@ func (p *Pod) Provision(ctx context.Context, device remote.Device, msg contracts
 		Device:   device.ID,
 		Payload:  msg,
 	}}); err != nil {
+		// apply-all-or-reject (§6a): Create + Append are two separate durable
+		// writes, not one transaction. If Append fails after we just Created
+		// the thread, compensate by deleting it so no orphaned zero-item
+		// ThreadMeta is left behind. (Resume path Created nothing, so there's
+		// nothing to roll back — the existing thread is untouched.)
+		if createdNew {
+			_ = p.store.Delete(threadID)
+		}
 		return ProvisionedInfo{}, fmt.Errorf("pod: append provisioning item: %w", err)
 	}
 
@@ -136,7 +158,11 @@ func (p *Pod) Provision(ctx context.Context, device remote.Device, msg contracts
 		inner:   inner,
 		payload: mustMarshalEvent(contracts.EvProvisioned, threadID, provisionedPayload{IdentityFP: info.IdentityFP, Profile: info.Profile}),
 	}
-	session := agoraio.NewSession(p.baseCtx, threadID, engine)
+	// Per-session context derived from baseCtx: Deprovision cancels it (never
+	// baseCtx itself, so the pod stays reusable — warm-pool §6a), which both
+	// tears the engine goroutine down and unblocks any in-flight RunTurn.
+	sessionCtx, sessionCancel := context.WithCancel(p.baseCtx)
+	session := agoraio.NewSession(sessionCtx, threadID, engine)
 	// replayN > 0: io.Session.Attach snapshots the backlog tail and registers
 	// the client atomically under one lock (session.go's FIX 3a), so a small,
 	// non-zero replay window guarantees the dispatch attach sees the
@@ -149,6 +175,8 @@ func (p *Pod) Provision(ctx context.Context, device remote.Device, msg contracts
 	p.info = info
 	p.session = session
 	p.attach = attach
+	p.sessionCtx = sessionCtx
+	p.sessionCancel = sessionCancel
 	p.state = StateProvisioned
 
 	return info, nil
@@ -168,12 +196,19 @@ func (p *Pod) Deprovision() error {
 		return ErrNotProvisioned
 	}
 
+	// Cancel the per-session context first so any in-flight RunTurn unblocks
+	// and a context-blocked engine goroutine can return, THEN Close drains it.
+	if p.sessionCancel != nil {
+		p.sessionCancel()
+	}
 	if p.session != nil {
 		p.session.Close()
 	}
 
 	p.session = nil
 	p.attach = nil
+	p.sessionCtx = nil
+	p.sessionCancel = nil
 	p.info = ProvisionedInfo{}
 	p.state = StateBlank
 	return nil
