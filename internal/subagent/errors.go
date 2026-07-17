@@ -34,4 +34,9 @@ var (
 	// without producing schema-valid output (spec §2: "validated, retried
 	// on mismatch").
 	ErrSchemaGiveUp = errors.New("subagent: gave up on schema-forced output after max retries")
+
+	// ErrSpawnCapExceeded: a spawn would exceed the configured per-session
+	// spawn cap (spec §2: cap total agent() calls per session, distinct from
+	// the depth cap and the concurrency cap).
+	ErrSpawnCapExceeded = errors.New("subagent: spawn cap exceeded")
 )

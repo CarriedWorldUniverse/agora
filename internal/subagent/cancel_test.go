@@ -115,6 +115,50 @@ func TestCancel_Matrix(t *testing.T) {
 	}
 }
 
+// TestCancel_TurnInterruptThenTeardown_NoOrphanedRunningNode is FIX 1's
+// regression: a turn-interrupt closes root->a while a's own background
+// child c is still running; a later thread-teardown on root must still
+// reach and cancel c (a closed intermediate edge must not hide a
+// still-running descendant from cancellation traversal — "no orphaned
+// running node" is an invariant, not a best-effort).
+func TestCancel_TurnInterruptThenTeardown_NoOrphanedRunningNode(t *testing.T) {
+	m, r, ids := buildCancelFixture(t)
+	defer close(r.release)
+
+	// Turn-interrupt cancels a (root's direct foreground child) and closes
+	// root->a; c (a's own background child) is left running, unreachable via
+	// an openOnly BFS from root once root->a is closed.
+	interruptResult, err := m.CancelPropagate(TriggerTurnInterrupt, "root")
+	if err != nil {
+		t.Fatalf("CancelPropagate(turn_interrupt): %v", err)
+	}
+	if len(interruptResult.Cancelled) != 1 || interruptResult.Cancelled[0] != ids["a"] {
+		t.Fatalf("turn_interrupt Cancelled = %v, want [a]", interruptResult.Cancelled)
+	}
+	if st, _ := m.Status(ids["c"]); st != NodeRunning {
+		t.Fatalf("c Status after turn_interrupt = %v, want still running", st)
+	}
+
+	// A later thread-teardown on root must still find and cancel c even
+	// though root->a is now closed.
+	teardownResult, err := m.CancelPropagate(TriggerThreadTeardown, "root")
+	if err != nil {
+		t.Fatalf("CancelPropagate(thread_teardown): %v", err)
+	}
+	found := false
+	for _, id := range teardownResult.Cancelled {
+		if id == ids["c"] {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("thread_teardown Cancelled = %v, want it to include c (%s)", teardownResult.Cancelled, ids["c"])
+	}
+	if st, ok := m.Status(ids["c"]); !ok || st != NodeInterrupted {
+		t.Errorf("c Status after thread_teardown = %v ok=%v, want interrupted (orphaned running node)", st, ok)
+	}
+}
+
 func TestCancel_NodeNotRunning_NoOp(t *testing.T) {
 	m := newTestManager(t, &instantRunner{})
 	id, err := m.Spawn(context.Background(), "root", "p", SpawnOpts{Foreground: true})

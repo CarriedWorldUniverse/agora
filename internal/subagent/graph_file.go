@@ -1,9 +1,10 @@
 package subagent
 
 import (
-	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 )
@@ -40,17 +41,37 @@ func OpenFileGraphStore(path string) (*FileGraphStore, error) {
 	return &FileGraphStore{mem: mem, f: f}, nil
 }
 
+// replayGraphLog reads the whole file and replays each complete event line
+// into mem. FIX 6 / ground rule "inconvenience, never data loss": a
+// TRUNCATED TRAILING line (a partial write left by a process killed
+// mid-append) is tolerated — the valid prefix is loaded — mirroring
+// internal/persistence's readThreadFile torn-tail handling. A decode
+// failure on any COMPLETE (newline-terminated, non-final) line is still a
+// hard error: that is real mid-file corruption, never a torn write, which
+// can only ever affect the tail.
 func replayGraphLog(f *os.File, mem *MemGraphStore) error {
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-	for sc.Scan() {
-		line := sc.Bytes()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return fmt.Errorf("read graph store: %w", err)
+	}
+	lines := bytes.Split(data, []byte{'\n'})
+	// bytes.Split always leaves a trailing element after the final '\n':
+	// empty when the file ends cleanly, or the torn partial final line when
+	// a crash left no terminating newline. Either way it is NOT a complete
+	// line — drop it before decoding.
+	if n := len(lines); n > 0 {
+		lines = lines[:n-1]
+	}
+	for i, line := range lines {
 		if len(line) == 0 {
 			continue
 		}
 		var ev graphEvent
 		if err := json.Unmarshal(line, &ev); err != nil {
-			return fmt.Errorf("decode line: %w", err)
+			// The torn trailing line was already dropped above; every line
+			// here is complete, so a decode failure is real corruption, not
+			// a torn write — hard error.
+			return fmt.Errorf("decode line %d: %w", i+1, err)
 		}
 		switch ev.Op {
 		case "add":
@@ -69,7 +90,7 @@ func replayGraphLog(f *os.File, mem *MemGraphStore) error {
 			}
 		}
 	}
-	return sc.Err()
+	return nil
 }
 
 func (g *FileGraphStore) appendEvent(ev graphEvent) error {

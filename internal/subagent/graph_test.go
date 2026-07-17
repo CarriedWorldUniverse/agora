@@ -2,6 +2,7 @@ package subagent
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -192,6 +193,93 @@ func TestGraphStore_Descendants_ClosedEdgeHidesSubtree(t *testing.T) {
 				t.Errorf("Descendants(openOnly) = %v, want b and e still visible", got)
 			}
 		})
+	}
+}
+
+// TestFileGraphStore_TornTailTolerated is FIX 6's regression: a truncated
+// trailing line (a process killed mid-Write) must not abort the whole
+// store's open — the valid prefix loads, and a hard error is reserved for a
+// decode failure on a genuinely complete (non-final) line.
+func TestFileGraphStore_TornTailTolerated(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "graph.jsonl")
+
+	g1, err := OpenFileGraphStore(path)
+	if err != nil {
+		t.Fatalf("OpenFileGraphStore: %v", err)
+	}
+	if err := g1.AddEdge(Edge{ParentThread: "root", ChildThread: "a"}); err != nil {
+		t.Fatalf("AddEdge a: %v", err)
+	}
+	if err := g1.AddEdge(Edge{ParentThread: "root", ChildThread: "b"}); err != nil {
+		t.Fatalf("AddEdge b: %v", err)
+	}
+	if err := g1.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Simulate a crash mid-append: append a torn (no trailing newline,
+	// syntactically incomplete) partial line directly to the file.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open for torn append: %v", err)
+	}
+	if _, err := f.WriteString(`{"op":"add","edge":{"parent_thread":"root","child_th`); err != nil {
+		t.Fatalf("write torn tail: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close after torn append: %v", err)
+	}
+
+	g2, err := OpenFileGraphStore(path)
+	if err != nil {
+		t.Fatalf("OpenFileGraphStore with torn tail: %v", err)
+	}
+	defer g2.Close()
+
+	children, err := g2.Children("root", false)
+	if err != nil {
+		t.Fatalf("Children: %v", err)
+	}
+	if len(children) != 2 || children[0].ChildThread != "a" || children[1].ChildThread != "b" {
+		t.Fatalf("Children after torn-tail reload = %v, want [a, b] (valid prefix loaded)", children)
+	}
+}
+
+// TestFileGraphStore_CorruptCompleteLine_HardError proves the torn-tail
+// tolerance does NOT extend to a corrupt line that IS newline-terminated
+// (complete) — that is real mid-file corruption, not a torn write, and must
+// still fail loudly.
+func TestFileGraphStore_CorruptCompleteLine_HardError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "graph.jsonl")
+
+	g1, err := OpenFileGraphStore(path)
+	if err != nil {
+		t.Fatalf("OpenFileGraphStore: %v", err)
+	}
+	if err := g1.AddEdge(Edge{ParentThread: "root", ChildThread: "a"}); err != nil {
+		t.Fatalf("AddEdge a: %v", err)
+	}
+	if err := g1.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open for corrupt append: %v", err)
+	}
+	// A complete (newline-terminated) but syntactically invalid JSON line.
+	if _, err := f.WriteString("not valid json at all\n"); err != nil {
+		t.Fatalf("write corrupt line: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close after corrupt append: %v", err)
+	}
+
+	_, err = OpenFileGraphStore(path)
+	if err == nil {
+		t.Fatal("expected OpenFileGraphStore to fail on a corrupt complete line")
 	}
 }
 

@@ -122,7 +122,18 @@ func (m *Manager) cancelDirectForeground(trigger Trigger, root string) (CancelRe
 }
 
 func (m *Manager) cancelSubtree(trigger Trigger, root string) (CancelResult, error) {
-	edges, err := m.graph.Descendants(root, true)
+	// openOnly=false is deliberate: edge-closure means "hidden from
+	// graph-shape queries" (§3), NOT "cancellation stops here". An earlier
+	// TriggerTurnInterrupt closes the edge into a still-running foreground
+	// child's own subtree (cancelDirectForeground -> CancelNode ->
+	// CloseEdge); if a later workflow-stop/thread-teardown BFS'd only OPEN
+	// edges, that closed intermediate edge would hide a still-running
+	// grandchild from this traversal entirely, leaving it orphaned running
+	// forever (the "no orphaned running node" invariant would break). By
+	// walking every edge regardless of status, a closed edge is transparent
+	// to cancellation even though it still hides the subtree from ordinary
+	// (non-cancellation) queries.
+	edges, err := m.graph.Descendants(root, false)
 	if err != nil {
 		return CancelResult{}, err
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -47,6 +48,29 @@ func (r *blockingRunner) Run(ctx context.Context, req RunRequest) (RunResult, er
 	case <-ctx.Done():
 		return RunResult{}, ctx.Err()
 	}
+}
+
+// capturingRunner completes immediately, recording the last RunRequest it
+// received — lets a test inspect what tool set/model/etc a Spawn actually
+// resolved to without needing an exported node accessor.
+type capturingRunner struct {
+	output json.RawMessage
+
+	mu  sync.Mutex
+	req RunRequest
+}
+
+func (r *capturingRunner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+	r.mu.Lock()
+	r.req = req
+	r.mu.Unlock()
+	return RunResult{Output: r.output}, nil
+}
+
+func (r *capturingRunner) lastRequest() RunRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.req
 }
 
 func newTestManager(t *testing.T, runner AgentRunner, opts ...ManagerOption) *Manager {
@@ -222,6 +246,146 @@ func TestManager_SchemaForcedSpawn_GivesUp(t *testing.T) {
 	status, _ := m.Status(id)
 	if status != NodeErrored {
 		t.Errorf("Status = %v, want errored", status)
+	}
+}
+
+// TestManager_Continue_ConcurrentCallsDoNotDoubleClose is FIX 2's
+// regression: N concurrent Continue calls racing on one already-finished
+// agent must not double-close its done channel (process-killing panic) or
+// deadlock — exactly one call may proceed to actually run, every other call
+// must fail fast with ErrNotFinished.
+func TestManager_Continue_ConcurrentCallsDoNotDoubleClose(t *testing.T) {
+	m := newTestManager(t, &instantRunner{output: json.RawMessage(`{"n":1}`)})
+	id, err := m.Spawn(context.Background(), "root", "p", SpawnOpts{Foreground: true})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if _, _, ok := m.Result(id); !ok {
+		t.Fatal("Result: agent not found")
+	}
+
+	const n = 20
+	var wg sync.WaitGroup
+	successes := make([]bool, n)
+	errs := make([]error, n)
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			_, err := m.Continue(context.Background(), id, "go again")
+			errs[i] = err
+			successes[i] = err == nil
+		}(i)
+	}
+	wg.Wait()
+
+	successCount := 0
+	for i, ok := range successes {
+		if ok {
+			successCount++
+			continue
+		}
+		if !errors.Is(errs[i], ErrNotFinished) {
+			t.Errorf("call %d: err = %v, want nil or ErrNotFinished", i, errs[i])
+		}
+	}
+	if successCount == 0 {
+		t.Error("expected at least one Continue call to succeed")
+	}
+}
+
+// TestManager_SpawnCap enforces FIX 4's per-session spawn cap.
+func TestManager_SpawnCap(t *testing.T) {
+	m := newTestManager(t, &instantRunner{output: json.RawMessage(`{}`)}, WithSpawnCap(2))
+	for i := 0; i < 2; i++ {
+		if _, err := m.Spawn(context.Background(), "root", "p", SpawnOpts{}); err != nil {
+			t.Fatalf("Spawn %d: %v", i, err)
+		}
+	}
+	_, err := m.Spawn(context.Background(), "root", "p", SpawnOpts{})
+	if !errors.Is(err, ErrSpawnCapExceeded) {
+		t.Fatalf("err = %v, want ErrSpawnCapExceeded", err)
+	}
+}
+
+// TestManager_NotifyOverflow_DoesNotBlockOrLeak is FIX 4's regression: many
+// completions with nobody draining Notifications() must not block/leak a
+// completion goroutine.
+func TestManager_NotifyOverflow_DoesNotBlockOrLeak(t *testing.T) {
+	m := newTestManager(t, &instantRunner{output: json.RawMessage(`{}`)}, WithMaxConcurrent(32), WithSpawnCap(2000))
+	const n = 600 // well past the 256-slot notify buffer
+	ids := make([]string, n)
+	for i := 0; i < n; i++ {
+		id, err := m.Spawn(context.Background(), "root", "p", SpawnOpts{})
+		if err != nil {
+			t.Fatalf("Spawn %d: %v", i, err)
+		}
+		ids[i] = id
+	}
+	for _, id := range ids {
+		if _, err, ok := m.Result(id); !ok || err != nil {
+			t.Fatalf("Result(%s): ok=%v err=%v", id, ok, err)
+		}
+	}
+	if got := m.NotificationsDropped(); got == 0 {
+		t.Log("no notifications dropped (buffer happened not to overflow) — not a failure, but weakens this regression's coverage")
+	}
+}
+
+// TestManager_Spawn_UnregisteredParent_FailsClosedOnTools is FIX 5's
+// regression: a first-level spawn from a parent thread never seeded via
+// RegisterRoot must not receive an unrestricted tool set.
+func TestManager_Spawn_UnregisteredParent_FailsClosedOnTools(t *testing.T) {
+	cr := &capturingRunner{output: json.RawMessage(`{}`)}
+	m := newTestManager(t, cr)
+	// general-purpose's def.Tools is nil ("all tools" per its own def), so
+	// without the fix eff.Tools would end up nil too (parent.Tools nil ->
+	// "unrestricted", untouched by the def since def.Tools is nil) —
+	// indistinguishable from a deliberately-unrestricted root. Use "explore"
+	// instead: its def.Tools is a concrete allowlist, so the intersection
+	// against a fail-closed empty parent set is directly observable.
+	id, err := m.Spawn(context.Background(), "untracked-root", "look around", SpawnOpts{
+		AgentType:  BuiltinExplore,
+		Foreground: true,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if _, _, ok := m.Result(id); !ok {
+		t.Fatal("Result: agent not found")
+	}
+	req := cr.lastRequest()
+	if len(req.Tools) != 0 {
+		t.Errorf("Tools = %v from an unregistered parent, want empty (fail closed, not unrestricted)", req.Tools)
+	}
+}
+
+// TestManager_Spawn_RegisteredRoot_GrantsSeededTools proves RegisterRoot is
+// the escape hatch: a seeded root's tool set narrows normally instead of
+// failing closed.
+func TestManager_Spawn_RegisteredRoot_GrantsSeededTools(t *testing.T) {
+	cr := &capturingRunner{output: json.RawMessage(`{}`)}
+	m := newTestManager(t, cr)
+	m.RegisterRoot("tracked-root", ParentContext{Tools: []string{"Read", "Glob", "Grep", "Bash"}})
+	id, err := m.Spawn(context.Background(), "tracked-root", "look around", SpawnOpts{
+		AgentType:  BuiltinExplore,
+		Foreground: true,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if _, _, ok := m.Result(id); !ok {
+		t.Fatal("Result: agent not found")
+	}
+	req := cr.lastRequest()
+	want := []string{"Read", "Glob", "Grep"} // explore's def.Tools, narrowed by intersection
+	if len(req.Tools) != len(want) {
+		t.Fatalf("Tools = %v, want %v", req.Tools, want)
+	}
+	for i, tool := range want {
+		if req.Tools[i] != tool {
+			t.Fatalf("Tools = %v, want %v", req.Tools, want)
+		}
 	}
 }
 

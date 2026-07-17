@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
@@ -115,11 +116,30 @@ type Manager struct {
 	// DepthCap == 1.
 	depthCap int
 
+	// spawnCap: spec §2 per-session spawn cap — a total count of agent()
+	// calls this Manager will accept over its lifetime, distinct from
+	// depthCap (tree shape) and sem (in-flight concurrency). One Manager
+	// instance is taken to be the scope of "session" here (the package has
+	// no narrower session concept than the Manager itself).
+	spawnCap   int
+	spawnCount int // guarded by mu
+
 	sem chan struct{} // concurrency cap (spec §2: "cap concurrent children")
 
-	mu     sync.Mutex
-	nodes  map[string]*node
+	mu    sync.Mutex
+	nodes map[string]*node
+	// roots holds ParentContext seeded via RegisterRoot for top-level
+	// (non-spawned) parent threads — FIX 5: without an explicit seed, a
+	// first-level spawn must fail CLOSED on tools (see Spawn), not fall
+	// back to an unrestricted zero-value ParentContext.
+	roots  map[string]ParentContext
 	notify chan Notification
+
+	// notifyDropped counts notifications dropped because m.notify was full
+	// and undrained (FIX 4: the notify send is non-blocking so a full
+	// buffer can never leak/block a completion goroutine — see
+	// deliverNotification).
+	notifyDropped int64
 }
 
 // ManagerOption configures NewManager.
@@ -141,6 +161,22 @@ func WithMaxConcurrent(n int) ManagerOption {
 	}
 }
 
+// defaultSpawnCap is the per-session spawn cap applied when WithSpawnCap is
+// not given — generous enough not to bite legitimate heavy workflow use,
+// low enough to bound a runaway/adversarial loop of agent() calls.
+const defaultSpawnCap = 500
+
+// WithSpawnCap overrides the default per-session spawn cap (spec §2). n<1 is
+// treated as 1 (a cap of zero would make the Manager unusable).
+func WithSpawnCap(n int) ManagerOption {
+	return func(m *Manager) {
+		if n < 1 {
+			n = 1
+		}
+		m.spawnCap = n
+	}
+}
+
 // NewManager builds a Manager. store/graph/runner are required seams;
 // registry may be nil (built-ins only).
 func NewManager(store contracts.ThreadStore, graph GraphStore, registry *Registry, runner AgentRunner, opts ...ManagerOption) *Manager {
@@ -154,14 +190,62 @@ func NewManager(store contracts.ThreadStore, graph GraphStore, registry *Registr
 		runner:   runner,
 		clock:    SystemClock{},
 		depthCap: 1,
+		spawnCap: defaultSpawnCap,
 		sem:      make(chan struct{}, 16),
 		nodes:    make(map[string]*node),
+		roots:    make(map[string]ParentContext),
 		notify:   make(chan Notification, 256),
 	}
 	for _, o := range opts {
 		o(m)
 	}
 	return m
+}
+
+// RegisterRoot seeds parentThread's ParentContext (cwd, approval policy,
+// permission profile, tool set) for use by first-level agent() spawns whose
+// parent is a top-level session/turn thread rather than another spawned
+// subagent (a root thread is never itself a *node this package tracks — it
+// only appears here as a parent). Spec §2: a child inherits the parent's
+// effective tool set; FIX 5's fail-closed rule means a root thread that is
+// never registered grants NO tools to a first-level spawn (see Spawn) — the
+// turn-engine caller MUST RegisterRoot a thread before its first agent()
+// spawn if that thread should be able to grant subagents any tools at all.
+func (m *Manager) RegisterRoot(threadID string, pc ParentContext) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.roots[threadID] = pc
+}
+
+// NotificationsDropped returns the count of notifications dropped because
+// m.notify was full and undrained (FIX 4) — an observability hook, not a
+// replay mechanism; a production caller should drain Notifications()
+// promptly enough that this never grows.
+func (m *Manager) NotificationsDropped() int64 {
+	return atomic.LoadInt64(&m.notifyDropped)
+}
+
+// deliverNotification sends n on m.notify without ever blocking the calling
+// completion goroutine (FIX 4: a blocking send here, with nobody draining
+// Notifications(), would leak one goroutine per completion forever). When
+// the buffer is full, the oldest queued notification is dropped to make
+// room — best-effort delivery, not a queue of record — and the drop is
+// counted (NotificationsDropped).
+func (m *Manager) deliverNotification(n Notification) {
+	select {
+	case m.notify <- n:
+		return
+	default:
+	}
+	select {
+	case <-m.notify:
+	default:
+	}
+	select {
+	case m.notify <- n:
+	default:
+		atomic.AddInt64(&m.notifyDropped, 1)
+	}
 }
 
 // Notifications returns the channel task-completion notifications are
@@ -190,29 +274,46 @@ func (m *Manager) Spawn(ctx context.Context, parentThread, prompt string, opts S
 
 	m.mu.Lock()
 	depth := 1
-	var parentPolicy contracts.PolicySet
-	var parentModel string
-	var parentEffort contracts.Effort
-	var parentTools []string
+	var parentCtx ParentContext
 	if pn, ok := m.nodes[parentThread]; ok {
 		depth = pn.depth + 1
-		parentPolicy = pn.effective.Policy
-		parentModel = pn.effective.Model
-		parentEffort = pn.effective.Effort
-		parentTools = pn.effective.Tools
+		parentCtx = ParentContext{
+			Cwd:    pn.effective.Cwd,
+			Policy: pn.effective.Policy,
+			Model:  pn.effective.Model,
+			Effort: pn.effective.Effort,
+			Tools:  pn.effective.Tools,
+		}
+	} else if rc, ok := m.roots[parentThread]; ok {
+		// Explicitly seeded root (RegisterRoot) — honor it verbatim,
+		// including a deliberate Tools: nil ("unrestricted") if the caller
+		// set that.
+		parentCtx = rc
+	} else {
+		// FIX 5: an UNREGISTERED parent thread must fail CLOSED on tools,
+		// not fail open. inherit.go treats parent.Tools == nil as
+		// "unrestricted (all tools)" — that is the correct meaning for a
+		// deliberately-seeded root with no tool narrowing, but the WRONG
+		// default for "we have no idea who this parent is". A non-nil empty
+		// slice means "no tools" to ResolveInheritance's intersection logic,
+		// so a first-level spawn from an unregistered thread grants nothing
+		// (Policy is already a zero-value PolicySet here too, which the
+		// approval package treats as fail-safe/ask, per the existing
+		// comment this replaces).
+		parentCtx = ParentContext{Tools: []string{}}
 	}
 	if depth > m.depthCap {
 		m.mu.Unlock()
 		return "", fmt.Errorf("%w: depth %d > cap %d", ErrDepthCapExceeded, depth, m.depthCap)
 	}
+	if m.spawnCount >= m.spawnCap {
+		m.mu.Unlock()
+		return "", fmt.Errorf("%w: %d spawns already recorded (cap %d)", ErrSpawnCapExceeded, m.spawnCount, m.spawnCap)
+	}
+	m.spawnCount++
 	m.mu.Unlock()
 
-	eff := ResolveInheritance(ParentContext{
-		Policy: parentPolicy,
-		Model:  parentModel,
-		Effort: parentEffort,
-		Tools:  parentTools,
-	}, def, opts)
+	eff := ResolveInheritance(parentCtx, def, opts)
 
 	childID, err := newAgentID()
 	if err != nil {
@@ -288,8 +389,13 @@ func (m *Manager) Spawn(ctx context.Context, parentThread, prompt string, opts S
 		}
 		status := n.status
 		n.mu.Unlock()
+		// FIX 3: notify BEFORE close(myDone). A caller that blocks on
+		// Result()/Status() (observes myDone closed) and then
+		// non-blocking-checks Notifications() must never be able to miss
+		// this notification — sequencing the send first guarantees it is
+		// already queued by the time the done-close is observable.
+		m.deliverNotification(Notification{AgentID: childID, ParentThread: parentThread, Status: status, Result: res, Err: err})
 		close(myDone)
-		m.notify <- Notification{AgentID: childID, ParentThread: parentThread, Status: status, Result: res, Err: err}
 	}
 
 	// Spawn always returns immediately with agent_id (spec §2: "returns
@@ -312,11 +418,14 @@ func (m *Manager) Spawn(ctx context.Context, parentThread, prompt string, opts S
 }
 
 // Continue implements send_message(agent_id, message) — spec §2: "re-opens
-// a *finished* agent with its context intact". Returns ErrNodeNotFound or
-// ErrNotFinished as appropriate; otherwise re-runs the agent with message
-// as the new prompt and blocks until that attempt completes, mirroring
-// Spawn's foreground behavior (a continuation is always awaited by its
-// caller in this package — background re-dispatch of a continuation is a
+// a *finished* agent with its context intact". Returns ErrNodeNotFound if
+// agentID is unknown, or ErrNotFinished if the agent is currently running
+// (whether because it genuinely never finished, or because a concurrent
+// Continue won the race to resume it first — see the atomic check-and-set
+// below, FIX 2). Otherwise re-runs the agent with message as the new
+// prompt and blocks until that attempt completes, mirroring Spawn's
+// foreground behavior (a continuation is always awaited by its caller in
+// this package — background re-dispatch of a continuation is a
 // caller-level concern, e.g. the workflow engine).
 func (m *Manager) Continue(ctx context.Context, agentID, message string) (RunResult, error) {
 	m.mu.Lock()
@@ -326,28 +435,47 @@ func (m *Manager) Continue(ctx context.Context, agentID, message string) (RunRes
 		return RunResult{}, fmt.Errorf("%w: %s", ErrNodeNotFound, agentID)
 	}
 
+	runCtx, cancel := context.WithCancel(ctx)
+	myDone := make(chan struct{})
+
+	// FIX 2: the finished->running transition is a single atomic
+	// check-and-set under ONE lock hold — no unlock between the isFinished
+	// check and the status/cancel/done writes. Two concurrent Continue
+	// calls on the same agent now cannot both observe "finished": exactly
+	// one wins this critical section (sees status finished, flips it to
+	// Running) and the other loses (sees Running, already flipped by the
+	// winner, and fails with ErrNotFinished) — no TOCTOU window where both
+	// proceed and both later reassign/close n.done.
 	n.mu.Lock()
 	if !n.status.isFinished() {
 		st := n.status
 		n.mu.Unlock()
+		cancel()
 		return RunResult{}, fmt.Errorf("%w: agent %s is %s", ErrNotFinished, agentID, st)
 	}
+	prevStatus := n.status
+	n.status = NodeRunning
+	n.cancel = cancel
+	n.done = myDone
 	n.mu.Unlock()
 
 	// A cancelled/closed edge is still resumable-by-continuation (spec
-	// §2a): reopen it.
+	// §2a): reopen it. This only runs for the single winner of the
+	// check-and-set above, so it is not itself racy.
 	if e, found, _ := m.graph.Edge(n.parent, agentID); found && e.Status == EdgeClosed {
 		if err := m.graph.ReopenEdge(n.parent, agentID); err != nil {
+			// Revert the claimed transition so the node is not stuck
+			// Running with nothing to ever close myDone — a later Continue
+			// (or the invariant checked by CancelNode) must see it as
+			// still resumable, not orphaned running.
+			n.mu.Lock()
+			n.status = prevStatus
+			n.mu.Unlock()
+			cancel()
+			close(myDone)
 			return RunResult{}, fmt.Errorf("subagent: reopen edge on continue: %w", err)
 		}
 	}
-
-	runCtx, cancel := context.WithCancel(ctx)
-	n.mu.Lock()
-	n.status = NodeRunning
-	n.cancel = cancel
-	n.done = make(chan struct{})
-	n.mu.Unlock()
 
 	req := RunRequest{
 		AgentID:      agentID,
@@ -378,11 +506,15 @@ func (m *Manager) Continue(ctx context.Context, agentID, message string) (RunRes
 		n.status = NodeCompleted
 	}
 	status := n.status
-	done := n.done
 	n.mu.Unlock()
-	close(done)
 
-	m.notify <- Notification{AgentID: agentID, ParentThread: n.parent, Status: status, Result: res, Err: err}
+	// FIX 3 (see run()'s matching comment): notify before close(myDone).
+	// FIX 2: close myDone — the channel THIS attempt captured, never a
+	// fresh read of n.done (which a subsequent Continue may have already
+	// reassigned) — the same double-close hazard Spawn's run() already
+	// guarded against via its myDone capture.
+	m.deliverNotification(Notification{AgentID: agentID, ParentThread: n.parent, Status: status, Result: res, Err: err})
+	close(myDone)
 	return res, err
 }
 
