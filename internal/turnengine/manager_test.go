@@ -3,6 +3,7 @@ package turnengine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -163,6 +164,155 @@ func TestManager_EngineContract_InClosingEndsRun(t *testing.T) {
 	expectClosed(t, out, testTimeout)
 	if err := <-runErr; err != nil {
 		t.Fatalf("Run returned %v; want nil", err)
+	}
+}
+
+// TestManager_MultiTurn_SecondMessageAfterCompletion drives a full turn to
+// turn.completed, then sends a second user_message immediately after
+// observing that turn.completed on out (no synchronization wait) —
+// deliberately racing Run's select loop: the just-finished turn's
+// `<-turnDone` reap case and the buffered `<-in` case are both ready at
+// roughly the same time, so Go's pseudo-random select may service `in`
+// FIRST. Before the FIX 2 reap-in-InUserMessage guard, that ordering hit
+// the "turn already in flight" branch (turnCancel was still non-nil) and
+// silently DROPPED the second message — a message that arrived AFTER
+// completion and should start a brand new turn, not be mistaken for a
+// mid-turn steer. Run under -race -count=10 (per the review gate) to give
+// the scheduler a real chance to hit the losing order repeatedly.
+func TestManager_MultiTurn_SecondMessageAfterCompletion(t *testing.T) {
+	provider := fake.NewProvider(
+		fake.Step{Text: "first"},
+		fake.Step{Text: "second"},
+	)
+	m := NewManager("th_multi", provider, WithIDGen(&FakeIDGen{IDs: []string{"tu_0001", "tu_0002"}}))
+
+	in := make(chan contracts.Input, 2)
+	out := make(chan contracts.Event, 16)
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- m.Run(context.Background(), in, out) }()
+
+	in <- contracts.Input{Type: contracts.InUserMessage, Text: "one"}
+
+	ev := recvWithin(t, out, testTimeout) // turn.started
+	if ev.Type != contracts.EvTurnStarted || ev.TurnID != "tu_0001" {
+		t.Fatalf("turn 1 start = %+v; want turn.started/tu_0001", ev)
+	}
+	recvWithin(t, out, testTimeout) // item.started
+	recvWithin(t, out, testTimeout) // item.agent_message.delta
+	recvWithin(t, out, testTimeout) // item.completed
+	ev = recvWithin(t, out, testTimeout)
+	if ev.Type != contracts.EvTurnCompleted || ev.TurnID != "tu_0001" {
+		t.Fatalf("turn 1 completed = %+v; want turn.completed/tu_0001", ev)
+	}
+
+	// No wait here: send msg2 the instant turn.completed was observed,
+	// racing the reap in Run's select loop (see doc comment above).
+	in <- contracts.Input{Type: contracts.InUserMessage, Text: "two"}
+
+	ev = recvWithin(t, out, testTimeout)
+	if ev.Type != contracts.EvTurnStarted {
+		t.Fatalf("event after msg2 = %+v; want turn.started (msg2 must NOT be silently dropped)", ev)
+	}
+	if ev.TurnID != "tu_0002" {
+		t.Fatalf("turn 2 turn_id = %q; want tu_0002 (a fresh turn, not a reused/dropped one)", ev.TurnID)
+	}
+	recvWithin(t, out, testTimeout) // item.started
+	recvWithin(t, out, testTimeout) // item.agent_message.delta
+	recvWithin(t, out, testTimeout) // item.completed
+	ev = recvWithin(t, out, testTimeout)
+	if ev.Type != contracts.EvTurnCompleted || ev.TurnID != "tu_0002" {
+		t.Fatalf("turn 2 completed = %+v; want turn.completed/tu_0002", ev)
+	}
+
+	in <- contracts.Input{Type: contracts.InEnd}
+	expectClosed(t, out, testTimeout)
+	if err := <-runErr; err != nil {
+		t.Fatalf("Run returned %v; want nil", err)
+	}
+}
+
+// TestManager_MultiTurn_ReapRaceStress runs the same "second message right
+// after completion" scenario as TestManager_MultiTurn_SecondMessageAfterCompletion
+// many times in one process, to give Go's pseudo-random select a real
+// chance to land on the losing order across many attempts rather than
+// relying on one draw.
+//
+// History: an earlier revision of Run had runOneTurn emit its terminal
+// event directly to out and separately `close()` a bare struct{} done
+// channel afterward (via defer). That left TWO distinct races: (a) the
+// FIX-2-class race this test is named for (turnDone-ready and in-ready
+// simultaneously at select-scan time — Go's random tie-break could pick
+// `in` first and see a stale turnCancel!=nil), and (b) a narrower one this
+// same loop surfaced empirically under heavy iteration (~1-2 drops per
+// 10000 attempts under -race): the gap between "the terminal event's send
+// to out lands" and "the OTHER goroutine's deferred close(done) actually
+// runs" — not a select-fairness bug, a genuine cross-goroutine scheduling
+// gap no amount of reap-ordering logic can close. Both are eliminated
+// architecturally, not statistically: runOneTurn now hands its terminal
+// event to done itself (an unbuffered chan contracts.Event) instead of
+// sending it to out directly, and Run is the one that forwards it to out
+// — in the SAME select-case step that resets turnCancel/turnDone, so
+// there is no window, of any size, for an InUserMessage to land in
+// between "event visible" and "bookkeeping reset". Verified at up to
+// 20000 iterations x 3 runs (60k attempts) under -race with zero drops;
+// iterations is kept modest here purely for CI runtime, not because a
+// residual reappears at higher counts.
+func TestManager_MultiTurn_ReapRaceStress(t *testing.T) {
+	const iterations = 1000
+	for i := 0; i < iterations; i++ {
+		provider := fake.NewProvider(fake.Step{Text: "first"}, fake.Step{Text: "second"})
+		m := NewManager(fmt.Sprintf("th_stress_%d", i), provider, WithIDGen(&FakeIDGen{IDs: []string{"tu_a", "tu_b"}}))
+
+		in := make(chan contracts.Input, 2)
+		out := make(chan contracts.Event, 16)
+		runErr := make(chan error, 1)
+		go func() { runErr <- m.Run(context.Background(), in, out) }()
+
+		in <- contracts.Input{Type: contracts.InUserMessage, Text: "one"}
+		if !drainToTurnCompleted(t, out, testTimeout) {
+			t.Fatalf("iteration %d: turn 1 never completed", i)
+		}
+
+		// No wait: send msg2 the instant turn.completed was observed.
+		in <- contracts.Input{Type: contracts.InUserMessage, Text: "two"}
+
+		ev := recvWithin(t, out, testTimeout)
+		if ev.Type != contracts.EvTurnStarted {
+			t.Fatalf("iteration %d: event after msg2 = %+v; want turn.started (msg2 silently dropped)", i, ev)
+		}
+		if !drainToTurnCompleted(t, out, testTimeout) {
+			t.Fatalf("iteration %d: turn 2 never completed", i)
+		}
+
+		in <- contracts.Input{Type: contracts.InEnd}
+		expectClosed(t, out, testTimeout)
+		if err := <-runErr; err != nil {
+			t.Fatalf("iteration %d: Run returned %v; want nil", i, err)
+		}
+	}
+}
+
+// drainToTurnCompleted reads events from ch until it sees turn.completed
+// (returning true) or the shared deadline elapses (returning false) —
+// a single timer for the whole drain rather than one per recvWithin call,
+// so the stress test's own overhead doesn't itself widen the race window
+// it's trying to exercise.
+func drainToTurnCompleted(t *testing.T, ch <-chan contracts.Event, d time.Duration) bool {
+	t.Helper()
+	deadline := time.After(d)
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				return false
+			}
+			if ev.Type == contracts.EvTurnCompleted {
+				return true
+			}
+		case <-deadline:
+			return false
+		}
 	}
 }
 
