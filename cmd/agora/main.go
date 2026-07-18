@@ -46,6 +46,12 @@ func main() {
 		runDaemon(os.Args[2:])
 		return
 	}
+	// `agora doctor` (NEX-790): a live-turn preflight — checks the sidecar,
+	// Node, and ambient Claude credentials, exits non-zero on any FAIL.
+	if len(os.Args) > 1 && os.Args[1] == "doctor" {
+		runDoctor(os.Args[2:])
+		return
+	}
 
 	var (
 		socketPath  = flag.String("socket", defaultSocketPath(), "agora daemon unix socket path")
