@@ -10,19 +10,29 @@
 // hook classifies every call (internal/toolrunner.Classify) and resolves it
 // through internal/approval.Decide (reused verbatim), blocking the turn
 // goroutine on an interactive rendezvous for Ask outcomes until an
-// approval_response Input resolves it. ctxmap, persistence, and the
-// in-process launch path are ALL LATER build units (U-C4..U-C7, U-D*, U-E*)
-// — this package deliberately does not touch any of them; see manager.go's
-// package-level doc comment for the exact scope line. plan/question
-// special-casing is also out of THIS unit's scope: no plan/question tools
-// exist on the fs/exec surface Classify covers today.
+// approval_response Input resolves it. U-C6/U-C7 (NEX-785) add optional
+// durability: a WithStore(contracts.ThreadStore) Option (nil by default —
+// no persistence) Appends each succeeded turn's ThreadItems at the turn
+// boundary, and gives the claude-sdk lane a stable per-thread
+// bridle.SessionHandle (id = threadID, New computed once from a
+// first-turn prior-items probe) so continuations RESUME the Claude
+// conversation instead of restarting it — see manager.go's WithStore/
+// turnSession/persistTurn doc comments. Approval-decision persistence
+// (TIApprovalRequest/TIApprovalDecision) is deferred past this unit — see
+// persistTurn's doc comment. ctxmap and the in-process launch path are
+// ALL LATER build units (U-D*, U-E*) — this package deliberately does not
+// touch either; see manager.go's package-level doc comment for the exact
+// scope line. plan/question special-casing is also out of THIS unit's
+// scope: no plan/question tools exist on the fs/exec surface Classify
+// covers today.
 //
 // Layout:
 //
 //	manager.go — Manager: contracts-facing io.Engine, the turn state
 //	             machine (one in-flight turn at a time, interrupt/end
 //	             handling), TurnRequest construction, the toolrunner.Surface
-//	             construction + WithRoots default.
+//	             construction + WithRoots default, and (U-C6/U-C7)
+//	             WithStore/turnSession/persistTurn.
 //	approval.go — the U-C3 approval gate: the BeforeToolCall hook, the
 //	             Ask rendezvous (registerWaiter/resolveWaiter + the
 //	             turnHookCtx set/cleared per turn), scopeKeyFor/

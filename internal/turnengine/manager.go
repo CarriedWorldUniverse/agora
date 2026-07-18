@@ -2,10 +2,12 @@ package turnengine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
 	"github.com/CarriedWorldUniverse/agora/internal/approval"
@@ -21,22 +23,28 @@ import (
 // Scope (Phase 2 U-C1 built the architecture-proving text-only slice;
 // U-C2 wired in the Phase 1 tool surface: TurnRequest.Tools now carries
 // the fs/exec specs and tool calls actually EXECUTE via
-// surfaceRunner/toolrunner.Surface; U-C3 — this unit — GATES that
+// surfaceRunner/toolrunner.Surface; U-C3 GATES that
 // execution: every call now goes through a BeforeToolCall hook
 // (approval.go) resolved via internal/approval.Decide before it can run —
 // see approval.go's package-level doc comments for the hook/rendezvous/
-// scope design). STILL missing: real MCP wiring (TurnRequest.MCP stays
+// scope design; U-C6/U-C7 — this unit — add optional durability: a
+// WithStore(contracts.ThreadStore) Option persists each turn's
+// ThreadItems at the turn boundary and gives the claude-sdk lane a stable
+// per-thread Session so continuations RESUME the Claude conversation
+// instead of starting fresh each turn — see WithStore's and runOneTurn's
+// doc comments). STILL missing: real MCP wiring (TurnRequest.MCP stays
 // unset — MCP tools ride in Tools, per the blueprint's claudesdk
 // SupportsMCP=false note), ctxmap/context
 // assembly (AppendSystemPrompt is caller-supplied verbatim, no per-turn
-// ThreadItem replay), no persistence (nothing survives past one Run
-// call), no in-process launch wiring. One turn in flight at a time — a
+// ThreadItem replay INTO the prompt — U-C6 only writes items OUT),
+// approval-decision persistence (deferred — see persistTurn's doc
+// comment), no in-process launch wiring. One turn in flight at a time — a
 // user_message arriving while a turn is already running is dropped
 // (steering/queuing a second turn is out of scope; Session's
 // first-answer-wins arbitration one layer up is the only de-duplication
 // this unit relies on, per contracts/event.go and internal/io/session.go's
-// existing design). Those are ALL later build units (U-C3..U-C7, U-D*,
-// U-E*) — see doc.go and agora-engine-blueprint.md's build decomposition.
+// existing design). Those are ALL later build units (U-D*, U-E*) — see
+// doc.go and agora-engine-blueprint.md's build decomposition.
 type Manager struct {
 	threadID string
 	provider bridle.Provider
@@ -62,6 +70,24 @@ type Manager struct {
 
 	waiterMu sync.Mutex
 	waiters  map[string]chan approvalOutcome
+
+	// U-C6/U-C7: optional durability. store is nil by default (see
+	// WithStore's doc comment — nil means NO persistence, not "persist to
+	// a throwaway MemStore"). sessionStarted is read and written ONLY
+	// from runOneTurn (via turnSession), which the Manager.Run state
+	// machine guarantees never runs concurrently with itself (one turn
+	// goroutine at a time — see Run's doc comment); the turnDone channel
+	// handoff between consecutive turn goroutines is a synchronization
+	// point, so this needs no separate mutex.
+	store contracts.ThreadStore
+
+	// sessionStarted flips true after the FIRST runOneTurn call computes
+	// its session-id bookkeeping (see turnSession's doc comment); every
+	// LATER turn on this Manager gets Session.New=false unconditionally.
+	// The ONE-TIME prior-items probe (m.store.Resume, only when store !=
+	// nil) that decides the first turn's New flag runs exactly once,
+	// gated by this same bool — never re-probed on later turns.
+	sessionStarted bool
 }
 
 var _ agoraio.Engine = (*Manager)(nil)
@@ -119,6 +145,36 @@ func WithIDGen(g IDGen) Option { return func(m *Manager) { m.idGen = g } }
 // than the process cwd) is a later unit; this default is the only sane
 // zero-config choice for a Manager built without one.
 func WithRoots(roots toolrunner.Roots) Option { return func(m *Manager) { m.roots = roots } }
+
+// WithStore gives the Manager a contracts.ThreadStore for durability
+// (U-C6/U-C7): each turn's ThreadItems are Appended at the turn boundary
+// (see runOneTurn's persistTurn call), and the FIRST turn's Session.New
+// flag is computed by probing the store for prior items on this thread
+// (see runOneTurn's turnSession doc comment) instead of always assuming a
+// fresh session.
+//
+// The default (no WithStore) is store == nil, meaning NO PERSISTENCE —
+// every store touch in this package is guarded with `if m.store != nil`,
+// so a Manager built without this Option behaves EXACTLY as it did before
+// this unit (existing tests stay green unmodified). This is a deliberate
+// choice NOT to default to internal/persistence.NewMemStore(): defaulting
+// to an implicit, invisible in-memory store would silently change every
+// existing no-store Manager's Session.New behavior (still fine, since a
+// fresh MemStore never has prior items) but would also silently start
+// discarding Append errors nobody asked to be able to occur — an explicit
+// nil is the honest "this Manager doesn't persist" state, matching this
+// package's existing opt-in Option pattern (WithPolicy/WithScopeStore
+// etc. mirror the same "caller states their explicit choice" posture).
+//
+// The caller is responsible for the thread's Create/Meta lifecycle
+// (contracts.ThreadStore.Create) — WithStore does not call Create; Append
+// against a not-yet-created thread returns whatever error the store
+// documents (MemStore/LocalStore: ErrNotFound), which persistTurn treats
+// as any other best-effort Append failure (logged, not fatal to the
+// turn — see persistTurn's doc comment).
+func WithStore(store contracts.ThreadStore) Option {
+	return func(m *Manager) { m.store = store }
+}
 
 // NewManager builds a Manager for one thread over provider. provider is
 // the injection seam: production callers pass provider/claudesdk.New()
@@ -454,12 +510,21 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 		UserMessage:        input.Text,
 		MaxSteps:           m.maxSteps,
 		Tools:              toolDefsFromSpecs(toolSpecs),
+		Session:            m.turnSession(),
 	}
 
 	result, err := m.harness.RunTurn(turnCtx, req, newSurfaceRunner(m.surface), sink)
 
 	switch result.StopReason {
 	case bridle.StopReasonModelDone, bridle.StopReasonMaxSteps:
+		// U-C6: persist the transcript core for a SUCCEEDED turn — the
+		// turn's content already streamed to `out` above (sink/emit), so
+		// a store failure here must not turn a real success into a
+		// turn.failed; see persistTurn's doc comment for the best-effort
+		// posture and why aborted/errored turns don't persist at v1.
+		if m.store != nil {
+			m.persistTurn(input, result)
+		}
 		terminal(contracts.Event{
 			Type:    contracts.EvTurnCompleted,
 			Payload: mustMarshal(usagePayload{Usage: mapUsage(result.Usage)}),
@@ -487,6 +552,163 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 			Type:    contracts.EvTurnFailed,
 			Payload: mustMarshal(turnFailedPayload{Interrupted: false}),
 		})
+	}
+}
+
+// turnSession (U-C7) computes this turn's bridle.SessionHandle. agora
+// CHOOSES the session id — the Manager's threadID, stable for the whole
+// thread and opaque to the sidecar — rather than capturing one FROM a
+// prior turn's result: claudesdk.go's provider only ECHOES the sidecar's
+// session id back for a same-turn invariant check (its "Session
+// resume-id invariant" comment), it never mints the id agora hands it.
+//
+// Whether the real Claude-Code SDK accepts an agora thread id verbatim as
+// its own session id is a U-F1-confirm item (the first live-turn smoke
+// test, operator watching, per agora-engine-blueprint.md Phase 5) — if
+// the sidecar rejects the format, a UUID DERIVED from threadID (e.g. a
+// deterministic v5 UUID) is the documented fallback; today's fake
+// provider accepts any opaque string, so plain threadID is fine for every
+// test in this package.
+//
+// New is a per-Manager latch, computed ONCE: the FIRST call (sessionStarted
+// still false) decides by probing m.store (when non-nil) for prior items
+// on this thread via storeHasItems — a non-empty store means an earlier
+// process already ran turns on this thread and this Manager is picking
+// the conversation back up (New=false, resume); no store, an empty store,
+// or a probe error all mean New=true (fresh). That probe never runs
+// again — sessionStarted flips true right after this first decision, and
+// EVERY LATER turn on this Manager gets New=false unconditionally: once a
+// session has been started (fresh or resumed) by this Manager, every turn
+// after the first is itself a continuation of what THIS Manager already
+// told the provider, regardless of what the first turn's New value was.
+func (m *Manager) turnSession() bridle.SessionHandle {
+	newSession := true
+	if m.sessionStarted {
+		newSession = false
+	} else {
+		if m.store != nil && storeHasItems(m.store, m.threadID) {
+			newSession = false
+		}
+		m.sessionStarted = true
+	}
+	return bridle.SessionHandle{ID: m.threadID, New: newSession}
+}
+
+// storeHasItems (U-C7's one-time first-turn resume probe) reports whether
+// store already has at least one ThreadItem recorded for threadID — a
+// Resume that yields anything at all means an earlier process ran turns
+// on this thread already. A probe error (thread not yet Created, a
+// transient store fault, ...) is treated the same as "no prior items":
+// this is a best-effort continuity signal, not a correctness-critical
+// read — worst case a resumable thread starts a fresh provider session
+// instead of resuming one, which is the SAFE direction to fail in (a
+// fresh session still works; a wrongly-resumed one against a sidecar that
+// has no matching state would not).
+func storeHasItems(store contracts.ThreadStore, threadID string) bool {
+	it, err := store.Resume(threadID)
+	if err != nil {
+		return false
+	}
+	defer it.Close()
+	_, ok := it.Next()
+	return ok
+}
+
+// userMessageItemPayload/agentMessageItemPayload are the persisted
+// ThreadItem payload shapes for TIUserMessage/TIAgentMessage — a bare
+// {"text": ...} object, matching internal/persistence's extractText
+// convention (sqlite.go: a payload object with a "text" field is the
+// documented FTS-indexable shape) rather than inventing a new one.
+type userMessageItemPayload struct {
+	Text string `json:"text"`
+}
+
+type agentMessageItemPayload struct {
+	Text string `json:"text"`
+}
+
+// toolCallItemPayload/toolResultItemPayload are the persisted ThreadItem
+// payload shapes for TIToolCall/TIToolResult — {id,name,args} and
+// {id,result,err} respectively, per the brief. ID correlates the pair
+// (same shape purpose as bridle.ToolInvocation.ID); Args/Result ride
+// through as raw JSON, unmodified, same posture as this package's
+// mcp_tool_call item payloads in sink.go.
+type toolCallItemPayload struct {
+	ID   string          `json:"id"`
+	Name string          `json:"name"`
+	Args json.RawMessage `json:"args"`
+}
+
+type toolResultItemPayload struct {
+	ID     string          `json:"id"`
+	Result json.RawMessage `json:"result"`
+	Err    string          `json:"err,omitempty"`
+}
+
+// persistTurn (U-C6) builds this turn's ThreadItems from input + result
+// and Appends them to m.store. Called only from runOneTurn's SUCCESS case
+// (StopReasonModelDone/StopReasonMaxSteps), only when m.store != nil —
+// see runOneTurn's call site comment for why aborted/errored turns don't
+// persist at v1 (the happy path is what this unit's brief asks to get
+// solid + tested first; a later unit can decide whether a partial/failed
+// turn's tool calls are worth recording too).
+//
+// Item order matches the brief exactly: TIUserMessage (the input that
+// opened this turn) first, then per result.ToolCalls entry, IN ORDER, a
+// TIToolCall/TIToolResult pair, then a trailing TIAgentMessage carrying
+// FinalText — omitted entirely when FinalText is empty (a tool-only turn
+// with no closing model text has nothing to record there; an empty
+// TIAgentMessage would be a lie about what the model said).
+//
+// APPROVAL-decision items (TIApprovalRequest/TIApprovalDecision) are
+// DEFERRED — those decisions happen inside the BeforeToolCall hook
+// (approval.go's beforeToolCall/Ask rendezvous), not in TurnResult, so
+// this turn-boundary call site has no visibility into them. later: a
+// per-turn buffer the hook appends into (mirroring how hookTurn already
+// threads per-turn state to the hook) is the natural home for that, once
+// a unit picks it up — v1 persists the transcript core only: user/tool/
+// agent items.
+//
+// Append is called with a single best-effort posture: on error, this
+// function logs to stderr and returns — it does NOT fail the turn. The
+// turn already succeeded and its content already streamed to the caller
+// over `out` (see runOneTurn's call site comment); a store outage
+// shouldn't retroactively turn a real, already-delivered success into a
+// turn.failed the caller never asked for. Matches this package's
+// existing fail-safe-not-fail-closed posture toward side-channel
+// bookkeeping (c.f. Run's doc comment on cancelling an already-finished
+// context being "documented-safe" rather than an error condition).
+func (m *Manager) persistTurn(input contracts.Input, result bridle.TurnResult) {
+	now := time.Now().UTC()
+	items := make([]contracts.ThreadItem, 0, 2+2*len(result.ToolCalls))
+	items = append(items, contracts.ThreadItem{
+		TS:      now,
+		Type:    contracts.TIUserMessage,
+		Payload: userMessageItemPayload{Text: input.Text},
+	})
+	for _, tc := range result.ToolCalls {
+		items = append(items,
+			contracts.ThreadItem{
+				TS:      now,
+				Type:    contracts.TIToolCall,
+				Payload: toolCallItemPayload{ID: tc.ID, Name: tc.Name, Args: tc.Args},
+			},
+			contracts.ThreadItem{
+				TS:      now,
+				Type:    contracts.TIToolResult,
+				Payload: toolResultItemPayload{ID: tc.ID, Result: tc.Result, Err: tc.Err},
+			},
+		)
+	}
+	if result.FinalText != "" {
+		items = append(items, contracts.ThreadItem{
+			TS:      now,
+			Type:    contracts.TIAgentMessage,
+			Payload: agentMessageItemPayload{Text: result.FinalText},
+		})
+	}
+	if err := m.store.Append(m.threadID, items); err != nil {
+		fmt.Fprintf(os.Stderr, "turnengine: persist turn items for thread %s: %v\n", m.threadID, err)
 	}
 }
 
