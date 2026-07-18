@@ -78,16 +78,32 @@ type turnHookCtx struct {
 	sendCtx  context.Context
 }
 
-// setHookTurn/clearHookTurn/loadHookTurn guard the ONE piece of Manager
-// state the hook needs that isn't reachable from its own ctx/BeforeToolCallCtx
-// arguments: which turn is currently driving RunTurn. Only runOneTurn ever
-// writes it (once at the top, once via defer at the bottom); the hook only
-// ever reads it. A Manager runs at most one turn at a time (manager.go's
-// Run loop invariant), so there is never a write racing another write, but
-// the read (from the hook, on the turn goroutine) and a WRITE from the
-// *next* turn's goroutine are two different goroutines touching the same
-// field — mutex it explicitly rather than leaning on the Run loop's
-// channel-ordering to establish happens-before implicitly.
+// setHookTurn/loadHookTurn guard the ONE piece of Manager state the hook
+// needs that isn't reachable from its own ctx/BeforeToolCallCtx arguments:
+// which turn is currently driving RunTurn.
+//
+// Manager.Run is the SOLE writer of hookTurn — it sets it right before
+// spawning each turn's goroutine (the InUserMessage case) and clears it in
+// the SAME synchronized step as every turnCancel/turnDone reset (the
+// turnDone case, the InUserMessage opportunistic reap, and stopInFlight —
+// see manager.go). beforeToolCall (running on the TURN goroutine, inside
+// RunTurn) only ever READS it via loadHookTurn.
+//
+// This was NOT the first cut: an earlier revision had runOneTurn itself
+// set hookTurn at the top and defer-clear it at the bottom, on the turn
+// goroutine. That looked safe (only one turn runs at a time) but wasn't:
+// the turnDone channel handoff only orders the SEND on turn A's goroutine
+// relative to the RECEIVE on Run's goroutine — it says nothing about what
+// EITHER goroutine does afterward. Turn A's deferred clear (running after
+// `done <- ev` completes, on A's goroutine) is not ordered relative to
+// turn B's set (running on B's goroutine, spawned once Run reaps A's
+// terminal event) — back-to-back turns can interleave A's clear AFTER B's
+// set, silently blinding B's hook for its entire turn (loadHookTurn
+// returns nil -> the defensive fail-closed-deny branch, meaning every one
+// of B's tool calls gets silently denied). Reproduced under -race; see
+// TestManager_Approval_BackToBackTurns_NoHookTurnClobber. Mutexed
+// regardless (even a single sole-writer goroutine's write still races the
+// hook's concurrent read from a different goroutine).
 func (m *Manager) setHookTurn(h *turnHookCtx) {
 	m.hookMu.Lock()
 	m.hookTurn = h
@@ -172,11 +188,11 @@ func (m *Manager) resolveWaiter(id string, out approvalOutcome) {
 func (m *Manager) beforeToolCall(ctx context.Context, c bridle.BeforeToolCallCtx) (bridle.BeforeToolCallCtx, bridle.HookAction, error) {
 	htc := m.loadHookTurn()
 	if htc == nil {
-		// Defensive only: RunTurn (and therefore this hook) only ever runs
-		// from inside runOneTurn, which sets hookTurn before calling
-		// RunTurn and clears it via defer afterward — this branch should
-		// be unreachable in practice. Fail closed (deny, don't panic/nil
-		// deref) rather than trust that invariant blindly.
+		// Defensive only: Run publishes hookTurn (setHookTurn) strictly
+		// before spawning the goroutine that eventually calls RunTurn (and
+		// therefore this hook) — see setHookTurn's doc comment — so this
+		// branch should be unreachable in practice. Fail closed (deny,
+		// don't panic/nil deref) rather than trust that invariant blindly.
 		c.Deny = true
 		c.Err = "approval: no active turn context for the approval gate"
 		return c, bridle.HookContinue, nil
@@ -298,11 +314,28 @@ func (m *Manager) askAndWait(turnCtx context.Context, htc *turnHookCtx, c bridle
 	case <-htc.sendCtx.Done():
 		// out itself is going away (the OUTER Run-level ctx, not turnCtx,
 		// was cancelled) — the request can never reach a client to answer.
-		// Fall through to the select below: sendCtx.Done() firing means
-		// ctx.Done() fired, and turnCtx is context.WithCancel(ctx) — a
-		// cancelled parent always closes the child's Done() too — so the
-		// second select is guaranteed to also unblock via <-turnCtx.Done(),
-		// no separate handling needed here.
+		// Falling into the second select below is fine: sendCtx.Done()
+		// firing means ctx.Done() fired, and turnCtx is
+		// context.WithCancel(ctx) — a cancelled parent always closes the
+		// child's Done() too — so the second select is guaranteed to also
+		// unblock via <-turnCtx.Done(), no separate handling needed here.
+	case <-turnCtx.Done():
+		// InInterrupt cancels turnCtx WITHOUT cancelling sendCtx (they are
+		// deliberately different contexts — sendCtx/ctx outlives many
+		// turns, turnCtx is per-turn). Without this case, an interrupt
+		// arriving while this hook is stuck trying to SEND
+		// approval.requested (out full, its consumer stopped draining —
+		// the one failure mode the package-wide "Run guarantees it WILL
+		// close out, but relies on the consumer draining out" contract
+		// (Run's own doc comment) does not cover) would have no way to
+		// unblock: the first select would wait on a full `out` forever,
+		// the interrupt having already fired and gone. Return HookAbort
+		// directly here, before the event was ever delivered, rather than
+		// falling into the second select below (which would also catch
+		// turnCtx.Done(), since it's already closed — but returning here
+		// is the more honest statement of what happened: the ask was never
+		// even sent, so there is nothing for a client to have answered).
+		return c, bridle.HookAbort, nil
 	}
 
 	select {
