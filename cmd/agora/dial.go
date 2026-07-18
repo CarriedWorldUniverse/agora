@@ -34,11 +34,15 @@ func isNoDaemonErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT) || errors.Is(err, os.ErrNotExist) {
+	// EPIPE covers the post-dial attach-frame write failing on a pipe a
+	// daemon accept()ed then dropped before read()ing (crashed mid-handshake)
+	// — connect-adjacent, per this func's doc comment, so it also means
+	// "nobody's really serving": fall back to in-process rather than hard-fail.
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT) || errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.EPIPE) {
 		return true
 	}
 	var opErr *net.OpError
-	if errors.As(err, &opErr) && opErr.Op == "dial" {
+	if errors.As(err, &opErr) && (opErr.Op == "dial" || opErr.Op == "write") {
 		return true
 	}
 	return false

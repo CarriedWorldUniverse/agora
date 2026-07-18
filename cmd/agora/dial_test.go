@@ -38,6 +38,8 @@ func TestIsNoDaemonErr(t *testing.T) {
 		{"wrapped connection refused", fmt.Errorf("io: dial unix %s: %w", "/tmp/x.sock", &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}), true},
 		{"dial OpError, arbitrary cause", &net.OpError{Op: "dial", Net: "unix", Err: errors.New("boom")}, true},
 		{"non-dial OpError", &net.OpError{Op: "read", Net: "unix", Err: errors.New("boom")}, false},
+		{"write OpError (attach-frame on a pipe a daemon dropped mid-handshake)", &net.OpError{Op: "write", Net: "unix", Err: syscall.EPIPE}, true},
+		{"bare EPIPE", syscall.EPIPE, true},
 		{"generic error", errors.New("something else entirely"), false},
 	}
 	for _, tc := range cases {
