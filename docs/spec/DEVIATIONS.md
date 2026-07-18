@@ -53,6 +53,10 @@ turn-engine **must emit these exact shapes** or the modal renders blind:
 - `patch` → `{ "path": "...", "lines": [ { "kind", "oldNo", "newNo", "text" } ] }`
 - `mcp_tool` → `{ "tool": "...", "args": ... }`
 - `escalation` → `{ "detail": "..." }`
+- `read` (NEX-782, post-spec addition — `contracts.KindRead`, read-only fs
+  tools) → `{ "detail": "..." }`: the path for read_file/list_dir, the
+  pattern for glob/grep. This modal only ever renders under the `strict`
+  preset — every other built-in preset auto-allows `read`.
 (U18's conformance approval flow emits the `exec` shape accordingly.)
 
 ## 6. Workflows (U14): v1 scope limits (mostly per spec §7)

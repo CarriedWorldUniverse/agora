@@ -101,6 +101,7 @@ var knownKinds = map[contracts.ApprovalKind]bool{
 	contracts.KindQuestion:   true,
 	contracts.KindPlan:       true,
 	contracts.KindGate:       true,
+	contracts.KindRead:       true, // NEX-782
 }
 
 // Decide resolves req against policy (a preset or custom contracts.PolicySet)
