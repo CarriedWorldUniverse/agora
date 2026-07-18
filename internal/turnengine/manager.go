@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
+	"github.com/CarriedWorldUniverse/agora/internal/approval"
 	agoraio "github.com/CarriedWorldUniverse/agora/internal/io"
 	"github.com/CarriedWorldUniverse/agora/internal/toolrunner"
 	bridle "github.com/CarriedWorldUniverse/bridle"
@@ -26,12 +28,15 @@ const placeholderModel = "claude-placeholder"
 // and streams the result as contracts.Event.
 //
 // Scope (Phase 2 U-C1 built the architecture-proving text-only slice;
-// U-C2 — this unit — wires in the Phase 1 tool surface: TurnRequest.Tools
-// now carries the fs/exec specs and tool calls actually EXECUTE via
-// surfaceRunner/toolrunner.Surface). STILL missing: approvals (U-C3 —
-// tool execution is UNGATED this unit, see surfacerunner.go's doc), real
-// MCP wiring (TurnRequest.MCP stays unset — MCP tools ride in Tools, per
-// the blueprint's claudesdk SupportsMCP=false note), ctxmap/context
+// U-C2 wired in the Phase 1 tool surface: TurnRequest.Tools now carries
+// the fs/exec specs and tool calls actually EXECUTE via
+// surfaceRunner/toolrunner.Surface; U-C3 — this unit — GATES that
+// execution: every call now goes through a BeforeToolCall hook
+// (approval.go) resolved via internal/approval.Decide before it can run —
+// see approval.go's package-level doc comments for the hook/rendezvous/
+// scope design). STILL missing: real MCP wiring (TurnRequest.MCP stays
+// unset — MCP tools ride in Tools, per the blueprint's claudesdk
+// SupportsMCP=false note), ctxmap/context
 // assembly (AppendSystemPrompt is caller-supplied verbatim, no per-turn
 // ThreadItem replay), no persistence (nothing survives past one Run
 // call), no in-process launch wiring. One turn in flight at a time — a
@@ -52,6 +57,20 @@ type Manager struct {
 	maxSteps           int
 	roots              toolrunner.Roots
 	idGen              IDGen
+
+	// U-C3: the BeforeToolCall approval gate. policy/scopeStore feed
+	// approval.Decide (reused verbatim); hookMu/hookTurn and waiterMu/
+	// waiters are the two pieces of cross-goroutine state the gate's
+	// interactive rendezvous needs — see approval.go's doc comments for
+	// why each is mutex-guarded and by which goroutines.
+	policy     contracts.PolicySet
+	scopeStore approval.ScopeStore
+
+	hookMu   sync.Mutex
+	hookTurn *turnHookCtx
+
+	waiterMu sync.Mutex
+	waiters  map[string]chan approvalOutcome
 }
 
 var _ agoraio.Engine = (*Manager)(nil)
@@ -96,11 +115,14 @@ func WithRoots(roots toolrunner.Roots) Option { return func(m *Manager) { m.root
 // per thread" lifecycle, per NewManager's brief-cited mirror target).
 func NewManager(threadID string, provider bridle.Provider, opts ...Option) *Manager {
 	m := &Manager{
-		threadID: threadID,
-		provider: provider,
-		harness:  bridle.NewHarness(provider),
-		model:    placeholderModel,
-		idGen:    &SeqIDGen{},
+		threadID:   threadID,
+		provider:   provider,
+		harness:    bridle.NewHarness(provider),
+		model:      placeholderModel,
+		idGen:      &SeqIDGen{},
+		policy:     defaultPolicy(),
+		scopeStore: approval.NewMemScopeStore(),
+		waiters:    make(map[string]chan approvalOutcome),
 	}
 	for _, o := range opts {
 		o(m)
@@ -114,6 +136,12 @@ func NewManager(threadID string, provider bridle.Provider, opts ...Option) *Mana
 	// also stays unset in runOneTurn, per the blueprint's claudesdk
 	// SupportsMCP=false note — MCP tools ride in Tools, not MCP).
 	m.surface = toolrunner.NewSurface(nil, toolrunner.NewFSFamily(m.roots), toolrunner.NewExecFamily(m.roots))
+	// U-C3: gate every tool call through the approval pipeline. Registered
+	// ONCE here (bridle's Hook registration is documented not-safe to call
+	// concurrently with RunTurn, matching this package's existing "wired
+	// during setup" convention) and reused for every turn this Manager
+	// drives — see approval.go's beforeToolCall doc comment.
+	m.harness.RegisterBeforeToolCall(m.beforeToolCall)
 	return m
 }
 
@@ -185,6 +213,7 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 			turnCancel()
 			forward(<-turnDone)
 			turnCancel, turnDone = nil, nil
+			m.setHookTurn(nil)
 		}
 	}
 
@@ -211,6 +240,7 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 			forward(ev)
 			turnCancel()
 			turnCancel, turnDone = nil, nil
+			m.setHookTurn(nil)
 
 		case input, ok := <-in:
 			if !ok {
@@ -237,6 +267,7 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 						forward(ev)
 						turnCancel()
 						turnCancel, turnDone = nil, nil
+						m.setHookTurn(nil)
 					default:
 					}
 				}
@@ -253,7 +284,40 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 				turnCancel = cancel
 				done := make(chan contracts.Event)
 				turnDone = done
-				go m.runOneTurn(ctx, turnCtx, input, out, done)
+				// U-C3: Run — not runOneTurn — is the SOLE writer of
+				// hookTurn (setHookTurn here, cleared at every reap point
+				// above/below). This mints turnID here too, rather than
+				// inside runOneTurn, so the hookTurn published for THIS
+				// turn's BeforeToolCall hook always carries the SAME id
+				// runOneTurn stamps onto its own events — no separate
+				// "did the turn goroutine finish minting yet" question.
+				//
+				// Why not let runOneTurn set (and defer-clear) hookTurn on
+				// its own goroutine, like the first cut of this unit did:
+				// the turnDone channel handoff only orders the SEND on the
+				// turn goroutine relative to the RECEIVE on Run's goroutine
+				// — it says nothing about what either goroutine does
+				// AFTER that. Turn A's deferred m.setHookTurn(nil) (running
+				// on A's goroutine, after `done <- ev` completes) is NOT
+				// ordered relative to turn B's m.setHookTurn(&newCtx)
+				// (running on B's goroutine, spawned once Run reaps A's
+				// terminal event) — back-to-back turns (a client sending
+				// the next user_message the instant it sees turn.completed,
+				// or this very loop's own InUserMessage opportunistic reap
+				// above) can interleave A's clear AFTER B's set, silently
+				// blinding B's BeforeToolCall hook (loadHookTurn returns
+				// nil -> the defensive fail-closed-deny branch) for B's
+				// entire turn. Reproduced under -race (see
+				// TestManager_Approval_BackToBackTurns_NoHookTurnClobber).
+				// This is the exact same bug CLASS as the turnDone TOCTOU
+				// above (a cross-goroutine "before" that only looks ordered
+				// because it usually IS, until the scheduler proves it
+				// isn't) — same fix shape: move the write onto Run's own
+				// single-threaded loop, in the SAME synchronized step as
+				// the rest of that turn's bookkeeping reset/set.
+				turnID := m.idGen.NextTurnID()
+				m.setHookTurn(&turnHookCtx{threadID: m.threadID, turnID: turnID, out: out, sendCtx: ctx})
+				go m.runOneTurn(ctx, turnCtx, turnID, input, out, done)
 
 			case contracts.InInterrupt:
 				if turnCancel != nil {
@@ -264,17 +328,38 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 				stopInFlight()
 				return nil
 
+			case contracts.InApprovalResponse:
+				// Route straight to the waiter registry regardless of
+				// whether a turn is "in flight" from Run's own
+				// bookkeeping perspective: the ask rendezvous blocks the
+				// TURN goroutine (inside RunTurn, mid-hook), which Run's
+				// turnCancel/turnDone bookkeeping has no visibility into
+				// — a pending approval is exactly the case where
+				// turnCancel != nil but Run itself has nothing more to
+				// do than forward this response to the goroutine that's
+				// actually blocked. resolveWaiter no-ops on an unmatched
+				// id (stale/duplicate/forged/already-resolved) — see its
+				// doc comment in approval.go.
+				m.resolveWaiter(input.ID, approvalOutcome{
+					Decision: input.Decision,
+					Scope:    input.Scope,
+					Message:  input.Message,
+				})
+
 			default:
-				// steer/approval_response/question_response/config/
-				// provision: no tool loop, no approvals, no context
-				// assembly this slice — nothing to resume/apply yet.
+				// steer/question_response/config/provision: no tool
+				// loop resume, no context assembly this slice — nothing
+				// to apply yet.
 			}
 		}
 	}
 }
 
 // runOneTurn drives exactly one bridle.Harness.RunTurn call and maps its
-// outcome onto the agora event stream. sendCtx gates event DELIVERY for
+// outcome onto the agora event stream. turnID is minted by Run (not here)
+// and passed in — see the InUserMessage case's doc comment on why Run must
+// be the one to mint it and publish it via setHookTurn, ordered before this
+// function's goroutine is even spawned. sendCtx gates event DELIVERY for
 // every NON-terminal event this function emits directly (turn.started,
 // plus everything the sink writes) — the outer Run-level ctx, not the
 // interrupt-scoped turnCtx, because bridle's own abort path returns
@@ -291,9 +376,13 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 // and always has exactly one send on every path through this function;
 // Run always eventually receives it (stopInFlight/the turnDone case/the
 // InUserMessage reap all drain it), so this never leaks a blocked
-// goroutine.
-func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, input contracts.Input, out chan<- contracts.Event, done chan<- contracts.Event) {
-	turnID := m.idGen.NextTurnID()
+// goroutine. Run also clears hookTurn in that SAME reap step (see
+// approval.go's setHookTurn doc comment) — this function does NOT touch
+// hookTurn at all, unlike an earlier revision that set/deferred-cleared it
+// on this goroutine (a cross-goroutine clobber the turnDone handoff does
+// not order against the NEXT turn's set — see the InUserMessage doc
+// comment above for the full trace).
+func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, input contracts.Input, out chan<- contracts.Event, done chan<- contracts.Event) {
 	emit := func(ev contracts.Event) {
 		ev.ThreadID = m.threadID
 		ev.TurnID = turnID

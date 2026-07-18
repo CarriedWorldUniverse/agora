@@ -443,7 +443,13 @@ func TestManager_ToolCall_ReadFileExecutesViaSurface(t *testing.T) {
 		}},
 		fake.Step{Text: "done"},
 	)
-	m := NewManager("th_tool", provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
+	// U-C3: every tool call now goes through the approval gate — allow-all
+	// so this test keeps proving DISPATCH (the fs family actually reads
+	// the file via the real Surface), not approval semantics (which has
+	// its own dedicated coverage in approval_test.go). read_file has no
+	// dedicated toolrunner.Classify case (falls to its `default:` branch,
+	// KindEscalation) — Classify's own behavior, unmodified here.
+	m := NewManager("th_tool", provider, WithRoots(roots), WithPolicy(allowAllPolicy()), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
 
 	in := make(chan contracts.Input, 1)
 	out := make(chan contracts.Event, 32)
@@ -528,7 +534,9 @@ func TestManager_ToolCall_UnknownToolIsGoErrorNotSilentSuccess(t *testing.T) {
 		}},
 		fake.Step{Text: "done"},
 	)
-	m := NewManager("th_tool", provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
+	// U-C3: allow-all — this test proves surfaceRunner's unknown-tool-name
+	// Go-error mapping, not approval semantics.
+	m := NewManager("th_tool", provider, WithRoots(roots), WithPolicy(allowAllPolicy()), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
 
 	in := make(chan contracts.Input, 1)
 	out := make(chan contracts.Event, 32)
@@ -591,7 +599,9 @@ func TestManager_ToolCall_ProtectedPathErrorDoesNotAbortTurn(t *testing.T) {
 		}},
 		fake.Step{Text: "done"},
 	)
-	m := NewManager("th_tool", provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
+	// U-C3: allow-all — this test proves the fs family's own
+	// protected-path enforcement (Result.IsError), not approval semantics.
+	m := NewManager("th_tool", provider, WithRoots(roots), WithPolicy(allowAllPolicy()), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
 
 	in := make(chan contracts.Input, 1)
 	out := make(chan contracts.Event, 32)

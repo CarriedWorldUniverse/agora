@@ -34,14 +34,13 @@ func toolDefsFromSpecs(specs []contracts.ToolSpec) []bridle.ToolDef {
 // U-C2: a turn's tool calls now actually EXECUTE, agora-side, instead of
 // hitting noopToolRunner's "no tool surface this slice" error.
 //
-// U-C3: tool execution here is UNGATED — no BeforeToolCall approval hook
-// is wired yet (that lands in U-C3, the next unit, before ANY real-Claude
-// wiring in U-F1). The fake provider is the only thing that can drive a
-// ToolCall through this runner today (NewManager's provider seam only ever
-// takes bridle/fake.NewProvider(...) in tests until claudesdk lands), so
-// there is no real-world risk from the missing gate yet — but a
-// BeforeToolCall hook belongs on bridle.Harness (via hooks.go), not inside
-// this runner, so U-C3's work is wiring that hook, not touching this file.
+// U-C3 gated this: a call only ever reaches surfaceRunner.Run at all once
+// bridle's own BeforeToolCall pipeline has already let it through
+// (approval.go's beforeToolCall hook, registered on m.harness — see its
+// doc comment) — Deny short-circuits inside bridle's executeToolCall
+// before runner.Run is ever invoked (bridle's own documented Deny-pattern
+// contract). This runner itself is unchanged by U-C3: the gate lives on
+// bridle.Harness (hooks.go), not inside the runner.
 type surfaceRunner struct {
 	surface *toolrunner.Surface
 }
