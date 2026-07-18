@@ -14,15 +14,6 @@ import (
 	bridle "github.com/CarriedWorldUniverse/bridle"
 )
 
-// placeholderModel is the provisional TurnRequest.Model this slice
-// hardcodes. TurnRequest.Model is REQUIRED (bridle.ErrModelRequired
-// otherwise) but real per-thread/per-profile model selection is U-C4's
-// job (BeforeModelCall wiring: tools, system prompt, model/provider from
-// profile config) and bridle's own LaneClaudeSDK ModelInfo catalog row is
-// itself a placeholder today (agora-engine-blueprint.md's U-A3 note).
-// Overridable via WithModel for callers/tests that need a specific value.
-const placeholderModel = "claude-placeholder"
-
 // Manager implements agora's io.Engine (internal/io/engine.go) over a
 // *bridle.Harness: it drives ONE deliberation turn per user_message input
 // and streams the result as contracts.Event.
@@ -79,8 +70,31 @@ var _ agoraio.Engine = (*Manager)(nil)
 // Option pattern).
 type Option func(*Manager)
 
-// WithModel overrides placeholderModel.
+// WithModel overrides the current profile's Model (DevProfile's, unless a
+// WithProfile earlier in the Option list already changed it — see
+// NewManager's doc comment on option-application order).
 func WithModel(model string) Option { return func(m *Manager) { m.model = model } }
+
+// WithProfile overrides the Manager's BASE ProfileConfig (DevProfile() by
+// default — see NewManager) with cfg's Model/AppendSystemPrompt/Policy/
+// ScopeStore, all four at once. Like every other Option, a WithProfile
+// earlier in NewManager's opts list is itself overridable by a more
+// specific WithModel/WithAppendSystemPrompt/WithPolicy/WithScopeStore
+// later in the same list (Options apply in argument order — see
+// NewManager's doc comment). A zero-value ScopeStore field (cfg.ScopeStore
+// == nil) is applied as-is, not silently defaulted back to a fresh
+// approval.NewMemScopeStore() — callers building a ProfileConfig by hand
+// are expected to set every field they care about; NewManager's own
+// DevProfile() base already guarantees a non-nil ScopeStore for the
+// no-options case.
+func WithProfile(cfg ProfileConfig) Option {
+	return func(m *Manager) {
+		m.model = cfg.Model
+		m.appendSystemPrompt = cfg.AppendSystemPrompt
+		m.policy = cfg.Policy
+		m.scopeStore = cfg.ScopeStore
+	}
+}
 
 // WithAppendSystemPrompt sets TurnRequest.AppendSystemPrompt for every
 // turn this Manager runs. Empty (the default) means bridle's own base
@@ -113,16 +127,32 @@ func WithRoots(roots toolrunner.Roots) Option { return func(m *Manager) { m.root
 // *bridle.Harness is built once, over provider, and reused for every turn
 // this Manager's Run call drives (mirrors internal/ctxmgr's "one Manager
 // per thread" lifecycle, per NewManager's brief-cited mirror target).
+//
+// Option precedence (U-C4): the Manager struct is first seeded from
+// DevProfile() — model/appendSystemPrompt/policy/scopeStore all come from
+// the dev profile BEFORE any opts run, so a Manager built with zero options
+// is a fully-formed dev-profile Manager, not a half-configured one. opts
+// then apply in argument order on top of that base: a WithProfile(cfg) in
+// the list overwrites all four of those fields from cfg (same as the
+// DevProfile seed would), and any WithModel/WithAppendSystemPrompt/
+// WithPolicy/WithScopeStore in the list overwrites its own single field —
+// so whichever of those runs LAST for a given field wins, most-specific
+// (a single-field Option) or most-recent (repeated/ordered Options) always
+// beats the profile-wide default it followed. Callers who want a custom
+// profile with a couple of fields tweaked should list WithProfile(cfg)
+// BEFORE the single-field overrides they want to keep.
 func NewManager(threadID string, provider bridle.Provider, opts ...Option) *Manager {
+	profile := DevProfile()
 	m := &Manager{
-		threadID:   threadID,
-		provider:   provider,
-		harness:    bridle.NewHarness(provider),
-		model:      placeholderModel,
-		idGen:      &SeqIDGen{},
-		policy:     defaultPolicy(),
-		scopeStore: approval.NewMemScopeStore(),
-		waiters:    make(map[string]chan approvalOutcome),
+		threadID:           threadID,
+		provider:           provider,
+		harness:            bridle.NewHarness(provider),
+		model:              profile.Model,
+		appendSystemPrompt: profile.AppendSystemPrompt,
+		idGen:              &SeqIDGen{},
+		policy:             profile.Policy,
+		scopeStore:         profile.ScopeStore,
+		waiters:            make(map[string]chan approvalOutcome),
 	}
 	for _, o := range opts {
 		o(m)
