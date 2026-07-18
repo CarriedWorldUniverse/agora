@@ -3,6 +3,7 @@ package turnengine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -251,6 +252,108 @@ func TestManager_Approval_PolicyAutoAllowSkipsAsk(t *testing.T) {
 	}
 	if string(got) != "auto allowed" {
 		t.Fatalf("note.txt content = %q; want %q", got, "auto allowed")
+	}
+}
+
+// --- Back-to-back turns must not clobber hookTurn (gate-review fix 1) ---
+
+// TestManager_Approval_BackToBackTurns_NoHookTurnClobber: turn A (no tool
+// calls, completes on its own) is immediately followed — the instant its
+// turn.completed is observed, no synchronization wait, deliberately racing
+// Run's own reap points — by turn B (one tool call, default ask policy).
+// Before the fix, turn A's runOneTurn goroutine cleared hookTurn via a
+// DEFERRED call running AFTER `done <- ev` — not ordered relative to turn
+// B's goroutine setting hookTurn for itself (the turnDone channel handoff
+// only orders the send/receive, not what either goroutine does
+// afterward), so A's stale clear could land AFTER B's fresh set and
+// silently blind B's BeforeToolCall hook: loadHookTurn returns nil, the
+// defensive branch fires, and B's tool call gets DENIED with "no active
+// turn context" instead of ever asking — no approval.requested, no
+// visible error to a human, just a silently-refused call.
+//
+// Mirrors TestManager_MultiTurn_ReapRaceStress's shape (the SAME bug
+// class, same fix shape — see manager.go's InUserMessage doc comment):
+// many back-to-back cycles run in a tight loop WITHIN one test process
+// (cheap: no process-fork overhead per attempt). This is a deliberate
+// deviation from running this specific test under `go test -count=2000+`
+// (re-executing the whole binary 2000 times): measured, a cold-process
+// single-shot attempt essentially never lands the losing interleaving —
+// 8000 `-count` reruns of a single-shot version of this test, against the
+// PRE-FIX code, produced zero failures, because Run's goroutine does
+// noticeably more work than A's one-line deferred clear between the
+// rendezvous and B's spawn, so a fresh process rarely lands both
+// goroutines at exactly the right relative point. Thousands of TIGHT
+// in-process iterations (warm goroutines, warm scheduler state) are what
+// actually reproduces it: this loop, run once, reliably fails around
+// iteration ~10000 against the pre-fix code and passes cleanly at 20000
+// iterations post-fix — verified both ways, see the builder report (which
+// also reruns this whole test 3x via `-count=3`, and the full suite at
+// `-count=5`, on the fixed code, for additional confidence beyond this
+// test's own internal iteration count).
+func TestManager_Approval_BackToBackTurns_NoHookTurnClobber(t *testing.T) {
+	const iterations = 20000
+	for i := 0; i < iterations; i++ {
+		roots := managerTestRoots(t)
+		provider := fake.NewProvider(
+			fake.Step{Text: "first turn, no tools"},
+			fake.Step{ToolCalls: []bridle.ToolInvocation{writeFileCall("1", fmt.Sprintf("note-%d.txt", i), "second turn")}},
+			fake.Step{Text: "done"},
+		)
+		m := NewManager(fmt.Sprintf("th_b2b_%d", i), provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_a", "tu_b"}}))
+
+		in := make(chan contracts.Input, 2)
+		out := make(chan contracts.Event, 32)
+		runErr := make(chan error, 1)
+		go func() { runErr <- m.Run(context.Background(), in, out) }()
+
+		in <- contracts.Input{Type: contracts.InUserMessage, Text: "one"}
+		if !drainToTurnCompleted(t, out, testTimeout) {
+			t.Fatalf("iteration %d: turn A never completed", i)
+		}
+
+		// No wait here: fire turn B's user_message the instant turn A's
+		// turn.completed was observed — this is exactly the race window
+		// the doc comment above describes.
+		in <- contracts.Input{Type: contracts.InUserMessage, Text: "two"}
+
+		outcome := ""
+		deadline := time.After(testTimeout)
+	loop:
+		for {
+			select {
+			case ev := <-out:
+				switch ev.Type {
+				case contracts.EvApprovalRequested:
+					outcome = "asked"
+					break loop
+				case contracts.EvTurnCompleted, contracts.EvTurnFailed:
+					// Turn B ended without ever asking: either the
+					// hookTurn clobber silently denied its tool call (the
+					// bug this test targets) or something else prevented
+					// the ask — either way, "no approval.requested" is
+					// the failure this test exists to catch.
+					outcome = "ended-without-ask:" + string(ev.Type)
+					break loop
+				}
+			case <-deadline:
+				t.Fatalf("iteration %d: timed out waiting for turn B's tool call to be gated", i)
+			}
+		}
+		if outcome != "asked" {
+			t.Fatalf("iteration %d: turn B %s — want approval.requested (hookTurn clobber / silent deny suspected)", i, outcome)
+		}
+
+		// Resolve normally so the turn (and Run) wind down cleanly.
+		in <- contracts.Input{Type: contracts.InApprovalResponse, ID: "1", Decision: contracts.DecisionAllow, Scope: contracts.ScopeOnce}
+		if !drainToTurnCompleted(t, out, testTimeout) {
+			t.Fatalf("iteration %d: turn B never completed after approve", i)
+		}
+
+		in <- contracts.Input{Type: contracts.InEnd}
+		expectClosed(t, out, testTimeout)
+		if err := <-runErr; err != nil {
+			t.Fatalf("iteration %d: Run returned %v; want nil", i, err)
+		}
 	}
 }
 
