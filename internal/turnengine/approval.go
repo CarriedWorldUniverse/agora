@@ -13,17 +13,23 @@ import (
 // defaultPolicy is the Manager's zero-config approval policy: every known
 // kind Classify can actually emit from the fs/exec surface (exec, patch,
 // escalation, mcp_tool) resolves to contracts.PolicyPrompt — i.e. ask,
-// absent a prior scoped allow (approval.Decide's PolicyPrompt case).
+// absent a prior scoped allow (approval.Decide's PolicyPrompt case) —
+// EXCEPT KindRead (NEX-782), which resolves to contracts.PolicyAuto: a
+// coding agent must not prompt for approval on every read_file/list_dir/
+// glob/grep call. This does not weaken the envelope — read-only fs tools
+// are still containment-bounded and protected-dir-excluded in the fs
+// family itself (fs.go), unconditionally, regardless of the approval
+// outcome; auto-allowing KindRead only skips the approval PROMPT.
 //
 // This is deliberately built explicitly rather than reused from
 // contracts.BuiltinPresets()[contracts.PresetPrompt]: that preset sets
 // KindPatch to contracts.PolicyAuto (writes-inside-wd are "the sandbox's
 // job" per its own doc comment), but the brief's cited spec text for the
-// dev profile is "exec/patch/escalation → Ask" — nothing auto-runs by
+// dev profile is "exec/patch/escalation → Ask" — nothing else auto-runs by
 // default in this unit. A future profile-config unit (U-C4/U-E2) is where
 // BuiltinPresets()/a real dev-profile PolicySet gets wired in; until then,
-// fail-closed-to-ask for every kind is the only zero-config choice that
-// can't silently auto-execute a write or a shell command.
+// fail-closed-to-ask for every kind but read is the only zero-config
+// choice that can't silently auto-execute a write or a shell command.
 //
 // KindQuestion and KindPlan are included for completeness (approval.Decide
 // reads the PolicySet for them too) even though Classify's fs/exec surface
@@ -39,6 +45,7 @@ func defaultPolicy() contracts.PolicySet {
 		contracts.KindMCPTool:    contracts.PolicyPrompt,
 		contracts.KindQuestion:   contracts.PolicyPrompt,
 		contracts.KindPlan:       contracts.PolicyPrompt,
+		contracts.KindRead:       contracts.PolicyAuto,
 	}
 }
 

@@ -81,3 +81,44 @@ func TestManager_ToolCall_RunCommandExecutesViaSurface(t *testing.T) {
 		t.Fatalf("tool_result content = %q; want it to contain the command's real stdout", toolMsg.Content)
 	}
 }
+
+// TestManager_Approval_RunCommandStillAsksUnderDefaultPolicy: regression
+// guard for NEX-782 — KindRead's new auto-allow must NOT leak into exec.
+// A run_command call under the Manager's zero-config defaultPolicy() (no
+// WithPolicy override) must still ask (KindExec stays contracts.PolicyPrompt).
+func TestManager_Approval_RunCommandStillAsksUnderDefaultPolicy(t *testing.T) {
+	roots := managerTestRoots(t)
+	provider := fake.NewProvider(
+		fake.Step{ToolCalls: []bridle.ToolInvocation{
+			{ID: "1", Name: toolrunner.ToolRunCommand, Args: json.RawMessage(`{"command":"echo hi"}`)},
+		}},
+		fake.Step{Text: "done"},
+	)
+	m := NewManager("th_exec_ask", provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
+
+	in := make(chan contracts.Input, 1)
+	out := make(chan contracts.Event, 32)
+	runErr := make(chan error, 1)
+	go func() { runErr <- m.Run(context.Background(), in, out) }()
+
+	in <- contracts.Input{Type: contracts.InUserMessage, Text: "run echo hi"}
+
+	req := recvApprovalRequested(t, out, testTimeout)
+	var ar contracts.ApprovalRequest
+	if err := json.Unmarshal(req.Payload, &ar); err != nil {
+		t.Fatalf("decode approval.requested payload: %v", err)
+	}
+	if ar.Kind != contracts.KindExec {
+		t.Fatalf("approval kind = %q; want exec", ar.Kind)
+	}
+
+	in <- contracts.Input{Type: contracts.InApprovalResponse, ID: ar.ID, Decision: contracts.DecisionAllow, Scope: contracts.ScopeOnce}
+	if !drainToTurnCompleted(t, out, testTimeout) {
+		t.Fatal("turn never completed after approve")
+	}
+	in <- contracts.Input{Type: contracts.InEnd}
+	expectClosed(t, out, testTimeout)
+	if err := <-runErr; err != nil {
+		t.Fatalf("Run returned %v; want nil", err)
+	}
+}

@@ -55,6 +55,18 @@ type EscalationPayload struct {
 	Detail string `json:"detail"`
 }
 
+// ReadPayload is the "read" approval payload shape (NEX-782; DEVIATIONS.md
+// §5-style convention — the payload carries the useful identifier for a
+// modal that renders it, even though KindRead auto-allows in every preset
+// but strict so this modal only ever actually renders under strict).
+// read_file/list_dir have a single path; glob/grep have a pattern instead
+// (grep optionally scoped to a path too) — Detail carries whichever
+// identifier the call actually has, so one shape covers all four tools
+// without a path field that's sometimes meaningless.
+type ReadPayload struct {
+	Detail string `json:"detail"`
+}
+
 // MCPToolPayload is the "mcp_tool" approval payload shape (DEVIATIONS.md
 // §5).
 // Args deliberately has NO omitempty: DEVIATIONS.md §5's shape is exactly
@@ -78,6 +90,17 @@ const mcpPrefix = "mcp__"
 // internal/approval.Decide, wired in a later phase) and does no I/O — it
 // only classifies + builds the payload from Call.Args and Roots.
 //
+// run_command -> exec; write_file/edit_file -> patch (or escalation, if
+// classifyWriteTarget rejects the target); mcp__-prefixed -> mcp_tool;
+// read_file/list_dir/glob/grep -> read (NEX-782). The read cases do NOT
+// check Roots the way the write cases do: read-only fs tools are still
+// containment-bounded and protected-dir-excluded, but that enforcement
+// runs unconditionally in the fs family itself (fs.go) regardless of the
+// approval outcome, so Classify has nothing useful to add here — it just
+// carries the path/pattern through for the (strict-only) approval modal.
+// Everything else still unrecognized falls to the default case below
+// (KindEscalation) — the correct catch-all for genuinely-unknown tools.
+//
 // Malformed Args classify as KindEscalation with a payload explaining the
 // parse failure, rather than panicking or returning a Go error — Classify
 // always returns a decidable value (fail-closed, same convention as
@@ -93,6 +116,34 @@ func Classify(call Call, roots Roots) (contracts.ApprovalKind, any) {
 
 	case strings.HasPrefix(call.Name, mcpPrefix):
 		return contracts.KindMCPTool, MCPToolPayload{Tool: call.Name, Args: call.Args}
+
+	case call.Name == ToolReadFile:
+		var a readFileArgs
+		if err := json.Unmarshal(call.Args, &a); err != nil {
+			return contracts.KindEscalation, EscalationPayload{Detail: "malformed read_file arguments: " + err.Error()}
+		}
+		return contracts.KindRead, ReadPayload{Detail: a.Path}
+
+	case call.Name == ToolListDir:
+		var a listDirArgs
+		if err := json.Unmarshal(call.Args, &a); err != nil {
+			return contracts.KindEscalation, EscalationPayload{Detail: "malformed list_dir arguments: " + err.Error()}
+		}
+		return contracts.KindRead, ReadPayload{Detail: a.Path}
+
+	case call.Name == ToolGlob:
+		var a globArgs
+		if err := json.Unmarshal(call.Args, &a); err != nil {
+			return contracts.KindEscalation, EscalationPayload{Detail: "malformed glob arguments: " + err.Error()}
+		}
+		return contracts.KindRead, ReadPayload{Detail: a.Pattern}
+
+	case call.Name == ToolGrep:
+		var a grepArgs
+		if err := json.Unmarshal(call.Args, &a); err != nil {
+			return contracts.KindEscalation, EscalationPayload{Detail: "malformed grep arguments: " + err.Error()}
+		}
+		return contracts.KindRead, ReadPayload{Detail: a.Pattern}
 
 	case call.Name == ToolWriteFile:
 		var a writeFileArgs

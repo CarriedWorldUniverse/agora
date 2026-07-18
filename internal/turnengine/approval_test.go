@@ -23,10 +23,13 @@ import (
 // coverage in this file. Without this, every one of those tests would hang
 // forever on an unanswered EvApprovalRequested the instant the
 // BeforeToolCall hook this unit adds started gating every tool call —
-// including read_file/does_not_exist, which toolrunner.Classify's switch
-// has no dedicated case for and so falls through to its `default:` branch
-// (KindEscalation, "unrecognized tool call: ...") — Classify's own
-// behavior, unmodified and out of this unit's scope to change.
+// e.g. does_not_exist, which toolrunner.Classify's switch has no dedicated
+// case for and so falls through to its `default:` branch (KindEscalation,
+// "unrecognized tool call: ...") — Classify's own behavior, unmodified and
+// out of this unit's scope to change. (read_file classifies as KindRead as
+// of NEX-782, which defaultPolicy() itself already auto-allows — the
+// read_file-only dispatch tests no longer need this override, see
+// manager_test.go; this fixture is kept for the still-gated kinds.)
 func allowAllPolicy() contracts.PolicySet {
 	return contracts.PolicySet{
 		contracts.KindExec:       contracts.PolicyAuto,
@@ -35,6 +38,7 @@ func allowAllPolicy() contracts.PolicySet {
 		contracts.KindMCPTool:    contracts.PolicyAuto,
 		contracts.KindQuestion:   contracts.PolicyPrompt, // PolicyAuto is invalid for question (approval.Decide fail-closes it to ask regardless); left prompt for honesty, unused by any fs/exec test.
 		contracts.KindPlan:       contracts.PolicyAuto,
+		contracts.KindRead:       contracts.PolicyAuto,
 	}
 }
 
@@ -215,6 +219,49 @@ loop:
 	toolMsg := lastToolResultMessage(t, provider.LastRequest())
 	if toolMsg.Content == "" {
 		t.Fatal("tool_result content empty; want the denial feedback")
+	}
+}
+
+// --- KindRead (NEX-782): auto-allowed under defaultPolicy, no ask ---
+
+// TestManager_Approval_ReadFileDefaultPolicyNoAsk drives a read_file call
+// under the Manager's zero-config defaultPolicy() (no WithPolicy override)
+// and asserts NO approval.requested is ever emitted — a coding agent must
+// not prompt for approval on every read. The turn must still complete
+// normally and the tool_result must carry the file's real content (proving
+// the call actually executed, not just that nothing asked).
+func TestManager_Approval_ReadFileDefaultPolicyNoAsk(t *testing.T) {
+	roots := managerTestRoots(t)
+	if err := os.WriteFile(filepath.Join(roots.WorkingDir, "hello.txt"), []byte("hello from disk"), 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	provider := fake.NewProvider(
+		fake.Step{ToolCalls: []bridle.ToolInvocation{
+			{ID: "1", Name: toolrunner.ToolReadFile, Args: json.RawMessage(`{"path":"hello.txt"}`)},
+		}},
+		fake.Step{Text: "done"},
+	)
+	m := NewManager("th_read_auto", provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
+
+	in := make(chan contracts.Input, 1)
+	out := make(chan contracts.Event, 32)
+	runErr := make(chan error, 1)
+	go func() { runErr <- m.Run(context.Background(), in, out) }()
+
+	in <- contracts.Input{Type: contracts.InUserMessage, Text: "read hello.txt"}
+
+	if got := drainNoApprovalRequestedToTurnEnd(t, out, testTimeout); got != contracts.EvTurnCompleted {
+		t.Fatalf("turn ended as %s; want turn.completed", got)
+	}
+	in <- contracts.Input{Type: contracts.InEnd}
+	expectClosed(t, out, testTimeout)
+	if err := <-runErr; err != nil {
+		t.Fatalf("Run returned %v; want nil", err)
+	}
+
+	toolMsg := lastToolResultMessage(t, provider.LastRequest())
+	if toolMsg.Content != `"hello from disk"` {
+		t.Fatalf("tool_result content = %q; want the file's real content (the call must have actually executed, unasked)", toolMsg.Content)
 	}
 }
 

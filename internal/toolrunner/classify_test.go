@@ -116,6 +116,59 @@ func TestClassifyUnknownToolIsEscalation(t *testing.T) {
 	}
 }
 
+// TestClassifyReadTools: read_file/list_dir/glob/grep all classify as
+// KindRead (NEX-782), carrying the call's path/pattern in ReadPayload.
+func TestClassifyReadTools(t *testing.T) {
+	roots := newTestRoots(t)
+
+	kind, payload := Classify(Call{Name: ToolReadFile, Args: mustArgs(t, readFileArgs{Path: "a.txt"})}, roots)
+	if kind != contracts.KindRead {
+		t.Fatalf("read_file kind = %v, want %v", kind, contracts.KindRead)
+	}
+	if p, ok := payload.(ReadPayload); !ok || p.Detail != "a.txt" {
+		t.Fatalf("read_file payload = %#v, want ReadPayload{Detail: \"a.txt\"}", payload)
+	}
+
+	kind, payload = Classify(Call{Name: ToolListDir, Args: mustArgs(t, listDirArgs{Path: "sub"})}, roots)
+	if kind != contracts.KindRead {
+		t.Fatalf("list_dir kind = %v, want %v", kind, contracts.KindRead)
+	}
+	if p, ok := payload.(ReadPayload); !ok || p.Detail != "sub" {
+		t.Fatalf("list_dir payload = %#v, want ReadPayload{Detail: \"sub\"}", payload)
+	}
+
+	kind, payload = Classify(Call{Name: ToolGlob, Args: mustArgs(t, globArgs{Pattern: "**/*.go"})}, roots)
+	if kind != contracts.KindRead {
+		t.Fatalf("glob kind = %v, want %v", kind, contracts.KindRead)
+	}
+	if p, ok := payload.(ReadPayload); !ok || p.Detail != "**/*.go" {
+		t.Fatalf("glob payload = %#v, want ReadPayload{Detail: \"**/*.go\"}", payload)
+	}
+
+	kind, payload = Classify(Call{Name: ToolGrep, Args: mustArgs(t, grepArgs{Pattern: "TODO"})}, roots)
+	if kind != contracts.KindRead {
+		t.Fatalf("grep kind = %v, want %v", kind, contracts.KindRead)
+	}
+	if p, ok := payload.(ReadPayload); !ok || p.Detail != "TODO" {
+		t.Fatalf("grep payload = %#v, want ReadPayload{Detail: \"TODO\"}", payload)
+	}
+}
+
+// TestClassifyReadFileMalformedArgsIsEscalation: read tools follow the
+// same malformed-Args-> KindEscalation fail-closed convention as every
+// other case.
+func TestClassifyReadFileMalformedArgsIsEscalation(t *testing.T) {
+	roots := newTestRoots(t)
+	kind, payload := Classify(Call{Name: ToolReadFile, Args: json.RawMessage(`not json`)}, roots)
+	if kind != contracts.KindEscalation {
+		t.Fatalf("kind = %v, want %v", kind, contracts.KindEscalation)
+	}
+	p, ok := payload.(EscalationPayload)
+	if !ok || p.Detail == "" {
+		t.Fatalf("payload = %#v", payload)
+	}
+}
+
 // assertJSONExact marshals payload and compares it byte-for-byte against
 // want (both parsed and re-marshaled through the same encoder so key
 // ordering from struct field order is deterministic) — the DEVIATIONS.md

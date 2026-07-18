@@ -6,7 +6,9 @@ import "testing"
 // INDEPENDENTLY from the spec markdown (columns exec|patch|escalation|
 // mcp_tool|question|plan — NO gate column) and asserts the code matches. The
 // value is that this map is read off the spec table, not copied from the
-// implementation; a drift between the two surfaces one of them.
+// implementation; a drift between the two surfaces one of them. KindRead
+// (NEX-782, post-spec addition) is included per-preset below: auto
+// everywhere except strict, which prompts.
 func TestBuiltinPresetMatrix(t *testing.T) {
 	// Rows are exactly the §2 table cells; "auto*" and "auto-within-sandbox"
 	// both encode as PolicyAuto at the policy layer (the sandbox distinction
@@ -15,18 +17,22 @@ func TestBuiltinPresetMatrix(t *testing.T) {
 		PresetPrompt: {
 			KindExec: PolicyPrompt, KindPatch: PolicyAuto, KindEscalation: PolicyPrompt,
 			KindMCPTool: PolicyPerServer, KindQuestion: PolicyPrompt, KindPlan: PolicyPrompt,
+			KindRead: PolicyAuto,
 		},
 		PresetAutoSafe: {
 			KindExec: PolicyAuto, KindPatch: PolicyAuto, KindEscalation: PolicyPrompt,
 			KindMCPTool: PolicyPerServer, KindQuestion: PolicyPrompt, KindPlan: PolicyPrompt,
+			KindRead: PolicyAuto,
 		},
 		PresetStrict: {
 			KindExec: PolicyPrompt, KindPatch: PolicyPrompt, KindEscalation: PolicyPrompt,
 			KindMCPTool: PolicyPrompt, KindQuestion: PolicyPrompt, KindPlan: PolicyPrompt,
+			KindRead: PolicyPrompt,
 		},
 		PresetNeverEscalate: {
 			KindExec: PolicyAuto, KindPatch: PolicyAuto, KindEscalation: PolicyDeny,
 			KindMCPTool: PolicyPerServer, KindQuestion: PolicyConvert, KindPlan: PolicyDeny,
+			KindRead: PolicyAuto,
 		},
 	}
 	got := BuiltinPresets()
