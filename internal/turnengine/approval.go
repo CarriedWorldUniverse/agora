@@ -193,6 +193,38 @@ func (m *Manager) resolveWaiter(id string, out approvalOutcome) {
 // (askAndWait), which is the safe default (surfaces to an approver) rather
 // than a silent panic or a fail-open allow.
 func (m *Manager) beforeToolCall(ctx context.Context, c bridle.BeforeToolCallCtx) (bridle.BeforeToolCallCtx, bridle.HookAction, error) {
+	// U-D1: foreign-tool passthrough, REQUIRED companion change for wiring
+	// the ctxmap context engine (see NewManager/attachContextEngine). This
+	// hook is registered BEFORE bridleadapter.Attach (manager.go), so it
+	// runs FIRST on every tool call — including the recall/inspect/read_raw
+	// tools ctxmap's own BeforeModelCall hook adds to the request. Gate
+	// ONLY the calls this Manager's own Surface actually owns (fs/exec/mcp
+	// — m.surface.Handles); anything else — ctxmap's tools, or a genuinely
+	// unrecognized name — passes straight through unclassified, ungated,
+	// via HookContinue with Deny left false.
+	//
+	// Sound because: (1) only Surface tools execute with real side effects
+	// (file writes, shell commands, mcp calls) — those are exactly what
+	// toolrunner.Classify + approval.Decide exist to gate, and this check
+	// does not change their gating at all (the classify/Decide/Ask path
+	// below is reached exactly as before for every name m.surface.Handles
+	// returns true for). (2) ctxmap's recall/inspect/read_raw tools are
+	// side-effect-free reads served entirely by the ctxmap engine itself —
+	// they Deny+Result inside ctxmap's OWN BeforeToolCall hook (registered
+	// after this one) and never reach surfaceRunner/toolrunner.Surface at
+	// all, so there is nothing here to protect against; gating them would
+	// prompt the operator to approve a memory lookup, which both defeats
+	// ctxmap's "memory is automatic, no tool ceremony" framing and could
+	// never be denied usefully (denying recall just starves the model of
+	// context it already has, it does not prevent any effect). (3) any
+	// OTHER name that is neither ours nor ctxmap's still can't silently
+	// execute: it falls through to surfaceRunner, which returns a clean
+	// IsError Result (toolrunner.ErrUnknownTool) — errors harmlessly,
+	// never runs.
+	if !m.surface.Handles(c.Call.Name) {
+		return c, bridle.HookContinue, nil
+	}
+
 	htc := m.loadHookTurn()
 	if htc == nil {
 		// Defensive only: Run publishes hookTurn (setHookTurn) strictly

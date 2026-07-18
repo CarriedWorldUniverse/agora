@@ -2,6 +2,7 @@ package turnengine
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
@@ -44,7 +45,7 @@ func TestManager_NoOptions_CarriesDevProfileIntoTurnRequest(t *testing.T) {
 	if got.Model != dev.Model {
 		t.Fatalf("ProviderRequest.Model = %q; want DevProfile's %q", got.Model, dev.Model)
 	}
-	if got.AppendSystemPrompt != dev.AppendSystemPrompt {
+	if !strings.HasPrefix(got.AppendSystemPrompt, dev.AppendSystemPrompt) { // ctxmap appends its working-memory block; the profile prompt is the PREFIX
 		t.Fatalf("ProviderRequest.AppendSystemPrompt = %q; want DevProfile's %q", got.AppendSystemPrompt, dev.AppendSystemPrompt)
 	}
 }
@@ -70,7 +71,7 @@ func TestManager_WithAppendSystemPrompt_OverridesDevProfile(t *testing.T) {
 
 	runOneManagerTurn(t, m)
 
-	if got := provider.LastRequest().AppendSystemPrompt; got != "y" {
+	if got := provider.LastRequest().AppendSystemPrompt; !strings.HasPrefix(got, "y") {
 		t.Fatalf("ProviderRequest.AppendSystemPrompt = %q; want %q (WithAppendSystemPrompt override)", got, "y")
 	}
 }
@@ -117,7 +118,7 @@ func TestManager_WithProfile_OverridesDevProfile(t *testing.T) {
 	if got.Model != "custom-model" {
 		t.Fatalf("ProviderRequest.Model = %q; want %q (WithProfile override)", got.Model, "custom-model")
 	}
-	if got.AppendSystemPrompt != "custom prompt" {
+	if !strings.HasPrefix(got.AppendSystemPrompt, "custom prompt") {
 		t.Fatalf("ProviderRequest.AppendSystemPrompt = %q; want %q (WithProfile override)", got.AppendSystemPrompt, "custom prompt")
 	}
 }
@@ -148,7 +149,7 @@ func TestManager_WithModel_AfterWithProfile_StillWins(t *testing.T) {
 	if got.Model != "later-model" {
 		t.Fatalf("ProviderRequest.Model = %q; want %q (WithModel after WithProfile)", got.Model, "later-model")
 	}
-	if got.AppendSystemPrompt != "custom prompt" {
+	if !strings.HasPrefix(got.AppendSystemPrompt, "custom prompt") {
 		t.Fatalf("ProviderRequest.AppendSystemPrompt = %q; want %q (untouched profile field)", got.AppendSystemPrompt, "custom prompt")
 	}
 }

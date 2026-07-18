@@ -44,6 +44,30 @@ func (s *Surface) Specs(ctx context.Context) ([]contracts.ToolSpec, error) {
 	return out, nil
 }
 
+// Handles reports whether name belongs to one of this Surface's registered
+// native Families or its MCPSource — i.e. whether Execute would actually
+// dispatch it somewhere, as opposed to falling through to Execute's own
+// ErrUnknownTool branch. An mcp__-prefixed name is treated as handled
+// whenever an MCPSource is configured, mirroring Execute's own dispatch
+// (it never lists the MCPSource's tools just to answer this), not by
+// listing s.mcp's tools.
+//
+// U-D1: used by turnengine's approval hook to decide whether a tool call is
+// one of agora's OWN executable tools (gate it through approval.Decide) or
+// foreign to this Surface (skip gating — e.g. a context-engine tool served
+// entirely off-Surface by a different hook).
+func (s *Surface) Handles(name string) bool {
+	if strings.HasPrefix(name, mcpPrefix) {
+		return s.mcp != nil
+	}
+	for _, f := range s.families {
+		if f.Handles(name) {
+			return true
+		}
+	}
+	return false
+}
+
 // Execute dispatches call by name. A Go error return is reserved for the
 // harness itself misbehaving; an unresolvable name, bad args, or any
 // tool-level failure comes back as Result{IsError: true}, never a panic
