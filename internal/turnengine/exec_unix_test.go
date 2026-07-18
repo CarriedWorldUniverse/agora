@@ -55,7 +55,11 @@ func TestManager_ToolCall_RunCommandExecutesViaSurface(t *testing.T) {
 		}},
 		fake.Step{Text: "done"},
 	)
-	m := NewManager("th_tool", provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
+	// U-C3: every tool call now goes through the approval gate — allow-all
+	// so this test keeps proving DISPATCH (the exec family actually runs),
+	// not approval semantics (which has its own dedicated coverage in
+	// approval_test.go).
+	m := NewManager("th_tool", provider, WithRoots(roots), WithPolicy(allowAllPolicy()), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
 
 	in := make(chan contracts.Input, 1)
 	out := make(chan contracts.Event, 32)
