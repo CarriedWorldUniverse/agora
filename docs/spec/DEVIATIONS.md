@@ -103,6 +103,44 @@ carried the pre-fix wording — one reason the duplicates were retired.)
 - `EvProvisioned` was registered in the `contracts` known-events test at U18 (a
   pre-existing gap).
 
+## 11. turnengine tool-call item events (NEX-784 / Phase 2 U-C5): reads fold into command_execution; an unmatched Result is skipped
+`internal/turnengine/sink.go` translates bridle `ToolCallStart`/`ToolCallResult`
+into `item.started`/`item.completed`, keyed by the call ID so both share one
+`item.seq` (a `map[string]toolCallState` under the sink's existing mutex,
+recorded at Start and consumed once at Result). Two choices not spelled out by
+`agora-spec-io.md`:
+- **Tool name -> `contracts.ItemType`:** `run_command` -> `ItemCommandExecution`;
+  `write_file`/`edit_file` -> `ItemFileChange`; `mcp__`-prefixed ->
+  `ItemMCPToolCall`; **everything else (the read-only fs tools —
+  `read_file`/`list_dir`/`glob`/`grep` — and any unrecognized tool name) falls
+  back to `ItemCommandExecution`**, with a synthesized `"<tool> <key arg>"`
+  command summary (e.g. `read_file hello.txt`) — there is no dedicated
+  `ItemType` for read-only tool activity in the vocabulary yet, and
+  `command_execution`'s shape (a readable command string) is the closest fit
+  for v1. Args are decoded best-effort; a decode failure (or a tool with
+  neither a `path` nor a `pattern` field) falls back to the bare tool name —
+  never a panic (a model-supplied Args blob is untrusted input, unlike the
+  locally-built payload structs `mustMarshal` panics on).
+- **A `ToolCallResult` with no matching recorded `ToolCallStart` is SKIPPED**,
+  not given a fresh seq. `ToolCallResult` carries no `Name`/`Args` of its own
+  (see bridle's `events.go`), so there is no way to classify an orphan Result
+  into the right `ItemType` or build its payload; bridle's own
+  `executeToolCall` (run.go) always emits Start before Result for the same ID,
+  so this is a defensive branch, not an expected path.
+Payload shapes (local structs, `mustMarshal`'d, matching this file's own §5
+convention for approval payloads):
+- `command_execution`: started `{"command":"..."}`; completed
+  `{"command":"...","output":"...","error":"..." }` (`error` omitted when
+  empty). `output` unmarshals `ToolCallResult.Result` as a JSON string first
+  (the toolrunner convention — see `surfacerunner.go`) and falls back to the
+  raw JSON bytes on a non-string result.
+- `file_change`: started `{"path":"..."}`; completed
+  `{"path":"...","error":"..."}` — the full diff is heavy; path + status is
+  the v1 shape, matching this file's own §5 `patch` note.
+- `mcp_tool_call`: started `{"tool":"...","args":<raw Args>}`; completed
+  `{"tool":"...","result":<raw Result>,"error":"..."}` — both Args and
+  Result ride through unmodified (no schema to decode against here).
+
 ## Open follow-up tickets
 - **NEX-764** — nexus-side dispatch `needs_input` consumer (pod `blocked:
   needs-input` route to context/operator + re-dispatch; a nexus change, not agora).
