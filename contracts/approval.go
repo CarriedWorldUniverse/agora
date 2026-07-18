@@ -26,6 +26,16 @@ const (
 	KindPlan ApprovalKind = "plan"
 	// KindGate: workflow approval gate (ctx.approval, workflow-engine v1).
 	KindGate ApprovalKind = "gate"
+	// KindRead: read-only fs tool calls (read_file/list_dir/glob/grep).
+	// These are containment-bounded and protected-dir-excluded by the fs
+	// family itself (fs.go: resolveContained + IsProtected checks run on
+	// every call regardless of approval outcome) — safe to auto-allow in
+	// dev/chat/headless without asking on every read, while a strict
+	// profile can still gate them. Auto-allowing KindRead only skips the
+	// APPROVAL prompt; it does NOT bypass containment or protected-path
+	// enforcement, which live in the fs family and run unconditionally.
+	// NEX-782.
+	KindRead ApprovalKind = "read"
 )
 
 // Decision is the resolution of a permission-shaped approval.
@@ -90,25 +100,33 @@ const (
 // workflow gates always surface to the operator (ctx.approval always asks,
 // workflows §2), so gate is not preset-governed. patch "auto" here means
 // writes-inside-wd are the sandbox's job; protected paths still raise
-// escalation (§2 note *).
+// escalation (§2 note *). KindRead (NEX-782) is auto-allowed in every
+// column EXCEPT strict — read-only fs tools are containment-bounded and
+// protected-dir-excluded by the fs family itself, so nothing outside that
+// column needs to ask on every read; strict still prompts, since it gates
+// everything.
 // Spec: agora-spec-approvals.md §2 (presets table).
 func BuiltinPresets() map[string]PolicySet {
 	return map[string]PolicySet{
 		PresetPrompt: {
 			KindExec: PolicyPrompt, KindPatch: PolicyAuto, KindEscalation: PolicyPrompt,
 			KindMCPTool: PolicyPerServer, KindQuestion: PolicyPrompt, KindPlan: PolicyPrompt,
+			KindRead: PolicyAuto,
 		},
 		PresetAutoSafe: {
 			KindExec: PolicyAuto, KindPatch: PolicyAuto, KindEscalation: PolicyPrompt,
 			KindMCPTool: PolicyPerServer, KindQuestion: PolicyPrompt, KindPlan: PolicyPrompt,
+			KindRead: PolicyAuto,
 		},
 		PresetStrict: {
 			KindExec: PolicyPrompt, KindPatch: PolicyPrompt, KindEscalation: PolicyPrompt,
 			KindMCPTool: PolicyPrompt, KindQuestion: PolicyPrompt, KindPlan: PolicyPrompt,
+			KindRead: PolicyPrompt,
 		},
 		PresetNeverEscalate: {
 			KindExec: PolicyAuto, KindPatch: PolicyAuto, KindEscalation: PolicyDeny,
 			KindMCPTool: PolicyPerServer, KindQuestion: PolicyConvert, KindPlan: PolicyDeny,
+			KindRead: PolicyAuto,
 		},
 	}
 }

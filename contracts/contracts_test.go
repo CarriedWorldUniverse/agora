@@ -123,6 +123,7 @@ func TestApprovalPayloadsTyped(t *testing.T) {
 	knownKinds := map[ApprovalKind]bool{
 		KindExec: true, KindPatch: true, KindEscalation: true,
 		KindMCPTool: true, KindQuestion: true, KindPlan: true, KindGate: true,
+		KindRead: true,
 	}
 	for _, name := range allFlows(t) {
 		for i, line := range fixtureLines(t, name) {
