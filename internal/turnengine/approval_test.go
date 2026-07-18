@@ -346,7 +346,14 @@ func TestManager_Approval_BackToBackTurns_NoHookTurnClobber(t *testing.T) {
 			fake.Step{ToolCalls: []bridle.ToolInvocation{writeFileCall("1", fmt.Sprintf("note-%d.txt", i), "second turn")}},
 			fake.Step{Text: "done"},
 		)
-		m := NewManager(fmt.Sprintf("th_b2b_%d", i), provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_a", "tu_b"}}))
+		// U-D1: WithContextEngine(false) — this stress test targets the
+		// hookTurn clobber race (see the doc comment above), never ctxmap.
+		// 20000 iterations x a real CGO sqlite :memory: engine build/
+		// teardown per NewManager call (the ctxmap engine defaults ON) is
+		// expensive enough under -race to blow this package's test
+		// timeout; opting out removes overhead orthogonal to what this
+		// test asserts.
+		m := NewManager(fmt.Sprintf("th_b2b_%d", i), provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_a", "tu_b"}}), WithContextEngine(false))
 
 		in := make(chan contracts.Input, 2)
 		out := make(chan contracts.Event, 32)

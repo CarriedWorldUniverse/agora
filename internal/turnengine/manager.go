@@ -14,6 +14,10 @@ import (
 	agoraio "github.com/CarriedWorldUniverse/agora/internal/io"
 	"github.com/CarriedWorldUniverse/agora/internal/toolrunner"
 	bridle "github.com/CarriedWorldUniverse/bridle"
+	bridleadapter "github.com/CarriedWorldUniverse/bridle/ctxmap/adapter"
+	"github.com/CarriedWorldUniverse/bridle/ctxmap/memory"
+	"github.com/CarriedWorldUniverse/bridle/ctxmap/render"
+	"github.com/CarriedWorldUniverse/bridle/ctxmap/store"
 )
 
 // Manager implements agora's io.Engine (internal/io/engine.go) over a
@@ -88,6 +92,17 @@ type Manager struct {
 	// nil) that decides the first turn's New flag runs exactly once,
 	// gated by this same bool — never re-probed on later turns.
 	sessionStarted bool
+
+	// U-D1: the per-Manager ctxmap context engine (working-state only —
+	// see attachContextEngine's doc comment for scope/degrade behavior).
+	// ctxEngineEnabled defaults true (WithContextEngine(false) opts out);
+	// eng/detach stay nil whenever construction is skipped OR fails — every
+	// touch of eng in this package is guarded with `if m.eng != nil`, so a
+	// Manager with no working context engine behaves exactly as it did
+	// before this unit.
+	ctxEngineEnabled bool
+	eng              *memory.Engine
+	detach           func()
 }
 
 var _ agoraio.Engine = (*Manager)(nil)
@@ -176,6 +191,20 @@ func WithStore(store contracts.ThreadStore) Option {
 	return func(m *Manager) { m.store = store }
 }
 
+// WithContextEngine turns the per-Manager ctxmap working-state engine
+// on/off (U-D1). Default (no WithContextEngine option) is ON — NewManager
+// seeds ctxEngineEnabled=true before opts run, matching this package's
+// existing "fully-formed by default" posture (c.f. NewManager's Option-
+// precedence doc comment) — the working-state block is the whole point of
+// wiring ctxmap in, so a Manager built with zero options should carry it.
+// WithContextEngine(false) opts a Manager fully out (e.g. a test that
+// wants to assert on AppendSystemPrompt without ctxmap's block mixed in):
+// attachContextEngine is never called, m.eng/m.detach stay nil, and every
+// turn runs exactly as it did before this unit.
+func WithContextEngine(enabled bool) Option {
+	return func(m *Manager) { m.ctxEngineEnabled = enabled }
+}
+
 // NewManager builds a Manager for one thread over provider. provider is
 // the injection seam: production callers pass provider/claudesdk.New()
 // (funnel mode, per the blueprint's locked decision #2/#3); tests pass
@@ -209,6 +238,7 @@ func NewManager(threadID string, provider bridle.Provider, opts ...Option) *Mana
 		policy:             profile.Policy,
 		scopeStore:         profile.ScopeStore,
 		waiters:            make(map[string]chan approvalOutcome),
+		ctxEngineEnabled:   true, // U-D1: default ON for the dev profile — see WithContextEngine
 	}
 	for _, o := range opts {
 		o(m)
@@ -228,7 +258,66 @@ func NewManager(threadID string, provider bridle.Provider, opts ...Option) *Mana
 	// during setup" convention) and reused for every turn this Manager
 	// drives — see approval.go's beforeToolCall doc comment.
 	m.harness.RegisterBeforeToolCall(m.beforeToolCall)
+	// U-D1: attach the ctxmap context engine AFTER the approval hook above
+	// — bridle runs BeforeToolCall hooks in registration order (hooks.go's
+	// runHooks), so m.beforeToolCall always sees every tool call FIRST.
+	// See approval.go's beforeToolCall doc comment for why running second
+	// is exactly what ctxmap's own hook needs (it only ever intercepts its
+	// own recall/inspect/read_raw tools, via the Deny+Result pattern, and
+	// is never itself a gate for agora's Surface tools).
+	if m.ctxEngineEnabled {
+		m.attachContextEngine()
+	}
 	return m
+}
+
+// attachContextEngine builds the per-Manager ctxmap working-state engine
+// and attaches it to m.harness (U-D1). v1 scope, deliberately minimal:
+//
+//   - store.Open(":memory:") — an in-memory, per-Manager fact store. No
+//     durable persistence across process restarts: ctxmap's durable-fact
+//     extraction (Proposer/Embedder/PairJudge) is NOT wired here (all
+//     three are passed nil to memory.New) — see the doc.go/blueprint's
+//     "v1 = WORKING-STATE only" scope line. A future unit that wants
+//     cross-restart facts swaps this for store.Open(a real path); nothing
+//     else in this function changes.
+//   - render.New(st) — opens epoch 1 over that (empty) store.
+//   - memory.New(..., nil, nil, nil) + EnableWorkingState() — the
+//     deterministic "files touched / last command / recent steps"
+//     progress block, fed purely by ObserveTool (no model, no
+//     extraction). recall/inspect are still served (memory.Engine.Tools()
+//     always returns them), just over an always-empty durable-fact store
+//     — a no-op the model will rarely bother calling, per ctxmap's own
+//     Framing text, which frames memory as automatic rather than a save/
+//     recall ceremony.
+//
+// Degrade-without-ctxmap, not fail-NewManager-loudly: a construction
+// failure here (sqlite open error, disk/fd exhaustion) is an environment
+// fault that has nothing to do with whether a turn can otherwise run —
+// unlike defaultRoots' mustMarshal-style panic (an unusable Roots{} would
+// make EVERY later fs/exec call fail confusingly), a Manager with no
+// context engine still runs turns correctly; it just does not get the
+// working-state block or recall/inspect tools this turn. Logged to
+// stderr, m.eng/m.detach left nil (see NewManager's Manager doc comment on
+// the nil-guard convention), matching this package's existing best-effort
+// posture toward optional side-channel state (c.f. persistTurn's doc
+// comment on WithStore failures).
+func (m *Manager) attachContextEngine() {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "turnengine: ctxmap store.Open failed for thread %s: %v (running WITHOUT the context engine)\n", m.threadID, err)
+		return
+	}
+	rend, err := render.New(st)
+	if err != nil {
+		st.Close()
+		fmt.Fprintf(os.Stderr, "turnengine: ctxmap render.New failed for thread %s: %v (running WITHOUT the context engine)\n", m.threadID, err)
+		return
+	}
+	eng := memory.New(memory.Config{SessionID: m.threadID}, st, rend, nil, nil, nil)
+	eng.EnableWorkingState()
+	m.eng = eng
+	m.detach = bridleadapter.Attach(m.harness, eng)
 }
 
 // defaultRoots builds WithRoots's zero-value default: the process's own
@@ -266,6 +355,21 @@ func defaultRoots() toolrunner.Roots {
 // forever against a full, unread channel.
 func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<- contracts.Event) error {
 	defer close(out)
+	// U-D1: Run is this Manager's one thread-lifetime scope (NewManager's
+	// harness/hooks are reused across every turn Run drives — see
+	// NewManager's doc comment), so it's the natural place to tear the
+	// context engine back down: detach unregisters its hooks from
+	// m.harness (a no-op past this point anyway, since RunTurn is never
+	// called again after Run returns), and eng.Close() drains/stops its
+	// extraction worker goroutine. Both are nil-guarded — a Manager built
+	// with WithContextEngine(false), or whose attachContextEngine failed
+	// and degraded, has nothing to tear down here.
+	if m.detach != nil {
+		defer m.detach()
+	}
+	if m.eng != nil {
+		defer m.eng.Close()
+	}
 
 	var turnCancel context.CancelFunc
 	// turnDone carries the in-flight turn's TERMINAL event (turn.completed

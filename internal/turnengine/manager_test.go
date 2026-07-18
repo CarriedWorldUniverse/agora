@@ -266,7 +266,16 @@ func TestManager_MultiTurn_ReapRaceStress(t *testing.T) {
 	const iterations = 1000
 	for i := 0; i < iterations; i++ {
 		provider := fake.NewProvider(fake.Step{Text: "first"}, fake.Step{Text: "second"})
-		m := NewManager(fmt.Sprintf("th_stress_%d", i), provider, WithIDGen(&FakeIDGen{IDs: []string{"tu_a", "tu_b"}}))
+		// U-D1: WithContextEngine(false) — this stress test exercises
+		// Run's turnDone reap-race handling (a hookTurn/turnCancel
+		// bookkeeping property), never ctxmap. Building+tearing down a real
+		// CGO sqlite :memory: engine on every one of these 1000 NewManager
+		// calls (the ctxmap engine defaults ON) adds per-iteration CGO
+		// overhead this test doesn't need and that -race instruments
+		// heavily — opting out keeps this test's own iteration count
+		// meaningful (CI runtime, per its doc comment above) without
+		// weakening what it actually asserts.
+		m := NewManager(fmt.Sprintf("th_stress_%d", i), provider, WithIDGen(&FakeIDGen{IDs: []string{"tu_a", "tu_b"}}), WithContextEngine(false))
 
 		in := make(chan contracts.Input, 2)
 		out := make(chan contracts.Event, 16)
@@ -502,8 +511,16 @@ func TestManager_TurnRequestTools_CarriesSurfaceSpecs(t *testing.T) {
 	}
 
 	gotTools := provider.LastRequest().Tools
-	if len(gotTools) != len(wantSpecs) {
-		t.Fatalf("ProviderRequest.Tools len = %d; want %d (fs+exec specs)", len(gotTools), len(wantSpecs))
+	// ctxmap adds its own recall/inspect tools on top of the surface specs
+	// (U-D1), so assert every surface spec is PRESENT rather than an exact count.
+	gotNames := map[string]bool{}
+	for _, td := range gotTools {
+		gotNames[td.Name] = true
+	}
+	for _, sp := range wantSpecs {
+		if !gotNames[sp.Name] {
+			t.Fatalf("ProviderRequest.Tools missing surface spec %q; got %v", sp.Name, gotNames)
+		}
 	}
 	found := false
 	for _, td := range gotTools {

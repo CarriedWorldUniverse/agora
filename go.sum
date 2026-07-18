@@ -2,6 +2,8 @@ github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
 github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260717101902-4a7c47bd85d0 h1:vaqmBaZZHTFFRcBVTK+7tSuYZqobTczjbp2D2xE1IBA=
 github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260717101902-4a7c47bd85d0/go.mod h1:/mN9mBKjY6Ja8xTEXLMWA2JYfv41NuWXuSS4DuCZRAQ=
+github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260718232019-e56dffe1f11c h1:bTjighEDv8IOqraidhQtFnzW4dt6w8d+lypyvrSxb+c=
+github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260718232019-e56dffe1f11c/go.mod h1:FjRoDAMvb7WlN11eXHbFpHOkqn9Xc8fmNMmPvFOthhk=
 github.com/CarriedWorldUniverse/nexus v0.2.1-0.20260529191407-d8a3450956ea h1:IfYiZi1dxuVZfa8Nu6jrtXNk744QEsGNrzgedOFClMs=
 github.com/CarriedWorldUniverse/nexus v0.2.1-0.20260529191407-d8a3450956ea/go.mod h1:HOl9poSAJz9qH+WtZ16sIWT4304VU/CPjKZRPY+8qv8=
 github.com/alecthomas/assert/v2 v2.11.0 h1:2Q9r3ki8+JYXvGsDyBXwH3LcJ+WK5D0gc5E8vS6K3D0=
@@ -73,6 +75,8 @@ github.com/mattn/go-localereader v0.0.1/go.mod h1:8fBrzywKY7BI3czFoHkuzRoWE9C+Ei
 github.com/mattn/go-runewidth v0.0.12/go.mod h1:RAqKPSqVFrSLVXbA8x7dzmKdmGzieGRCM46jaSJTDAk=
 github.com/mattn/go-runewidth v0.0.19 h1:v++JhqYnZuu5jSKrk9RbgF5v4CGUjqRfBm05byFGLdw=
 github.com/mattn/go-runewidth v0.0.19/go.mod h1:XBkDxAl56ILZc9knddidhrOlY5R/pDhgLpndooCuJAs=
+github.com/mattn/go-sqlite3 v1.14.47 h1:jOBI62gS7nKeZv+as1oGEy0+1qISgXwH/QBlR6KbfIo=
+github.com/mattn/go-sqlite3 v1.14.47/go.mod h1:6JTjA44L93a0QCyJef5YvlPoKXntQPjzWv5gtm9sB6w=
 github.com/microcosm-cc/bluemonday v1.0.27 h1:MpEUotklkwCSLeH+Qdx1VJgNqLlpY2KXwXFM08ygZfk=
 github.com/microcosm-cc/bluemonday v1.0.27/go.mod h1:jFi9vgW+H7c3V0lb6nR74Ib/DIB5OBs92Dimizgw2cA=
 github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 h1:ZK8zHtRHOkbHy6Mmr5D264iyp3TiX5OmNcI5cIARiQI=
