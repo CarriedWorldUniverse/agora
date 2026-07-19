@@ -37,6 +37,18 @@ func defaultSocketPath() string {
 }
 
 func main() {
+	// Quiet the Node sidecar's process warnings (bridle spawns the
+	// claude-sdk sidecar inheriting our env — claudesdk.go's
+	// scrubAuthEnv(os.Environ()) — and NODE_NO_WARNINGS is not scrubbed).
+	// The SDK emits a benign every-turn warning (CLAUDE_SDK_CAN_USE_TOOL_SHADOWED)
+	// because bridle registers its tools in allowedTools and gates them via its
+	// OWN BeforeToolCall hook, so the SDK's canUseTool is intentionally shadowed
+	// — not an error, but it lands on the sidecar's stderr and agora surfaces
+	// stderr as a scary "error:" line on an otherwise-successful turn. Silence
+	// it at the source; leave any operator-set value untouched.
+	if os.Getenv("NODE_NO_WARNINGS") == "" {
+		_ = os.Setenv("NODE_NO_WARNINGS", "1")
+	}
 	// arg0-style dispatch (U18, blueprint §6 q4): `agora daemon` boots the
 	// internal/daemon runtime instead of the TUI client; bare `agora` (or
 	// any other first arg) is unaffected — the client's own flag set never
@@ -124,11 +136,12 @@ func main() {
 		Model:   *model,
 	})
 	// Never tea.WithAltScreen() (§0 non-negotiable: the transcript lives in
-	// the terminal's own scrollback, not a full-screen widget).
-	// WithMouseCellMotion forwards wheel events to the composer/modal.
-	// Text selection under mouse capture: use the clipboard yank binding,
-	// or the emulator's shift+drag override.
-	p := tea.NewProgram(m, tea.WithMouseCellMotion())
+	// the terminal's own scrollback, not a full-screen widget) — and NO mouse
+	// capture. The TUI is keyboard-driven and handles no tea.MouseMsg, so
+	// grabbing the mouse (tea.WithMouseCellMotion) would only break the
+	// terminal's native select-to-copy and scrollback — which §0's
+	// scrollback-transcript design depends on — for zero functional gain.
+	p := tea.NewProgram(m)
 
 	signalReceived := ""
 	{
@@ -198,8 +211,11 @@ func dialBackend(ctx context.Context, log *slog.Logger, socketPath, wsURL string
 		// isNoDaemonErr's doc comment.
 		return nil, dialErr
 	}
-	log.Info("agora: no daemon reachable; running engine in-process", "socket", socketPath, "dial_err", dialErr.Error())
-	fmt.Fprintf(os.Stderr, "agora: no daemon at %s (%v); running engine in-process\n", socketPath, dialErr)
+	// This is the normal single-user path (no daemon running) — run the turn
+	// engine in-process. Keep the raw dial error in the log for debugging, but
+	// the stderr line stays reassuring: a missing socket is expected, not a fault.
+	log.Info("agora: running standalone (no daemon); engine in-process", "socket", socketPath, "dial_err", dialErr.Error())
+	fmt.Fprintln(os.Stderr, "agora: running standalone (no daemon) — engine in-process.")
 	return newInProcessBackend(ctx, attach.ThreadID, attach)
 }
 

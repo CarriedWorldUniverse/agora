@@ -274,13 +274,28 @@ func (s *turnSink) Emit(e bridle.Event) {
 	case bridle.TurnDone:
 		s.emitDone(ev)
 	case bridle.TurnError:
+		// bridle marks some TurnErrors as structured always-benign signals
+		// (events.go: Retry, ProviderAPIError, ResumeFallback) that arrive
+		// ALONGSIDE a successful TurnDone. Rendering those as agora's red
+		// "error:" status (model.go) makes a turn that actually succeeded look
+		// broken. Drop only those (the authoritative outcome is the TurnDone
+		// that follows); everything else — including StderrOutput's arbitrary
+		// sidecar stderr, which can carry real failures — still surfaces (see
+		// isNonTerminalErrorStage). A richer EvWarning severity so the benign
+		// ones show as a dim note instead of vanishing is filed as follow-up.
+		if isNonTerminalErrorStage(ev.Stage) {
+			return
+		}
 		msg := ""
 		if ev.Err != nil {
 			msg = ev.Err.Error()
 		}
 		s.send(contracts.Event{Type: contracts.EvError, Payload: mustMarshal(errorPayload{Message: msg})})
 	case bridle.Warning:
-		s.send(contracts.Event{Type: contracts.EvError, Payload: mustMarshal(errorPayload{Message: ev.Kind + ": " + ev.Message})})
+		// A bridle.Warning is, by name, non-fatal — never an agora "error:".
+		// Dropped for the same reason as the non-terminal TurnError stages
+		// above (see the EvWarning follow-up).
+		return
 	case bridle.ToolCallStart:
 		s.emitToolStart(ev)
 	case bridle.ToolCallResult:
@@ -289,6 +304,30 @@ func (s *turnSink) Emit(e bridle.Event) {
 		// bridle.StepBoundary/MCPServerFailed: see the type doc comment
 		// above — no agora wire equivalent yet, out of scope this slice.
 	}
+}
+
+// isNonTerminalErrorStage reports whether a bridle.TurnError.Stage is a
+// STRUCTURED, always-benign bridle signal (events.go) that must NOT render as
+// agora's terminal "error:" status — the turn still produces a TurnDone.
+//
+// StderrOutput is deliberately NOT in this set. It is the "arbitrary sidecar
+// stderr on a clean exit" channel — it carries UNKNOWN content, which includes
+// real failures that happen to exit 0 (e.g. "not authenticated"): the first
+// live turn with missing creds produced exactly that, and suppressing
+// StderrOutput turned an auth failure into a silent no-op ("no error, no
+// response"). Benign every-turn node noise (CLAUDE_SDK_CAN_USE_TOOL_SHADOWED)
+// is instead silenced at the source via NODE_NO_WARNINGS (main.go), so whatever
+// still reaches StderrOutput is worth surfacing. Terminal stages (harness-recover,
+// provider, subprocess_exit, stream_truncated, subprocess_exit_partial) are
+// likewise absent so they keep surfacing as errors.
+func isNonTerminalErrorStage(stage bridle.TurnErrorStage) bool {
+	switch stage {
+	case bridle.TurnErrorStageRetry,
+		bridle.TurnErrorStageProviderAPIError,
+		bridle.TurnErrorStageResumeFallback:
+		return true
+	}
+	return false
 }
 
 // emitToolStart translates a bridle.ToolCallStart into item.started: mint

@@ -390,6 +390,22 @@ func (m *Model) removeFromQueue(id string) {
 }
 
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Ctrl+C is the universal quit from ANY state (composer, a pending approval
+	// modal, mid-turn). Without this the operator has NO way out but to kill the
+	// process: the composer swallows Ctrl+C (it's not a rune and matches no case
+	// in the switch below), AND bubbletea's built-in Ctrl+C-quits is overridden
+	// because we handle tea.KeyMsg ourselves. tea.Quit tears the engine down
+	// cleanly (the backend's Close cancels the Run ctx). Ctrl+D on an EMPTY
+	// composer is the same EOF-style exit (a non-empty composer keeps it for a
+	// future "delete word" without risking an accidental quit mid-compose).
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "ctrl+d":
+		if m.composer.Value() == "" {
+			return m, tea.Quit
+		}
+	}
 	if e := m.activeModal(); e != nil {
 		return m.handleModalKey(msg, *e)
 	}
@@ -532,6 +548,18 @@ func (m *Model) chooseOption(e approvalEntry, opt ModalOption) tea.Cmd {
 // deny-with-feedback response, or (later) a normal user_message /
 // %-override / slash command. v1 wires the deny-with-feedback path (tested
 // directly) plus a plain user_message send.
+// isExitCommand reports whether the submitted composer text is an explicit
+// exit slash-command (/quit, /exit, /q — case-insensitive, surrounding space
+// tolerated). Deliberately narrow: only the slash-prefixed forms quit, so bare
+// words like "exit" remain sendable to the model as ordinary messages.
+func isExitCommand(text string) bool {
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "/quit", "/exit", "/q":
+		return true
+	}
+	return false
+}
+
 func (m *Model) submitComposer() tea.Cmd {
 	if m.pendingDeny != nil {
 		text, sent := m.composer.Submit()
@@ -543,6 +571,13 @@ func (m *Model) submitComposer() tea.Cmd {
 	text, sent := m.composer.Submit()
 	if !sent {
 		return nil
+	}
+	if isExitCommand(text) {
+		// Explicit slash-command exit (/quit, /exit, /q). Bare "quit"/"exit"
+		// intentionally still go to the model as a message — only the
+		// slash-prefixed forms (and Ctrl+C, see handleKey) quit, so you can
+		// still literally say "exit" to Claude without leaving.
+		return tea.Quit
 	}
 	model, effort, rest, isOverride, err := ParseOverride(text, m.cfg.KnownAlias)
 	if isOverride {
