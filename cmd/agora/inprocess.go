@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
@@ -65,7 +67,34 @@ func newInProcessBackend(ctx context.Context, threadID string, attach agoraio.At
 		Capabilities: attach.Capabilities,
 	}, attach.Replay)
 
-	return tui.NewLocalBackend(sess, att), nil
+	return &inProcessBackend{Backend: tui.NewLocalBackend(sess, att), store: store}, nil
+}
+
+// inProcessBackend wraps the localBackend so the in-process ThreadStore's
+// lifecycle is owned here: Close tears down the engine/session FIRST (so the
+// Manager stops using the store), THEN closes the store if it holds a
+// resource (LocalStore's *sql.DB). Without this the sqlite handle leaks until
+// process exit — harmless on unix, but on Windows an open file can't be
+// removed, which broke t.TempDir cleanup in the fallback test. contracts.
+// ThreadStore has no Close(), so this is an io.Closer type-assertion (a
+// MemStore, which isn't a Closer, is a no-op here).
+type inProcessBackend struct {
+	tui.Backend
+	store     contracts.ThreadStore
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func (b *inProcessBackend) Close() error {
+	b.closeOnce.Do(func() {
+		b.closeErr = b.Backend.Close()
+		if c, ok := b.store.(io.Closer); ok {
+			if cerr := c.Close(); cerr != nil && b.closeErr == nil {
+				b.closeErr = cerr
+			}
+		}
+	})
+	return b.closeErr
 }
 
 // newInProcessStore opens (creating if absent) the operator's persistent,
