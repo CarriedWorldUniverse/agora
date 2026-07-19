@@ -148,6 +148,61 @@ func (c *Composer) Backspace() {
 	c.shiftSpansAfterDelete(c.cursor, 1)
 }
 
+// MoveLeft moves the cursor one rune left, treating an atomic paste span as a
+// single unit (the cursor may rest at a span boundary but never inside it).
+func (c *Composer) MoveLeft() {
+	if c.cursor == 0 {
+		return
+	}
+	c.cursor--
+	for _, sp := range c.spans {
+		if sp.Start < c.cursor && c.cursor < sp.End {
+			c.cursor = sp.Start
+			break
+		}
+	}
+}
+
+// MoveRight moves the cursor one rune right, skipping over an atomic span.
+func (c *Composer) MoveRight() {
+	if c.cursor >= len(c.buf) {
+		return
+	}
+	c.cursor++
+	for _, sp := range c.spans {
+		if sp.Start < c.cursor && c.cursor < sp.End {
+			c.cursor = sp.End
+			break
+		}
+	}
+}
+
+// Home moves the cursor to the start of the buffer.
+func (c *Composer) Home() { c.cursor = 0 }
+
+// End moves the cursor to the end of the buffer.
+func (c *Composer) End() { c.cursor = len(c.buf) }
+
+// Delete removes the rune AT the cursor (forward delete), or the whole atomic
+// span if the cursor sits exactly at that span's Start — the forward mirror of
+// Backspace.
+func (c *Composer) Delete() {
+	if c.cursor >= len(c.buf) {
+		return
+	}
+	for i, sp := range c.spans {
+		if sp.Start == c.cursor {
+			c.buf = append(c.buf[:sp.Start], c.buf[sp.End:]...)
+			n := sp.End - sp.Start
+			c.spans = append(c.spans[:i], c.spans[i+1:]...)
+			c.shiftSpansAfterDelete(sp.Start, n)
+			return
+		}
+	}
+	c.buf = append(c.buf[:c.cursor], c.buf[c.cursor+1:]...)
+	c.shiftSpansAfterDelete(c.cursor, 1)
+}
+
 func (c *Composer) shiftSpansAfterDelete(at, n int) {
 	kept := c.spans[:0]
 	for _, sp := range c.spans {

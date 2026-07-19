@@ -174,7 +174,30 @@ func (m *Model) renderComposer() string {
 	if m.pendingDeny != nil {
 		prompt = "deny, tell the agent what to do differently > "
 	}
-	return prompt + m.composer.Value()
+	// Render a visible block cursor at Composer.Cursor() (bubbletea hides the
+	// real terminal cursor, so mid-line editing needs its own). The rune under
+	// the cursor is drawn reverse-video; at end-of-buffer, a reverse space.
+	runes := []rune(m.composer.Value())
+	cur := m.composer.Cursor()
+	if cur < 0 {
+		cur = 0
+	}
+	if cur > len(runes) {
+		cur = len(runes)
+	}
+	left := string(runes[:cur])
+	under, right := " ", ""
+	if cur < len(runes) {
+		if runes[cur] == '\n' {
+			// Keep the line break in `right` so the cursor shows as a reverse
+			// space at the end of the current visual line, not a swallowed \n.
+			right = string(runes[cur:])
+		} else {
+			under = string(runes[cur])
+			right = string(runes[cur+1:])
+		}
+	}
+	return prompt + left + m.cfg.Theme.Selected.Render(under) + right
 }
 
 // activeModal returns the front of the queue, or nil if the queue is empty
@@ -443,14 +466,36 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
 		return m, m.submitComposer()
+	case "shift+enter", "alt+enter", "ctrl+j":
+		// Insert a newline instead of submitting — multi-line input (paste a
+		// block, write a structured prompt). Enter alone still submits. Three
+		// bindings because terminals disagree on which they emit for
+		// "newline-not-submit": modern ones send shift+enter, others need
+		// alt+enter or ctrl+j (LF).
+		m.composer.InsertText("\n")
 	case "backspace":
 		m.composer.Backspace()
+	case "delete":
+		m.composer.Delete()
+	case "left":
+		m.composer.MoveLeft()
+	case "right":
+		m.composer.MoveRight()
+	case "home", "ctrl+a":
+		m.composer.Home()
+	case "end", "ctrl+e":
+		m.composer.End()
 	case "up":
 		m.composer.HistoryUp()
 	case "down":
 		m.composer.HistoryDown()
 	default:
-		if msg.Type == tea.KeyRunes {
+		// bubbletea (v1.3.10) delivers the space bar as its OWN key type,
+		// tea.KeySpace — NOT tea.KeyRunes — though it still carries Runes
+		// ([]rune{' '}). Checking only KeyRunes here silently ate every space:
+		// "hello sonnet" became "hellosonnet". Accept KeySpace too; both carry
+		// the rune(s) to insert in msg.Runes.
+		if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
 			m.composer.InsertText(string(msg.Runes))
 		}
 	}

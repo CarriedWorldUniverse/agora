@@ -62,6 +62,19 @@ func TestHandleKey_CtrlD_EmptyOnly(t *testing.T) {
 	}
 }
 
+// TestHandleKey_SpaceNotEaten: the space bar arrives as tea.KeySpace (not
+// tea.KeyRunes) in bubbletea — it must still be inserted, or multi-word input
+// collapses ("hello sonnet" -> "hellosonnet").
+func TestHandleKey_SpaceNotEaten(t *testing.T) {
+	m := testModel(newFakeBackend())
+	m.press(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hi")})
+	m.press(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	m.press(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("there")})
+	if got := m.composer.Value(); got != "hi there" {
+		t.Fatalf("composer = %q; want %q (space must not be eaten)", got, "hi there")
+	}
+}
+
 // TestSubmitComposer_SlashQuit: typing "/quit" and pressing Enter quits,
 // rather than sending "/quit" to the model as a message.
 func TestSubmitComposer_SlashQuit(t *testing.T) {
