@@ -87,7 +87,7 @@ func TestModel_StreamingDelta_CommitsNewlineGatedLines(t *testing.T) {
 
 func deltaPayload(t *testing.T, s string) json.RawMessage {
 	t.Helper()
-	b, err := json.Marshal(map[string]string{"delta": s})
+	b, err := json.Marshal(map[string]string{"text": s})
 	if err != nil {
 		t.Fatal(err)
 	}

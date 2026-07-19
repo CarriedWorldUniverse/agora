@@ -31,7 +31,7 @@ func TestIOBackend_RoundTrip(t *testing.T) {
 	engine := &agoraio.ScriptedEngine{Script: []agoraio.ScriptedTurn{
 		{Events: []contracts.Event{
 			{Type: contracts.EvTurnStarted},
-			{Type: contracts.EvAgentMessageDelta, Payload: mustJSON(t, map[string]string{"delta": "hi"})},
+			{Type: contracts.EvAgentMessageDelta, Payload: mustJSON(t, map[string]string{"text": "hi"})},
 			{Type: contracts.EvTurnCompleted},
 		}},
 	}}
