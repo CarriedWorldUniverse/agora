@@ -274,13 +274,29 @@ func (s *turnSink) Emit(e bridle.Event) {
 	case bridle.TurnDone:
 		s.emitDone(ev)
 	case bridle.TurnError:
+		// bridle stages some TurnErrors as explicitly NON-terminal warnings
+		// (events.go: StderrOutput "surfaced as a warning, not a failure",
+		// Retry, ProviderAPIError, ResumeFallback) — they arrive ALONGSIDE a
+		// successful TurnDone. Rendering those as agora's red "error:" status
+		// (model.go) makes a turn that actually succeeded look broken — the
+		// first live turn hit exactly this, where a benign Node warning on the
+		// sidecar's stderr masqueraded as a turn failure. Only surface TERMINAL
+		// stages as errors; drop the non-terminal ones (the authoritative
+		// outcome is the TurnDone that follows). A richer EvWarning severity so
+		// these show as a dim note instead of vanishing is filed as follow-up.
+		if isNonTerminalErrorStage(ev.Stage) {
+			return
+		}
 		msg := ""
 		if ev.Err != nil {
 			msg = ev.Err.Error()
 		}
 		s.send(contracts.Event{Type: contracts.EvError, Payload: mustMarshal(errorPayload{Message: msg})})
 	case bridle.Warning:
-		s.send(contracts.Event{Type: contracts.EvError, Payload: mustMarshal(errorPayload{Message: ev.Kind + ": " + ev.Message})})
+		// A bridle.Warning is, by name, non-fatal — never an agora "error:".
+		// Dropped for the same reason as the non-terminal TurnError stages
+		// above (see the EvWarning follow-up).
+		return
 	case bridle.ToolCallStart:
 		s.emitToolStart(ev)
 	case bridle.ToolCallResult:
@@ -289,6 +305,23 @@ func (s *turnSink) Emit(e bridle.Event) {
 		// bridle.StepBoundary/MCPServerFailed: see the type doc comment
 		// above — no agora wire equivalent yet, out of scope this slice.
 	}
+}
+
+// isNonTerminalErrorStage reports whether a bridle.TurnError.Stage is one of
+// the stages bridle documents (events.go) as informational/non-fatal — the
+// turn still produces a TurnDone. These must NOT render as agora's terminal
+// "error:" status. Terminal stages (harness-recover, provider, subprocess_exit,
+// stream_truncated, subprocess_exit_partial) are deliberately absent so they
+// keep surfacing as errors.
+func isNonTerminalErrorStage(stage bridle.TurnErrorStage) bool {
+	switch stage {
+	case bridle.TurnErrorStageStderrOutput,
+		bridle.TurnErrorStageRetry,
+		bridle.TurnErrorStageProviderAPIError,
+		bridle.TurnErrorStageResumeFallback:
+		return true
+	}
+	return false
 }
 
 // emitToolStart translates a bridle.ToolCallStart into item.started: mint

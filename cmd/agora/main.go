@@ -37,6 +37,18 @@ func defaultSocketPath() string {
 }
 
 func main() {
+	// Quiet the Node sidecar's process warnings (bridle spawns the
+	// claude-sdk sidecar inheriting our env — claudesdk.go's
+	// scrubAuthEnv(os.Environ()) — and NODE_NO_WARNINGS is not scrubbed).
+	// The SDK emits a benign every-turn warning (CLAUDE_SDK_CAN_USE_TOOL_SHADOWED)
+	// because bridle registers its tools in allowedTools and gates them via its
+	// OWN BeforeToolCall hook, so the SDK's canUseTool is intentionally shadowed
+	// — not an error, but it lands on the sidecar's stderr and agora surfaces
+	// stderr as a scary "error:" line on an otherwise-successful turn. Silence
+	// it at the source; leave any operator-set value untouched.
+	if os.Getenv("NODE_NO_WARNINGS") == "" {
+		_ = os.Setenv("NODE_NO_WARNINGS", "1")
+	}
 	// arg0-style dispatch (U18, blueprint §6 q4): `agora daemon` boots the
 	// internal/daemon runtime instead of the TUI client; bare `agora` (or
 	// any other first arg) is unaffected — the client's own flag set never
