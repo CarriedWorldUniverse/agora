@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/CarriedWorldUniverse/agora/contracts"
 	"github.com/CarriedWorldUniverse/agora/internal/approval"
 	agoraio "github.com/CarriedWorldUniverse/agora/internal/io"
@@ -695,8 +697,28 @@ func (m *Manager) turnSession() bridle.SessionHandle {
 		}
 		m.sessionStarted = true
 	}
-	return bridle.SessionHandle{ID: m.threadID, New: newSession}
+	return bridle.SessionHandle{ID: sessionIDFor(m.threadID), New: newSession}
 }
+
+// sessionIDFor maps an agora thread id to the claude-sdk session id. The
+// Claude Code SDK REQUIRES the session id to be a valid UUID ("Error: Invalid
+// session ID. Must be a valid UUID." — the first live turn hit exactly this
+// against a plain thread id like "default"). We derive a deterministic RFC-4122
+// v5 UUID from the thread id under a fixed namespace, so the mapping is stable:
+// the SAME thread always yields the SAME session UUID across runs, which is what
+// makes claude-sdk resume (SessionHandle.New=false on continuation) actually
+// reattach to the right server-side session. A pre-existing valid-UUID thread id
+// is still re-hashed (harmless — the session id is an opaque handle to the SDK,
+// not required to equal the thread id; stability is the only contract).
+func sessionIDFor(threadID string) string {
+	return uuid.NewSHA1(agoraSessionNamespace, []byte(threadID)).String()
+}
+
+// agoraSessionNamespace is the fixed UUIDv5 namespace for deriving claude-sdk
+// session ids from thread ids (see sessionIDFor). A stable, arbitrary constant —
+// derived once from a URL-namespaced agora label so it never collides with the
+// well-known predefined namespaces.
+var agoraSessionNamespace = uuid.NewSHA1(uuid.NameSpaceURL, []byte("agora/claude-sdk/session"))
 
 // storeHasItems (U-C7's one-time first-turn resume probe) reports whether
 // store already has at least one ThreadItem recorded for threadID — a

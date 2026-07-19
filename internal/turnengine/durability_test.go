@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/CarriedWorldUniverse/agora/contracts"
 	"github.com/CarriedWorldUniverse/agora/internal/persistence"
 	"github.com/CarriedWorldUniverse/agora/internal/toolrunner"
@@ -53,7 +55,8 @@ func endAndClose(t *testing.T, in chan contracts.Input, out chan contracts.Event
 
 // TestManager_Session_FreshThenResume: turn 1 on a fresh (no-prior-items)
 // thread gets Session.New=true; turn 2 on the SAME Manager gets New=false
-// — both carrying the threadID as the session id.
+// — both carrying the STABLE derived session UUID (sessionIDFor(threadID), a
+// valid-UUID requirement of the claude-sdk lane), identical across turns.
 func TestManager_Session_FreshThenResume(t *testing.T) {
 	provider := fake.NewProvider(
 		fake.Step{Text: "turn one"},
@@ -67,16 +70,22 @@ func TestManager_Session_FreshThenResume(t *testing.T) {
 
 	runTurnAndDrain(t, m, in, out, runErr, "hi")
 	got1 := provider.LastRequest().Session
-	want1 := bridle.SessionHandle{ID: "th_sess", New: true}
+	want1 := bridle.SessionHandle{ID: sessionIDFor("th_sess"), New: true}
 	if got1 != want1 {
 		t.Fatalf("turn 1 Session = %+v; want %+v", got1, want1)
+	}
+	if _, err := uuid.Parse(got1.ID); err != nil {
+		t.Fatalf("session id %q is not a valid UUID (claude-sdk requires one): %v", got1.ID, err)
 	}
 
 	runTurnAndDrain(t, m, in, out, runErr, "again")
 	got2 := provider.LastRequest().Session
-	want2 := bridle.SessionHandle{ID: "th_sess", New: false}
+	want2 := bridle.SessionHandle{ID: sessionIDFor("th_sess"), New: false}
 	if got2 != want2 {
 		t.Fatalf("turn 2 Session = %+v; want %+v", got2, want2)
+	}
+	if got2.ID != got1.ID {
+		t.Fatalf("session id changed across turns: turn1=%q turn2=%q (resume needs a STABLE id)", got1.ID, got2.ID)
 	}
 
 	endAndClose(t, in, out, runErr)
@@ -94,12 +103,12 @@ func TestManager_Session_NoStore_StillFlips(t *testing.T) {
 	m, in, out, runErr := newTestManagerWithStore(t, "th_nostore", nil, provider, WithIDGen(&FakeIDGen{IDs: []string{"tu_0001", "tu_0002"}}))
 
 	runTurnAndDrain(t, m, in, out, runErr, "hi")
-	if got := provider.LastRequest().Session; got != (bridle.SessionHandle{ID: "th_nostore", New: true}) {
+	if got := provider.LastRequest().Session; got != (bridle.SessionHandle{ID: sessionIDFor("th_nostore"), New: true}) {
 		t.Fatalf("turn 1 Session = %+v; want New:true", got)
 	}
 
 	runTurnAndDrain(t, m, in, out, runErr, "again")
-	if got := provider.LastRequest().Session; got != (bridle.SessionHandle{ID: "th_nostore", New: false}) {
+	if got := provider.LastRequest().Session; got != (bridle.SessionHandle{ID: sessionIDFor("th_nostore"), New: false}) {
 		t.Fatalf("turn 2 Session = %+v; want New:false", got)
 	}
 
@@ -126,7 +135,7 @@ func TestManager_Session_ResumeFromExistingStoreItems(t *testing.T) {
 
 	runTurnAndDrain(t, m, in, out, runErr, "continue")
 	got := provider.LastRequest().Session
-	want := bridle.SessionHandle{ID: "th_resume", New: false}
+	want := bridle.SessionHandle{ID: sessionIDFor("th_resume"), New: false}
 	if got != want {
 		t.Fatalf("first-turn Session on a thread with prior items = %+v; want %+v (resume)", got, want)
 	}
