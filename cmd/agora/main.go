@@ -112,7 +112,7 @@ func main() {
 		Replay: 200,
 	}
 
-	backend, err := dialBackend(rootCtx, *socketPath, *wsURL, attach)
+	backend, err := dialBackend(rootCtx, log, *socketPath, *wsURL, attach)
 	if err != nil {
 		emitExit(log, exitDaemonConnect, err.Error(), 1)
 	}
@@ -171,14 +171,36 @@ func main() {
 	emitExit(log, exitClean, "", 0)
 }
 
-// dialBackend picks the transport: an explicit -ws URL wins, otherwise the
-// unix socket path. Kept as its own function so it's the one place that
-// changes if/when `agora daemon` (U18) adds e.g. TLS or auth to the dial.
-func dialBackend(ctx context.Context, socketPath, wsURL string, attach agoraio.AttachRequest) (tui.Backend, error) {
+// dialBackend picks the transport: an explicit -ws URL wins (an explicit
+// remote target — never falls back to in-process, per U-E1's brief),
+// otherwise it tries the local daemon's unix socket first and falls back to
+// running the turn engine IN-PROCESS (newInProcessBackend, U-E1) when no
+// daemon is reachable there. Kept as its own function so it's the one place
+// that changes if/when `agora daemon` (U18) adds e.g. TLS or auth to the
+// dial, and so the dial-then-fallback DECISION (isNoDaemonErr, dial.go) is
+// exercised here exactly once, in one place.
+func dialBackend(ctx context.Context, log *slog.Logger, socketPath, wsURL string, attach agoraio.AttachRequest) (tui.Backend, error) {
 	if wsURL != "" {
 		return tui.DialWSBackend(ctx, wsURL, attach)
 	}
-	return tui.DialUnixBackend(socketPath, attach)
+
+	backend, dialErr := tui.DialUnixBackend(socketPath, attach)
+	if dialErr == nil {
+		log.Info("agora: attached to daemon", "socket", socketPath)
+		fmt.Fprintf(os.Stderr, "agora: attached to daemon at %s\n", socketPath)
+		return backend, nil
+	}
+	if !isNoDaemonErr(dialErr) {
+		// A genuine auth/protocol error talking to something that DID
+		// accept the connection — surfacing that (instead of silently
+		// masking it behind an in-process run against a totally different
+		// engine) is the whole point of this classification; see
+		// isNoDaemonErr's doc comment.
+		return nil, dialErr
+	}
+	log.Info("agora: no daemon reachable; running engine in-process", "socket", socketPath, "dial_err", dialErr.Error())
+	fmt.Fprintf(os.Stderr, "agora: no daemon at %s (%v); running engine in-process\n", socketPath, dialErr)
+	return newInProcessBackend(ctx, attach.ThreadID, attach)
 }
 
 func userHomeOrDot() string {
