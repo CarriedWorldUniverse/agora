@@ -124,11 +124,12 @@ func main() {
 		Model:   *model,
 	})
 	// Never tea.WithAltScreen() (§0 non-negotiable: the transcript lives in
-	// the terminal's own scrollback, not a full-screen widget).
-	// WithMouseCellMotion forwards wheel events to the composer/modal.
-	// Text selection under mouse capture: use the clipboard yank binding,
-	// or the emulator's shift+drag override.
-	p := tea.NewProgram(m, tea.WithMouseCellMotion())
+	// the terminal's own scrollback, not a full-screen widget) — and NO mouse
+	// capture. The TUI is keyboard-driven and handles no tea.MouseMsg, so
+	// grabbing the mouse (tea.WithMouseCellMotion) would only break the
+	// terminal's native select-to-copy and scrollback — which §0's
+	// scrollback-transcript design depends on — for zero functional gain.
+	p := tea.NewProgram(m)
 
 	signalReceived := ""
 	{
@@ -198,8 +199,11 @@ func dialBackend(ctx context.Context, log *slog.Logger, socketPath, wsURL string
 		// isNoDaemonErr's doc comment.
 		return nil, dialErr
 	}
-	log.Info("agora: no daemon reachable; running engine in-process", "socket", socketPath, "dial_err", dialErr.Error())
-	fmt.Fprintf(os.Stderr, "agora: no daemon at %s (%v); running engine in-process\n", socketPath, dialErr)
+	// This is the normal single-user path (no daemon running) — run the turn
+	// engine in-process. Keep the raw dial error in the log for debugging, but
+	// the stderr line stays reassuring: a missing socket is expected, not a fault.
+	log.Info("agora: running standalone (no daemon); engine in-process", "socket", socketPath, "dial_err", dialErr.Error())
+	fmt.Fprintln(os.Stderr, "agora: running standalone (no daemon) — engine in-process.")
 	return newInProcessBackend(ctx, attach.ThreadID, attach)
 }
 
