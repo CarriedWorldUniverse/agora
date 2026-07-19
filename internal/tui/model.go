@@ -258,14 +258,22 @@ func (m *Model) handleEvent(ev contracts.Event) []tea.Cmd {
 		m.stream = NewStreamState()
 		m.composer.SetRunning(true)
 	case contracts.EvAgentMessageDelta:
+		// The delta text is carried in the "text" field — that is the shape
+		// the sink emits (turnengine's itemPayload{Text string `json:"text"`},
+		// same as item.completed). Decoding `json:"delta"` here silently
+		// dropped EVERY agent token (p.Delta always ""), so a real turn
+		// streamed a full response that never reached the transcript — the
+		// TUI showed only its status row. The sink and this decoder had been
+		// tested in isolation with mismatched field names; see the seam test
+		// in stream/agent-delta coverage.
 		var p struct {
-			Delta string `json:"delta"`
+			Text string `json:"text"`
 		}
 		_ = json.Unmarshal(ev.Payload, &p)
 		if m.stream == nil {
 			m.stream = NewStreamState()
 		}
-		m.stream.Append(p.Delta)
+		m.stream.Append(p.Text)
 		for _, line := range m.stream.Commit() {
 			cmds = append(cmds, m.cfg.Printer(line))
 		}
