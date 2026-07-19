@@ -30,7 +30,6 @@ func emitAndCollect(t *testing.T, e bridle.Event) []contracts.Event {
 // Node warning masquerading as a turn failure.
 func TestSink_NonTerminalStages_NotErrors(t *testing.T) {
 	nonTerminal := []bridle.TurnErrorStage{
-		bridle.TurnErrorStageStderrOutput,
 		bridle.TurnErrorStageRetry,
 		bridle.TurnErrorStageProviderAPIError,
 		bridle.TurnErrorStageResumeFallback,
@@ -55,6 +54,10 @@ func TestSink_TerminalStages_AreErrors(t *testing.T) {
 		bridle.TurnErrorStageHarnessRecover,
 		bridle.TurnErrorStageSubprocessExit,
 		bridle.TurnErrorStageStreamTruncated,
+		// StderrOutput carries arbitrary sidecar stderr (incl. real failures
+		// like a missing-creds auth error) — it must stay visible, not be
+		// swallowed as a benign warning.
+		bridle.TurnErrorStageStderrOutput,
 	}
 	for _, stage := range terminal {
 		got := emitAndCollect(t, bridle.TurnError{Err: errors.New("boom"), Stage: stage})

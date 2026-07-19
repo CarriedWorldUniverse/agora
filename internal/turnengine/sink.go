@@ -274,16 +274,15 @@ func (s *turnSink) Emit(e bridle.Event) {
 	case bridle.TurnDone:
 		s.emitDone(ev)
 	case bridle.TurnError:
-		// bridle stages some TurnErrors as explicitly NON-terminal warnings
-		// (events.go: StderrOutput "surfaced as a warning, not a failure",
-		// Retry, ProviderAPIError, ResumeFallback) — they arrive ALONGSIDE a
-		// successful TurnDone. Rendering those as agora's red "error:" status
-		// (model.go) makes a turn that actually succeeded look broken — the
-		// first live turn hit exactly this, where a benign Node warning on the
-		// sidecar's stderr masqueraded as a turn failure. Only surface TERMINAL
-		// stages as errors; drop the non-terminal ones (the authoritative
-		// outcome is the TurnDone that follows). A richer EvWarning severity so
-		// these show as a dim note instead of vanishing is filed as follow-up.
+		// bridle marks some TurnErrors as structured always-benign signals
+		// (events.go: Retry, ProviderAPIError, ResumeFallback) that arrive
+		// ALONGSIDE a successful TurnDone. Rendering those as agora's red
+		// "error:" status (model.go) makes a turn that actually succeeded look
+		// broken. Drop only those (the authoritative outcome is the TurnDone
+		// that follows); everything else — including StderrOutput's arbitrary
+		// sidecar stderr, which can carry real failures — still surfaces (see
+		// isNonTerminalErrorStage). A richer EvWarning severity so the benign
+		// ones show as a dim note instead of vanishing is filed as follow-up.
 		if isNonTerminalErrorStage(ev.Stage) {
 			return
 		}
@@ -307,16 +306,23 @@ func (s *turnSink) Emit(e bridle.Event) {
 	}
 }
 
-// isNonTerminalErrorStage reports whether a bridle.TurnError.Stage is one of
-// the stages bridle documents (events.go) as informational/non-fatal — the
-// turn still produces a TurnDone. These must NOT render as agora's terminal
-// "error:" status. Terminal stages (harness-recover, provider, subprocess_exit,
-// stream_truncated, subprocess_exit_partial) are deliberately absent so they
-// keep surfacing as errors.
+// isNonTerminalErrorStage reports whether a bridle.TurnError.Stage is a
+// STRUCTURED, always-benign bridle signal (events.go) that must NOT render as
+// agora's terminal "error:" status — the turn still produces a TurnDone.
+//
+// StderrOutput is deliberately NOT in this set. It is the "arbitrary sidecar
+// stderr on a clean exit" channel — it carries UNKNOWN content, which includes
+// real failures that happen to exit 0 (e.g. "not authenticated"): the first
+// live turn with missing creds produced exactly that, and suppressing
+// StderrOutput turned an auth failure into a silent no-op ("no error, no
+// response"). Benign every-turn node noise (CLAUDE_SDK_CAN_USE_TOOL_SHADOWED)
+// is instead silenced at the source via NODE_NO_WARNINGS (main.go), so whatever
+// still reaches StderrOutput is worth surfacing. Terminal stages (harness-recover,
+// provider, subprocess_exit, stream_truncated, subprocess_exit_partial) are
+// likewise absent so they keep surfacing as errors.
 func isNonTerminalErrorStage(stage bridle.TurnErrorStage) bool {
 	switch stage {
-	case bridle.TurnErrorStageStderrOutput,
-		bridle.TurnErrorStageRetry,
+	case bridle.TurnErrorStageRetry,
 		bridle.TurnErrorStageProviderAPIError,
 		bridle.TurnErrorStageResumeFallback:
 		return true
