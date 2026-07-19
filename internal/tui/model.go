@@ -642,14 +642,39 @@ func (m *Model) submitComposer() tea.Cmd {
 		return tea.Quit
 	}
 	model, effort, rest, isOverride, err := ParseOverride(text, m.cfg.KnownAlias)
+	var in contracts.Input
 	if isOverride {
 		if err != nil {
 			m.statusErr = err.Error()
 			return nil
 		}
-		return m.send(contracts.Input{Type: contracts.InUserMessage, Text: rest, Model: model, Effort: effort})
+		in = contracts.Input{Type: contracts.InUserMessage, Text: rest, Model: model, Effort: effort}
+	} else {
+		in = contracts.Input{Type: contracts.InUserMessage, Text: text}
 	}
-	return m.send(contracts.Input{Type: contracts.InUserMessage, Text: text})
+	// Echo the operator's OWN message into the transcript (scrollback) before
+	// sending — the engine never emits it back (it only persists it + runs the
+	// turn) and the session doesn't broadcast inputs, so without this the
+	// submitted message just vanishes when the composer clears ("wipes it
+	// out"), unlike Claude Code / every chat TUI where your line stays in the
+	// history above the reply. Rendered as a CellUserMessage ("› <text>").
+	cmds := m.echoUserMessage(in.Text)
+	cmds = append(cmds, m.send(in))
+	return tea.Batch(cmds...)
+}
+
+// echoUserMessage returns Printer cmds that write the operator's just-submitted
+// message to the transcript as a "› <text>" user cell. Empty/whitespace-only
+// text echoes nothing.
+func (m *Model) echoUserMessage(text string) []tea.Cmd {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	var cmds []tea.Cmd
+	for _, line := range (Cell{Kind: CellUserMessage, Text: text}).Render(m.width, m.cfg.Theme) {
+		cmds = append(cmds, m.cfg.Printer(line))
+	}
+	return cmds
 }
 
 // resolvePendingDeny builds and sends the deny-with-feedback response for

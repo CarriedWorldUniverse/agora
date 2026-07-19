@@ -75,6 +75,7 @@ func main() {
 		stateDir    = flag.String("state-dir", filepath.Join(userHomeOrDot(), ".agora"), "directory for client state")
 		logFile     = flag.String("log-file", "", "write logs here; default /tmp/agora.log")
 		showVersion = flag.Bool("version", false, "print version and exit")
+		demo        = flag.Bool("demo", false, "play a scripted zero-cost turn (no model, no billing) to test/debug rendering")
 	)
 	flag.Parse()
 
@@ -124,7 +125,14 @@ func main() {
 		Replay: 200,
 	}
 
-	backend, err := dialBackend(rootCtx, log, *socketPath, *wsURL, attach)
+	var backend tui.Backend
+	if *demo {
+		log.Info("agora: demo mode (scripted turn, no model, no billing)")
+		fmt.Fprintln(os.Stderr, "agora: demo mode — scripted turn, no model called, nothing billed.")
+		backend, err = newDemoBackend(rootCtx, attach)
+	} else {
+		backend, err = dialBackend(rootCtx, log, *socketPath, *wsURL, attach)
+	}
 	if err != nil {
 		emitExit(log, exitDaemonConnect, err.Error(), 1)
 	}
