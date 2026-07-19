@@ -129,13 +129,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) View() string {
 	var b strings.Builder
-	if m.stream != nil {
-		tail := m.stream.Tail()
-		if tail != "" {
-			b.WriteString(tail)
-			b.WriteString("\n")
-		}
-	}
+	// The live region is deliberately kept to a STABLE height (queued-count +
+	// status + composer/modal) — it must NOT include the in-flight stream tail.
+	// Reason (operator-reported "appears then vanishes"): agora renders its
+	// transcript to the terminal's own scrollback via the Printer (tea.Println,
+	// §0 no-alt-screen), while View() is the ephemeral in-place region. When the
+	// tail lived HERE, a reply with no trailing newline sat only in the live
+	// region until turn-complete; then m.stream=nil shrank the region (erasing
+	// the tail) in the same frame the finalized line was handed to tea.Println —
+	// a bubbletea inline-render race the shrink won, so the whole reply flickered
+	// and vanished. With the tail out of View(), the live region never shrinks,
+	// so Println always lands cleanly above it: complete lines stream to
+	// scrollback via Commit as they finish, and the trailing partial line is
+	// flushed by Finalize on turn-complete (see handleEvent's delta/completed
+	// cases). Slightly less smooth intra-line streaming, but the reply is never
+	// lost — reliability over the two-region tail (agora-spec-tui §2 permits this
+	// v1 simplification; a race-free live tail is a later refinement).
 	if len(m.composer.Queued()) > 0 {
 		b.WriteString(m.cfg.Theme.Muted.Render(fmt.Sprintf("(%d message(s) queued)", len(m.composer.Queued()))))
 		b.WriteString("\n")
