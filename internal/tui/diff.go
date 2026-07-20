@@ -34,12 +34,15 @@ type DiffCell struct {
 	Lines []DiffLine
 }
 
-func gutterSign(k DiffLineKind) string {
+// styledGutterSign colors the gutter sign per kind (green add / red del) so
+// the eye catches line direction even before the background tint registers.
+// PlainTheme strips the color, keeping goldens byte-stable.
+func styledGutterSign(k DiffLineKind, th Theme) string {
 	switch k {
 	case DiffAdd:
-		return "+"
+		return th.Success.Render("+")
 	case DiffDel:
-		return "-"
+		return th.Danger.Render("-")
 	default:
 		return " "
 	}
@@ -83,7 +86,7 @@ func (d DiffCell) Render(width int, th Theme) []string {
 		out = append(out, th.Header.Render(sanitizeTerminalText(d.Path)))
 	}
 	for _, l := range d.Lines {
-		prefix := fmt.Sprintf("%*s %*s %s ", numWidth, lineNoCol(l.OldNo), numWidth, lineNoCol(l.NewNo), gutterSign(l.Kind))
+		prefix := fmt.Sprintf("%*s %*s %s ", numWidth, lineNoCol(l.OldNo), numWidth, lineNoCol(l.NewNo), styledGutterSign(l.Kind, th))
 		style := th.DiffLine
 		switch l.Kind {
 		case DiffAdd:
@@ -93,7 +96,7 @@ func (d DiffCell) Render(width int, th Theme) []string {
 		}
 		for _, chunk := range wrapText(sanitizeTerminalText(l.Text), contentWidth) {
 			out = append(out, prefix+style.Render(chunk))
-			prefix = strings.Repeat(" ", numWidth*2+3) + gutterSign(l.Kind) + " "
+			prefix = strings.Repeat(" ", numWidth*2+3) + styledGutterSign(l.Kind, th) + " "
 		}
 	}
 	return out

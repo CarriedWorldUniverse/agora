@@ -21,6 +21,15 @@ type Theme struct {
 	Header   lipgloss.Style
 	Danger   lipgloss.Style
 	Selected lipgloss.Style
+	// Accent/Success/Warning are the semantic accent colors: Accent for
+	// interactive affordances (composer prompt, user-message prefix, agent
+	// id), Success for approve/exit-0 signals, Warning for in-flight
+	// (running) status. Their COLOR strips to nothing under PlainTheme —
+	// but styling changes that alter plain TEXT (glyphs like ✓/❯) do reach
+	// goldens and updated two of them in this pass.
+	Accent  lipgloss.Style
+	Success lipgloss.Style
+	Warning lipgloss.Style
 }
 
 // PlainTheme is a colorless theme (lipgloss.NewRenderer with a nil output
@@ -50,8 +59,14 @@ func newTheme(r *lipgloss.Renderer) Theme {
 		DiffAdd:  r.NewStyle().Background(lipgloss.Color("#213A2B")).Foreground(lipgloss.Color("#7FBF8F")),
 		DiffDel:  r.NewStyle().Background(lipgloss.Color("#4A221D")).Foreground(lipgloss.Color("#D98E82")),
 		DiffLine: r.NewStyle().Faint(true),
-		Header:   r.NewStyle().Bold(true).Underline(true),
+		// Header drops the underline for bold+accent — underline read as
+		// 1995 on modal titles and diff paths; the accent family below is
+		// tuned to sit next to the diff tints (#7FBF8F green is shared).
+		Header:   r.NewStyle().Bold(true).Foreground(lipgloss.Color("#89B4FA")),
 		Danger:   r.NewStyle().Bold(true).Foreground(lipgloss.Color("#D9534F")),
 		Selected: r.NewStyle().Reverse(true),
+		Accent:   r.NewStyle().Foreground(lipgloss.Color("#89B4FA")),
+		Success:  r.NewStyle().Foreground(lipgloss.Color("#7FBF8F")),
+		Warning:  r.NewStyle().Foreground(lipgloss.Color("#D8B36A")),
 	}
 }

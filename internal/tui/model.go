@@ -9,6 +9,7 @@ import (
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // This file is the bubbletea lifecycle (§8 build order). It follows §0's
@@ -77,6 +78,12 @@ type Model struct {
 
 	running bool
 	turnID  string
+	// spinnerFrame advances on each spinnerTickMsg while a turn runs, and
+	// turnStart (from the injectable cfg.Now) feeds the status row's
+	// elapsed readout (§5: "spinner + elapsed + Esc to interrupt").
+	spinnerFrame int
+	spinnerGen   int // increments per turn; stale ticks are dropped (see spinnerTickMsg)
+	turnStart    time.Time
 
 	queue []approvalEntry // FIFO of unresolved requests
 	// pendingDeny is set when the operator picked a deny/with-feedback
@@ -183,6 +190,22 @@ func quitGraceCmd() tea.Cmd {
 	return tea.Tick(quitGrace, func(time.Time) tea.Msg { return quitGraceMsg{} })
 }
 
+// spinnerFrames is the braille cycle the status row animates through while
+// a turn runs (§5). Frame index only advances on spinnerTickMsg, so tests
+// that never deliver ticks always see frame 0 — deterministic.
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// spinnerTickMsg is the 100ms heartbeat that animates the status-row
+// spinner. It carries the GENERATION that scheduled it: a chain only dies
+// when a tick lands while idle, so a chain from turn N can survive into
+// turn N+1 (which schedules its own) and double the tick rate — stale-gen
+// ticks are dropped instead (review fix on the look-pass).
+type spinnerTickMsg struct{ gen int }
+
+func spinnerTick(gen int) tea.Cmd {
+	return tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg { return spinnerTickMsg{gen: gen} })
+}
+
 func waitForEvent(b Backend) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-b.Events()
@@ -209,6 +232,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+	case spinnerTickMsg:
+		if !m.running || msg.gen != m.spinnerGen {
+			return m, nil // turn ended or a stale chain — let it die
+		}
+		m.spinnerFrame++
+		return m, spinnerTick(m.spinnerGen)
 	}
 	return m, nil
 }
@@ -250,12 +279,14 @@ func (m *Model) renderStatusRow() string {
 		if m.statusErr != "" {
 			return m.cfg.Theme.Danger.Render("error: " + m.statusErr)
 		}
-		return m.cfg.Theme.Muted.Render(fmt.Sprintf("%s · %s%s · Esc to quit", m.cfg.AgentID, m.currentModel, m.usageSegment()))
+		return m.cfg.Theme.Accent.Render(m.cfg.AgentID) + m.cfg.Theme.Muted.Render(fmt.Sprintf(" · %s%s · Esc to quit", m.currentModel, m.usageSegment()))
 	}
 	if m.quitting {
 		return m.cfg.Theme.Muted.Render("⣾ interrupting turn · exiting…")
 	}
-	return m.cfg.Theme.Muted.Render(fmt.Sprintf("⣾ running · %s%s · Esc to interrupt", m.currentModel, m.usageSegment()))
+	frame := spinnerFrames[m.spinnerFrame%len(spinnerFrames)]
+	elapsed := m.cfg.Now().Sub(m.turnStart).Round(time.Second)
+	return m.cfg.Theme.Warning.Render(frame) + m.cfg.Theme.Muted.Render(fmt.Sprintf(" running · %s · %s%s · Esc to interrupt", m.currentModel, elapsed, m.usageSegment()))
 }
 
 // usageSegment renders the session's cumulative usage for the status row —
@@ -342,9 +373,9 @@ func fmtUSD(c float64) string {
 }
 
 func (m *Model) renderComposer() string {
-	prompt := "> "
+	prompt := m.cfg.Theme.Accent.Render("❯ ")
 	if m.pendingDeny != nil {
-		prompt = "deny, tell the agent what to do differently > "
+		prompt = m.cfg.Theme.Danger.Render("deny, tell the agent what to do differently ❯ ")
 	}
 	// Render a visible block cursor at Composer.Cursor() (bubbletea hides the
 	// real terminal cursor, so mid-line editing needs its own). The rune under
@@ -389,10 +420,12 @@ func (m *Model) renderModal(e approvalEntry) string {
 		b.WriteString("\n")
 		for i, opt := range e.Question.Args.Options {
 			cursor := "  "
+			label := opt.Label
 			if i == m.modalCursor {
 				cursor = "> "
+				label = m.cfg.Theme.Selected.Render(label)
 			}
-			b.WriteString(cursor + opt.Label + "\n")
+			b.WriteString(cursor + label + "\n")
 		}
 	case contracts.KindPlan:
 		b.WriteString(m.cfg.Theme.Header.Render("Plan review"))
@@ -400,18 +433,7 @@ func (m *Model) renderModal(e approvalEntry) string {
 		for _, step := range e.Plan.Steps {
 			b.WriteString("  - " + step + "\n")
 		}
-		opts := PlanModalOptions(unresolvedIDs(e.Plan.OpenQuestions))
-		for i, opt := range opts {
-			cursor := "  "
-			if i == m.modalCursor {
-				cursor = "> "
-			}
-			line := cursor + opt.Label
-			if opt.Disabled {
-				line += "  (" + opt.DisabledWhy + ")"
-			}
-			b.WriteString(line + "\n")
-		}
+		m.renderOptionRows(&b, PlanModalOptions(unresolvedIDs(e.Plan.OpenQuestions)))
 	default:
 		b.WriteString(m.cfg.Theme.Header.Render(fmt.Sprintf("approve %s?", e.Kind)))
 		b.WriteString("\n")
@@ -421,15 +443,42 @@ func (m *Model) renderModal(e approvalEntry) string {
 		for _, line := range renderApprovalSubject(e, m.cfg.Theme, m.width) {
 			b.WriteString(line + "\n")
 		}
-		for i, opt := range ApprovalModalOptions(e.Kind) {
-			cursor := "  "
-			if i == m.modalCursor {
-				cursor = "> "
-			}
-			b.WriteString(cursor + opt.Label + "\n")
-		}
+		m.renderOptionRows(&b, ApprovalModalOptions(e.Kind))
 	}
 	return b.String()
+}
+
+// renderOptionRows renders one modal option list: the highlighted row is
+// reverse-video, approve rows tinted Success, deny rows Danger, disabled
+// rows Muted — the decision's shape is visible before a keypress. All of it
+// strips away under PlainTheme, so golden snapshots stay byte-stable.
+func (m *Model) renderOptionRows(b *strings.Builder, opts []ModalOption) {
+	for i, opt := range opts {
+		cursor := "  "
+		if i == m.modalCursor {
+			cursor = "> "
+		}
+		label := opt.Label
+		if opt.Disabled {
+			label += "  (" + opt.DisabledWhy + ")"
+		}
+		b.WriteString(cursor + m.optionRowStyle(opt, i == m.modalCursor).Render(label) + "\n")
+	}
+}
+
+func (m *Model) optionRowStyle(opt ModalOption, selected bool) lipgloss.Style {
+	switch {
+	case selected:
+		return m.cfg.Theme.Selected
+	case opt.Disabled:
+		return m.cfg.Theme.Muted
+	case opt.Decision == contracts.DecisionAllow:
+		return m.cfg.Theme.Success
+	case opt.Decision == contracts.DecisionDeny:
+		return m.cfg.Theme.Danger
+	default:
+		return m.cfg.Theme.Bold
+	}
 }
 
 func unresolvedIDs(qs []contracts.QuestionAsked) []string {
@@ -459,8 +508,12 @@ func (m *Model) handleEvent(ev contracts.Event) []tea.Cmd {
 		}
 		m.running = true
 		m.turnID = ev.TurnID
+		m.spinnerFrame = 0
+		m.spinnerGen++
+		m.turnStart = m.cfg.Now()
 		m.stream = NewStreamState()
 		m.composer.SetRunning(true)
+		cmds = append(cmds, spinnerTick(m.spinnerGen))
 	case contracts.EvAgentMessageDelta:
 		// The delta text is carried in the "text" field — that is the shape
 		// the sink emits (turnengine's itemPayload{Text string `json:"text"`},
@@ -500,7 +553,7 @@ func (m *Model) handleEvent(ev contracts.Event) []tea.Cmd {
 			return cmds
 		}
 		for _, q := range m.composer.DrainQueued() {
-			cmds = append(cmds, m.cfg.Printer("› "+q))
+			cmds = append(cmds, m.cfg.Printer(m.cfg.Theme.Accent.Render("›")+" "+q))
 		}
 	case contracts.EvItemStarted:
 		if ev.Item == nil {
