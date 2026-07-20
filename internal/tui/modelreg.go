@@ -123,7 +123,11 @@ func LoadModelRegistry(home, cwd string) ModelRegistry {
 			continue
 		}
 		var m ModelRegistry
-		if json.Unmarshal(data, &m) != nil {
+		if uerr := json.Unmarshal(data, &m); uerr != nil {
+			// A PRESENT-but-unparseable file is skipped, not fatal — but say
+			// so: a stray byte from a hand edit silently emptied the whole
+			// registry once (every /model name gone, no explanation).
+			fmt.Fprintf(os.Stderr, "agora: models config %s is unreadable and was SKIPPED (%v)\n", path, uerr)
 			continue
 		}
 		for name, entry := range m {
