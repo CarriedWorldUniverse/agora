@@ -626,6 +626,10 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 		MaxSteps:           m.maxSteps,
 		Tools:              toolDefsFromSpecs(toolSpecs),
 		Session:            m.turnSession(),
+		// Per-turn provider routing: a /model entry that names a non-default
+		// endpoint (LiteLLM/local) supplies ANTHROPIC_BASE_URL + a key here so
+		// this turn routes there; empty for the default subscription provider.
+		ProviderEnv: input.ProviderEnv,
 	}
 
 	result, err := m.harness.RunTurn(turnCtx, req, newSurfaceRunner(m.surface), sink)

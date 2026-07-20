@@ -32,3 +32,18 @@ func TestManager_InputModelOverridesRequestModel(t *testing.T) {
 
 	endAndClose(t, in, out, runErr)
 }
+
+func TestManager_InputProviderEnvReachesRequest(t *testing.T) {
+	provider := fake.NewProvider(fake.Step{Text: "a"})
+	_, in, out, runErr := newTestManagerWithStore(t, "th_penv", nil, provider)
+	in <- contracts.Input{Type: contracts.InUserMessage, Text: "hi",
+		ProviderEnv: map[string]string{"ANTHROPIC_BASE_URL": "http://litellm:4000", "ANTHROPIC_API_KEY": "dummy"}}
+	if !drainToTurnCompleted(t, out, testTimeout) {
+		t.Fatal("turn never completed")
+	}
+	got := provider.LastRequest().ProviderEnv
+	if got["ANTHROPIC_BASE_URL"] != "http://litellm:4000" || got["ANTHROPIC_API_KEY"] != "dummy" {
+		t.Fatalf("request ProviderEnv = %v, want the input's routing env", got)
+	}
+	endAndClose(t, in, out, runErr)
+}

@@ -195,3 +195,19 @@ func TestSubmitComposer_NormalTurnCarriesCurrentModel(t *testing.T) {
 		t.Fatalf("Sent[0] = %+v, want Model=claude-opus-4-8", got)
 	}
 }
+
+func TestModelEntry_ProviderEnv(t *testing.T) {
+	def := ModelEntry{Model: "claude-sonnet-5"}
+	if def.ProviderEnv() != nil {
+		t.Fatalf("default (no base_url) ProviderEnv = %v, want nil", def.ProviderEnv())
+	}
+	loc := ModelEntry{Model: "kimi-k3", BaseURL: "http://x:4000"}
+	pe := loc.ProviderEnv()
+	if pe["ANTHROPIC_BASE_URL"] != "http://x:4000" || pe["ANTHROPIC_API_KEY"] != "dummy" {
+		t.Fatalf("local ProviderEnv = %v, want base_url + dummy key", pe)
+	}
+	withKey := ModelEntry{Model: "m", BaseURL: "http://x", APIKey: "sekret"}
+	if withKey.ProviderEnv()["ANTHROPIC_API_KEY"] != "sekret" {
+		t.Fatalf("explicit api_key not honored: %v", withKey.ProviderEnv())
+	}
+}

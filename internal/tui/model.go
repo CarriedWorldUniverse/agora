@@ -83,6 +83,20 @@ type Model struct {
 	// cfg.Model if non-empty, else the registry's "sonnet" default;
 	// changed at runtime via `/model <name>`.
 	currentModel string
+	// currentProviderEnv is the per-turn routing env for currentModel's
+	// registry entry (nil for a default/subscription model; set for a
+	// local/LiteLLM entry). Applied to every turn alongside currentModel.
+	currentProviderEnv map[string]string
+}
+
+// resolveModelForTurn maps a /model name (a registry key) or a raw model id to
+// the (model id, provider routing env) a turn should carry. A registry key uses
+// its entry (id + endpoint); anything else is a raw id on the default provider.
+func (m *Model) resolveModelForTurn(name string) (string, map[string]string) {
+	if entry, ok := m.cfg.ModelRegistry[name]; ok {
+		return entry.Model, entry.ProviderEnv()
+	}
+	return name, nil
 }
 
 // NewModel constructs a ready Model. Backend may be nil for pure
@@ -732,7 +746,12 @@ func (m *Model) handleModelCommand(text string) (cmd tea.Cmd, handled bool) {
 		return m.cfg.Printer("available models: " + strings.Join(names, ", ")), true
 	}
 	m.currentModel = entry.Model
-	return m.cfg.Printer(fmt.Sprintf("model set to %s (%s)", arg, entry.Model)), true
+	m.currentProviderEnv = entry.ProviderEnv()
+	where := "subscription"
+	if entry.BaseURL != "" {
+		where = entry.BaseURL
+	}
+	return m.cfg.Printer(fmt.Sprintf("model set to %s (%s via %s)", arg, entry.Model, where)), true
 }
 
 func (m *Model) submitComposer() tea.Cmd {
@@ -764,14 +783,16 @@ func (m *Model) submitComposer() tea.Cmd {
 			m.statusErr = err.Error()
 			return nil
 		}
-		if model == "" {
-			// A %-override that only raised effort (e.g. "%:high") didn't
-			// name a model — the current model still applies.
-			model = m.currentModel
+		modelID, penv := m.currentModel, m.currentProviderEnv
+		if model != "" {
+			// A named %-override wins for this turn — resolve it through the
+			// registry so a local/LiteLLM name also carries its endpoint (a
+			// %-override with only effort keeps the current model+endpoint).
+			modelID, penv = m.resolveModelForTurn(model)
 		}
-		in = contracts.Input{Type: contracts.InUserMessage, Text: rest, Model: model, Effort: effort}
+		in = contracts.Input{Type: contracts.InUserMessage, Text: rest, Model: modelID, Effort: effort, ProviderEnv: penv}
 	} else {
-		in = contracts.Input{Type: contracts.InUserMessage, Text: text, Model: m.currentModel}
+		in = contracts.Input{Type: contracts.InUserMessage, Text: text, Model: m.currentModel, ProviderEnv: m.currentProviderEnv}
 	}
 	// Echo the operator's OWN message into the transcript (scrollback) before
 	// sending — the engine never emits it back (it only persists it + runs the
