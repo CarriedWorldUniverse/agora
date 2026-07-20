@@ -129,13 +129,19 @@ type Manager struct {
 	// extra model call per turn, so it's opt-in (WithContextExtraction(true),
 	// set by the interactive cmd/agora path). Requires ctxEngineEnabled.
 	ctxExtractEnabled bool
-	// activeProv/activeModel are the provider+model the MOST RECENT turn ran on
-	// — what the async extraction worker calls. Written before each RunTurn
-	// (setActiveModel) on the turn goroutine, read on the engine's extraction
-	// worker, so guarded by activeMu.
-	activeMu    sync.Mutex
-	activeProv  bridle.Provider
-	activeModel string
+	// lastDirectProv/lastDirectModel are the most recent DIRECT-API provider+model
+	// — what the async extraction worker calls. Extraction distills conversation
+	// TEXT (model-agnostic), and only direct-api providers can run a cheap
+	// one-shot extraction, so we deliberately track the last direct-api model
+	// rather than "whatever ran the last turn": that way a subprocess (claudesdk)
+	// turn interleaved between a direct-api turn and its still-pending async
+	// extraction can't null out the target and silently drop that turn's facts.
+	// Written on the turn goroutine (setActiveModel), read on the engine's
+	// extraction worker, so guarded by activeMu. nil until the first direct-api
+	// turn — before then the extractor cleanly skips (no direct-api model to use).
+	activeMu        sync.Mutex
+	lastDirectProv  bridle.Provider
+	lastDirectModel string
 }
 
 var _ agoraio.Engine = (*Manager)(nil)
@@ -377,30 +383,30 @@ func (m *Manager) attachContextEngine() {
 	m.detach = bridleadapter.Attach(m.harness, eng)
 }
 
-// setActiveModel records the provider+model of the turn about to run, so the
-// async extraction worker (activeModelExtractor.active) distills with the SAME
-// model the operator is talking to. Called on the turn goroutine; the fields are
-// read off the extraction worker, hence the lock.
-func (m *Manager) setActiveModel(prov bridle.Provider, model string) {
+// setActiveModel records a turn's provider+model as the extraction target, but
+// ONLY for direct-api providers — the extraction worker can only run on those,
+// and pinning to the last direct-api model (rather than "the last turn's model")
+// is what stops a later subprocess turn from nulling the target and dropping a
+// pending direct-api turn's facts. Called on the turn goroutine; read off the
+// extraction worker, hence the lock. A subprocess turn is a no-op here (it keeps
+// its server-side memory and is never the extraction target).
+func (m *Manager) setActiveModel(prov bridle.Provider, model string, directAPI bool) {
+	if !directAPI {
+		return
+	}
 	m.activeMu.Lock()
-	m.activeProv, m.activeModel = prov, model
+	m.lastDirectProv, m.lastDirectModel = prov, model
 	m.activeMu.Unlock()
 }
 
-// activeModelForExtraction returns the provider+model the extractor should use:
-// the most recent turn's, falling back to the Manager's default provider+model
-// before any turn has run.
+// activeModelForExtraction returns the direct-api provider+model the extractor
+// should distill with (the most recent one seen). Returns nil before any
+// direct-api turn has run — the extractor then cleanly skips, since there is no
+// model that can perform a one-shot extraction.
 func (m *Manager) activeModelForExtraction() (bridle.Provider, string) {
 	m.activeMu.Lock()
 	defer m.activeMu.Unlock()
-	prov, model := m.activeProv, m.activeModel
-	if prov == nil {
-		prov = m.provider
-	}
-	if model == "" {
-		model = m.model
-	}
-	return prov, model
+	return m.lastDirectProv, m.lastDirectModel
 }
 
 // defaultRoots builds WithRoots's zero-value default: the process's own
@@ -814,9 +820,9 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 	if ph.directAPI {
 		req.SessionTail = m.sessionTails[ph.key]
 	}
-	// Record this turn's provider+model so ctxmap's async fact extraction (when
-	// enabled) distills with the same model the operator is actually talking to.
-	m.setActiveModel(ph.provider, model)
+	// Record a direct-api turn's provider+model as the extraction target so
+	// ctxmap's async fact extraction (when enabled) has a model to distill with.
+	m.setActiveModel(ph.provider, model, ph.directAPI)
 
 	result, err := ph.harness.RunTurn(turnCtx, req, newSurfaceRunner(m.surface), sink)
 
