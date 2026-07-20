@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -99,6 +100,62 @@ func (b *inProcessBackend) Close() error {
 		}
 	})
 	return b.closeErr
+}
+
+// HistoryEntry is one prior text message for the resume replay (NEX-798).
+type HistoryEntry struct {
+	Role string // "user" | "agent"
+	Text string
+}
+
+// HistoryTail returns up to k trailing user/agent text messages from threadID's
+// persisted history plus the count of elided earlier items — what main prints
+// into terminal scrollback before the TUI starts, so a resumed session shows
+// where the conversation left off. Tool/other items are skipped (they're
+// noise at resume; the text thread is the story).
+func (b *inProcessBackend) HistoryTail(threadID string, k int) (entries []HistoryEntry, elided int, err error) {
+	it, err := b.store.Resume(threadID)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer it.Close()
+	for {
+		item, ok := it.Next()
+		if !ok {
+			break
+		}
+		var role string
+		switch item.Type {
+		case contracts.TIUserMessage:
+			role = "user"
+		case contracts.TIAgentMessage:
+			role = "agent"
+		default:
+			continue
+		}
+		var p struct {
+			Text string `json:"text"`
+		}
+		raw, merr := json.Marshal(item.Payload)
+		if merr != nil || json.Unmarshal(raw, &p) != nil || p.Text == "" {
+			continue
+		}
+		entries = append(entries, HistoryEntry{Role: role, Text: p.Text})
+	}
+	if err := it.Err(); err != nil {
+		return nil, 0, err
+	}
+	if len(entries) > k {
+		elided = len(entries) - k
+		entries = entries[len(entries)-k:]
+	}
+	return entries, elided, nil
+}
+
+// ThreadSummaries lists persisted threads for /resume (NEX-798): all of them
+// when wd is empty, else only those whose working_dir matches.
+func (b *inProcessBackend) ThreadSummaries(wd string) ([]contracts.ThreadMeta, error) {
+	return b.store.List(contracts.ListFilter{WorkingDir: wd})
 }
 
 // newInProcessStore opens (creating if absent) the operator's persistent,

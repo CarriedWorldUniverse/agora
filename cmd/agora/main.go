@@ -154,10 +154,19 @@ func main() {
 	}
 	defer backend.Close()
 
+	// NEX-798 resume: a thread with prior history prints its trailing
+	// exchanges into terminal scrollback BEFORE the TUI starts — the inline
+	// no-altscreen design (§0) makes pre-printed history read exactly like
+	// the live transcript above the session. In-process backend only (a
+	// daemon backend has no store handle here; its Replay covers live ring
+	// history instead).
+	printResumeHistory(backend, *threadID)
+
 	m := tui.NewModel(tui.Config{
-		Backend: backend,
-		AgentID: *agentID,
-		Model:   *model,
+		Backend:  backend,
+		AgentID:  *agentID,
+		Model:    *model,
+		ThreadID: *threadID,
 	})
 	// Never tea.WithAltScreen() (§0 non-negotiable: the transcript lives in
 	// the terminal's own scrollback, not a full-screen widget) — and NO mouse
@@ -241,6 +250,36 @@ func dialBackend(ctx context.Context, log *slog.Logger, socketPath, wsURL string
 	log.Info("agora: running standalone (no daemon); engine in-process", "socket", socketPath, "dial_err", dialErr.Error())
 	fmt.Fprintln(os.Stderr, "agora: running standalone (no daemon) — engine in-process.")
 	return newInProcessBackend(ctx, attach.ThreadID, attach)
+}
+
+// resumeHistoryK is how many trailing text messages a resumed session prints
+// into scrollback — enough to re-orient without re-dumping the whole thread.
+const resumeHistoryK = 12
+
+// printResumeHistory writes a resumed thread's trailing exchanges to stdout
+// before the TUI starts (NEX-798). No-op when the backend can't serve history
+// (daemon/ws) or the thread is fresh.
+func printResumeHistory(backend tui.Backend, threadID string) {
+	hb, ok := backend.(*inProcessBackend)
+	if !ok {
+		return
+	}
+	entries, elided, err := hb.HistoryTail(threadID, resumeHistoryK)
+	if err != nil || len(entries) == 0 {
+		return
+	}
+	fmt.Printf("── resumed thread %s ──\n", threadID)
+	if elided > 0 {
+		fmt.Printf("  … %d earlier message(s) not shown\n", elided)
+	}
+	for _, e := range entries {
+		if e.Role == "user" {
+			fmt.Println("› " + e.Text)
+		} else {
+			fmt.Println(e.Text)
+		}
+	}
+	fmt.Println("── end of history ──")
 }
 
 // cwdThreadID derives a stable, filesystem-safe thread id from a working

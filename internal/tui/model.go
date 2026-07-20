@@ -44,6 +44,16 @@ type Config struct {
 	// creating it with defaults if missing; tests inject a fixed registry
 	// here instead of touching the real home dir.
 	ModelRegistry ModelRegistry
+	// ThreadID is the attached thread — `/resume` marks it in its listing.
+	ThreadID string
+}
+
+// ThreadLister is the OPTIONAL backend seam behind `/resume` (NEX-798): list
+// persisted threads, filtered to a working dir ("" = all). The in-process
+// backend implements it over the LocalStore; daemon/ws backends that don't
+// implement it degrade to a "not available" message.
+type ThreadLister interface {
+	ThreadSummaries(wd string) ([]contracts.ThreadMeta, error)
 }
 
 // approvalEntry is one queued approval/question/plan request (§3: "Requests
@@ -901,6 +911,46 @@ func (m *Model) handleModelCommand(text string) (cmd tea.Cmd, handled bool) {
 	return m.cfg.Printer(fmt.Sprintf("model set to %s (%s via %s)", arg, entry.Model, where)), true
 }
 
+// handleResumeCommand intercepts `/resume` (list this working dir's persisted
+// threads) and `/resume all` (every thread) — NEX-798. Listing only in v1:
+// switching threads in-place needs a Manager-per-thread rebuild, so the
+// listing prints the `agora -thread <id>` relaunch hint instead.
+func (m *Model) handleResumeCommand(text string) (cmd tea.Cmd, handled bool) {
+	trimmed := strings.ToLower(strings.TrimSpace(text))
+	if trimmed != "/resume" && trimmed != "/resume all" {
+		return nil, false
+	}
+	lister, ok := m.cfg.Backend.(ThreadLister)
+	if !ok {
+		m.statusErr = "resume listing not available on this backend"
+		return nil, true
+	}
+	wd := cwdOrDot()
+	scope := "this directory"
+	if trimmed == "/resume all" {
+		wd, scope = "", "all directories"
+	}
+	metas, err := lister.ThreadSummaries(wd)
+	if err != nil {
+		m.statusErr = "list threads: " + err.Error()
+		return nil, true
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "sessions (%s):", scope)
+	if len(metas) == 0 {
+		b.WriteString(" none")
+	}
+	for _, meta := range metas {
+		marker := "  "
+		if meta.ThreadID == m.cfg.ThreadID {
+			marker = "* "
+		}
+		fmt.Fprintf(&b, "\n%s%-28s %s  %s", marker, meta.ThreadID, meta.CreatedAt.Format("2006-01-02 15:04"), meta.WorkingDir)
+	}
+	b.WriteString("\nopen one: agora -thread <id>   (in its directory)")
+	return m.cfg.Printer(b.String()), true
+}
+
 func (m *Model) submitComposer() tea.Cmd {
 	if m.pendingDeny != nil {
 		text, sent := m.composer.Submit()
@@ -930,6 +980,9 @@ func (m *Model) submitComposer() tea.Cmd {
 		return nil
 	}
 	if cmd, handled := m.handleModelCommand(text); handled {
+		return cmd
+	}
+	if cmd, handled := m.handleResumeCommand(text); handled {
 		return cmd
 	}
 	if isExitCommand(text) {
