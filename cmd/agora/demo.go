@@ -74,23 +74,39 @@ func (demoEngine) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 			if !wait(1800 * time.Millisecond) {
 				return ctx.Err()
 			}
-			for _, chunk := range []string{
-				"This is a demo turn — no model was called, nothing is billed.\n",
-				"Line two, streamed as a second chunk.\n",
-				"If the prompt line survived the 'running' status, rendering is correct.",
-			} {
-				if !emit(contracts.Event{
-					Type:    contracts.EvAgentMessageDelta,
-					Payload: demoMarshal(map[string]string{"text": chunk}),
-				}) {
-					return ctx.Err()
-				}
-				if !wait(250 * time.Millisecond) {
-					return ctx.Err()
-				}
+			// Prose segment 1 (no trailing newline — it stays in the live
+			// stream until flushed), then a TOOL CALL, then segment 2. This
+			// exercises tool-item rendering + segment separation (U-C5b): the
+			// tool line must appear between the two prose chunks, and they must
+			// not fuse ("...build.$ go..." separated, not "...build.Build's...").
+			steps := []func() bool{
+				func() bool {
+					return emit(contracts.Event{Type: contracts.EvAgentMessageDelta,
+						Payload: demoMarshal(map[string]string{"text": "Let me check the build."})})
+				},
+				func() bool {
+					return emit(contracts.Event{Type: contracts.EvItemStarted,
+						Item:    &contracts.ItemRef{Type: contracts.ItemCommandExecution},
+						Payload: demoMarshal(map[string]string{"command": "go build ./..."})})
+				},
+				func() bool {
+					return emit(contracts.Event{Type: contracts.EvItemCompleted,
+						Item:    &contracts.ItemRef{Type: contracts.ItemCommandExecution},
+						Payload: demoMarshal(map[string]string{"error": ""})})
+				},
+				func() bool {
+					return emit(contracts.Event{Type: contracts.EvAgentMessageDelta,
+						Payload: demoMarshal(map[string]string{"text": "Build's clean. No model was called, nothing billed."})})
+				},
+				func() bool { return emit(contracts.Event{Type: contracts.EvTurnCompleted, TurnID: turnID}) },
 			}
-			if !emit(contracts.Event{Type: contracts.EvTurnCompleted, TurnID: turnID}) {
-				return ctx.Err()
+			for _, step := range steps {
+				if !step() {
+					return ctx.Err()
+				}
+				if !wait(400 * time.Millisecond) {
+					return ctx.Err()
+				}
 			}
 		}
 	}

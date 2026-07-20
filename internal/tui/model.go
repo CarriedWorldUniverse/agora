@@ -321,6 +321,55 @@ func (m *Model) handleEvent(ev contracts.Event) []tea.Cmd {
 		for _, q := range m.composer.DrainQueued() {
 			cmds = append(cmds, m.cfg.Printer("› "+q))
 		}
+	case contracts.EvItemStarted:
+		if ev.Item == nil {
+			break
+		}
+		switch ev.Item.Type {
+		case contracts.ItemCommandExecution, contracts.ItemFileChange, contracts.ItemMCPToolCall:
+			if m.stream != nil {
+				for _, line := range m.stream.Finalize() {
+					cmds = append(cmds, m.cfg.Printer(line))
+				}
+				m.stream = nil
+			}
+			var line string
+			switch ev.Item.Type {
+			case contracts.ItemCommandExecution:
+				var p struct {
+					Command string `json:"command"`
+				}
+				_ = json.Unmarshal(ev.Payload, &p)
+				line = m.cfg.Theme.Muted.Render("$ " + p.Command)
+			case contracts.ItemFileChange:
+				var p struct {
+					Path string `json:"path"`
+				}
+				_ = json.Unmarshal(ev.Payload, &p)
+				line = m.cfg.Theme.Muted.Render("edit " + p.Path)
+			case contracts.ItemMCPToolCall:
+				var p struct {
+					Tool string `json:"tool"`
+				}
+				_ = json.Unmarshal(ev.Payload, &p)
+				line = m.cfg.Theme.Muted.Render("tool " + p.Tool)
+			}
+			cmds = append(cmds, m.cfg.Printer(line))
+		}
+	case contracts.EvItemCompleted:
+		if ev.Item == nil {
+			break
+		}
+		switch ev.Item.Type {
+		case contracts.ItemCommandExecution, contracts.ItemFileChange, contracts.ItemMCPToolCall:
+			var p struct {
+				Error string `json:"error"`
+			}
+			_ = json.Unmarshal(ev.Payload, &p)
+			if p.Error != "" {
+				cmds = append(cmds, m.cfg.Printer(m.cfg.Theme.Danger.Render("  ✗ "+p.Error)))
+			}
+		}
 	case contracts.EvApprovalRequested:
 		entry, ok := decodeApprovalRequest(ev.Payload)
 		if !ok {
