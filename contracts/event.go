@@ -165,4 +165,10 @@ type Usage struct {
 	Output    int64 `json:"output"`
 	Cached    int64 `json:"cached,omitempty"`
 	Reasoning int64 `json:"reasoning,omitempty"`
+	// Cost is the provider-reported charge for the turn in USD (OpenRouter's
+	// exact upstream cost via the openai provider). 0 = not reported — the
+	// client may estimate from a configured price table instead (the
+	// subscription claudesdk path reports no cost; ccusage-style notional
+	// pricing comes from models.json).
+	Cost float64 `json:"cost,omitempty"`
 }

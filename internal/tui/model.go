@@ -88,6 +88,18 @@ type Model struct {
 	// ProviderSpec for a local/LiteLLM entry). Applied to every turn alongside
 	// currentModel.
 	currentProvider *contracts.ProviderSpec
+
+	// Session usage totals, accumulated from each turn.completed's usage
+	// payload and shown on the idle status row (NEX-794). sessCost prefers the
+	// provider-reported per-turn cost (exact, e.g. OpenRouter) and falls back
+	// to the turn model's models.json price table; turns with neither
+	// contribute tokens but no cost. turnModelID records which model the
+	// in-flight turn was sent to, so the fallback prices the RIGHT model even
+	// if /model changes mid-turn.
+	sessIn, sessOut, sessCached int64
+	sessCost                    float64
+	haveUsage                   bool
+	turnModelID                 string
 }
 
 // resolveModelForTurn maps a /model name (a registry key) or a raw model id to
@@ -199,9 +211,92 @@ func (m *Model) renderStatusRow() string {
 		if m.statusErr != "" {
 			return m.cfg.Theme.Danger.Render("error: " + m.statusErr)
 		}
-		return m.cfg.Theme.Muted.Render(fmt.Sprintf("%s · %s · Esc to quit", m.cfg.AgentID, m.currentModel))
+		return m.cfg.Theme.Muted.Render(fmt.Sprintf("%s · %s%s · Esc to quit", m.cfg.AgentID, m.currentModel, m.usageSegment()))
 	}
-	return m.cfg.Theme.Muted.Render(fmt.Sprintf("⣾ running · %s · Esc to interrupt", m.currentModel))
+	return m.cfg.Theme.Muted.Render(fmt.Sprintf("⣾ running · %s%s · Esc to interrupt", m.currentModel, m.usageSegment()))
+}
+
+// usageSegment renders the session's cumulative usage for the status row —
+// " · ↑12.3k ↓1.4k · cache 87% · $0.0431" — or "" before any turn has
+// completed. Cost is omitted when nothing priced the session's turns (no
+// provider-reported cost and no models.json pricing): showing $0.00 would
+// misread as "free".
+func (m *Model) usageSegment() string {
+	if !m.haveUsage {
+		return ""
+	}
+	seg := fmt.Sprintf(" · ↑%s ↓%s", humanTokens(m.sessIn), humanTokens(m.sessOut))
+	if m.sessIn > 0 {
+		seg += fmt.Sprintf(" · cache %d%%", m.sessCached*100/m.sessIn)
+	}
+	if m.sessCost > 0 {
+		seg += " · " + fmtUSD(m.sessCost)
+	}
+	return seg
+}
+
+// recordUsage folds one turn.completed usage payload into the session totals.
+// Provider-reported cost (exact, e.g. OpenRouter through litellm) wins; a turn
+// reporting no cost is priced from the turn model's models.json table when one
+// is configured (the subscription path — notional, ccusage-style).
+func (m *Model) recordUsage(payload []byte) {
+	var p struct {
+		Usage *contracts.Usage `json:"usage"`
+	}
+	if json.Unmarshal(payload, &p) != nil || p.Usage == nil {
+		return
+	}
+	u := p.Usage
+	if u.Input == 0 && u.Output == 0 && u.Cost == 0 {
+		return
+	}
+	m.haveUsage = true
+	m.sessIn += u.Input
+	m.sessOut += u.Output
+	m.sessCached += u.Cached
+	switch {
+	case u.Cost > 0:
+		m.sessCost += u.Cost
+	default:
+		if pr := m.pricingFor(m.turnModelID); pr != nil {
+			m.sessCost += pr.Cost(u.Input, u.Cached, u.Output)
+		}
+	}
+}
+
+// pricingFor finds the price table for a model ID — the registry entry whose
+// Model matches (names are aliases; the ID is what the turn actually ran on).
+func (m *Model) pricingFor(modelID string) *ModelPricing {
+	if modelID == "" {
+		return nil
+	}
+	for _, e := range m.cfg.ModelRegistry {
+		if e.Model == modelID && e.Pricing != nil {
+			return e.Pricing
+		}
+	}
+	return nil
+}
+
+// humanTokens compacts a token count for the one-line status row.
+func humanTokens(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1e3)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+// fmtUSD keeps small per-session costs readable (sub-cent needs the extra
+// places) without over-precision on real money.
+func fmtUSD(c float64) string {
+	if c < 0.1 {
+		return fmt.Sprintf("$%.4f", c)
+	}
+	return fmt.Sprintf("$%.2f", c)
 }
 
 func (m *Model) renderComposer() string {
@@ -345,6 +440,9 @@ func (m *Model) handleEvent(ev contracts.Event) []tea.Cmd {
 			cmds = append(cmds, m.cfg.Printer(line))
 		}
 	case contracts.EvTurnCompleted, contracts.EvTurnFailed:
+		if ev.Type == contracts.EvTurnCompleted {
+			m.recordUsage(ev.Payload)
+		}
 		if m.stream != nil {
 			for _, line := range m.stream.Finalize() {
 				cmds = append(cmds, m.cfg.Printer(line))
@@ -797,6 +895,9 @@ func (m *Model) submitComposer() tea.Cmd {
 	} else {
 		in = contracts.Input{Type: contracts.InUserMessage, Text: text, Model: m.currentModel, Provider: m.currentProvider}
 	}
+	// Remember which model this turn runs on so recordUsage can price it from
+	// the right table when the provider reports no cost.
+	m.turnModelID = in.Model
 	// Echo the operator's OWN message into the transcript (scrollback) before
 	// sending — the engine never emits it back (it only persists it + runs the
 	// turn) and the session doesn't broadcast inputs, so without this the

@@ -1079,5 +1079,6 @@ func mapUsage(u bridle.Usage) contracts.Usage {
 		Output:    int64(u.OutputTokens),
 		Cached:    int64(u.CacheReadInputTokens),
 		Reasoning: int64(u.ReasoningTokens),
+		Cost:      u.CostUSD,
 	}
 }

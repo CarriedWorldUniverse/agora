@@ -20,6 +20,31 @@ type ModelEntry struct {
 	Model   string `json:"model"`
 	BaseURL string `json:"base_url,omitempty"`
 	APIKey  string `json:"api_key,omitempty"`
+	// Pricing is the optional USD-per-million-tokens price table for models
+	// whose provider reports no cost (the subscription claudesdk path). When
+	// the turn's usage carries a provider-reported cost (OpenRouter via the
+	// openai provider), that EXACT figure wins and this table is ignored —
+	// ccusage-style notional pricing is the fallback, not the truth.
+	Pricing *ModelPricing `json:"pricing,omitempty"`
+}
+
+// ModelPricing is USD per 1M tokens by class. CachedInput is the discounted
+// cache-read rate (e.g. 0.1× input on Anthropic models); cached tokens are a
+// SUBSET of input tokens, so cost = (input-cached)·Input + cached·CachedInput
+// + output·Output, all /1e6.
+type ModelPricing struct {
+	Input       float64 `json:"input"`
+	Output      float64 `json:"output"`
+	CachedInput float64 `json:"cached_input,omitempty"`
+}
+
+// Cost prices a turn's usage against this table (USD).
+func (p *ModelPricing) Cost(input, cached, output int64) float64 {
+	fresh := input - cached
+	if fresh < 0 {
+		fresh = 0
+	}
+	return (float64(fresh)*p.Input + float64(cached)*p.CachedInput + float64(output)*p.Output) / 1e6
 }
 
 // ProviderSpec returns the per-turn provider selection for this entry, or nil
