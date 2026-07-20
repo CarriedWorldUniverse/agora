@@ -63,6 +63,14 @@ type Manager struct {
 	// Lazily populated; altDetachers holds their ctxmap detach funcs for Close.
 	altHarnesses map[string]providerHarness
 	altDetachers []func()
+	// sessionTails holds the accumulated conversation history per provider key,
+	// replayed as TurnRequest.SessionTail so DIRECT-API providers (the openai
+	// path for local models) have multi-turn memory. Subprocess providers
+	// (claudesdk) resume server-side and never populate this. Keyed by
+	// providerHarness.key so each /model keeps its own thread — and because the
+	// reasoning_content / thinking blocks a stateless model REQUIRES replayed
+	// are provider-shaped, not portable across providers.
+	sessionTails map[string][]bridle.SessionEvent
 	surface  *toolrunner.Surface
 
 	model              string
@@ -589,30 +597,45 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 // not order against the NEXT turn's set — see the InUserMessage doc
 // comment above for the full trace).
 // providerHarness pairs a built harness with its provider's id (for
-// TurnRequest.Provider).
+// TurnRequest.Provider) and the facts runOneTurn needs to route a turn:
+// directAPI (does bridle own the tool loop for this provider — and therefore
+// does agora, not a server-side session, have to replay conversation history?)
+// and key (the per-provider session-tail bucket, so switching /model keeps each
+// provider's own history separate).
 type providerHarness struct {
-	harness *bridle.Harness
-	id      bridle.ProviderID
+	harness   *bridle.Harness
+	id        bridle.ProviderID
+	directAPI bool
+	key       string
 }
 
-// harnessFor returns the harness (and provider id) to run this turn on. A nil
-// spec (the common case) uses the Manager's default harness/provider. A spec
-// naming a non-default provider gets a lazily-built, hook-configured harness
-// bound to that provider, cached by identity for reuse across turns.
-func (m *Manager) harnessFor(spec *contracts.ProviderSpec) (*bridle.Harness, bridle.ProviderID, error) {
+// defaultProviderKey is the session-tail bucket for the Manager's default
+// provider (the one from WithProvider — normally the claudesdk subscription).
+const defaultProviderKey = "default"
+
+// harnessFor returns the harness to run this turn on. A nil spec (the common
+// case) uses the Manager's default harness/provider. A spec naming a non-default
+// provider gets a lazily-built, hook-configured harness bound to that provider,
+// cached by identity for reuse across turns.
+func (m *Manager) harnessFor(spec *contracts.ProviderSpec) (providerHarness, error) {
 	if spec == nil || spec.Name == "" {
-		return m.harness, m.provider.Name(), nil
+		return providerHarness{
+			harness:   m.harness,
+			id:        m.provider.Name(),
+			directAPI: m.provider.Capabilities().Category == bridle.CategoryDirectAPI,
+			key:       defaultProviderKey,
+		}, nil
 	}
 	key := spec.Name + "|" + spec.BaseURL
 	if m.altHarnesses == nil {
 		m.altHarnesses = map[string]providerHarness{}
 	}
 	if ph, ok := m.altHarnesses[key]; ok {
-		return ph.harness, ph.id, nil
+		return ph, nil
 	}
 	prov, err := buildProvider(spec)
 	if err != nil {
-		return nil, "", err
+		return providerHarness{}, err
 	}
 	h := bridle.NewHarness(prov)
 	// Same hooks as the default harness so the approval gate and working-state
@@ -621,8 +644,14 @@ func (m *Manager) harnessFor(spec *contracts.ProviderSpec) (*bridle.Harness, bri
 	if m.eng != nil {
 		m.altDetachers = append(m.altDetachers, bridleadapter.Attach(h, m.eng))
 	}
-	m.altHarnesses[key] = providerHarness{harness: h, id: prov.Name()}
-	return h, prov.Name(), nil
+	ph := providerHarness{
+		harness:   h,
+		id:        prov.Name(),
+		directAPI: prov.Capabilities().Category == bridle.CategoryDirectAPI,
+		key:       key,
+	}
+	m.altHarnesses[key] = ph
+	return ph, nil
 }
 
 // buildProvider constructs a bridle provider from a per-turn spec. "openai" is
@@ -690,7 +719,7 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 	// local model). harnessFor returns the harness bound to that provider —
 	// same approval + ctxmap hooks — so agora talks to any bridle provider
 	// natively instead of forcing the Anthropic API. Nil spec = default.
-	harness, providerID, herr := m.harnessFor(input.Provider)
+	ph, herr := m.harnessFor(input.Provider)
 	if herr != nil {
 		emit(contracts.Event{Type: contracts.EvError, Payload: mustMarshal(errorPayload{Message: herr.Error()})})
 		terminal(contracts.Event{
@@ -700,7 +729,7 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 		return
 	}
 	req := bridle.TurnRequest{
-		Provider:           providerID,
+		Provider:           ph.id,
 		Model:              model,
 		AppendSystemPrompt: m.appendSystemPrompt,
 		UserMessage:        input.Text,
@@ -708,8 +737,17 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 		Tools:              toolDefsFromSpecs(toolSpecs),
 		Session:            m.turnSession(),
 	}
+	// Direct-API providers have no server-side session — agora replays the
+	// accumulated conversation so the model actually remembers prior turns.
+	// Without this a local model treats every turn as turn one (it re-explores
+	// from scratch and reconstructs nothing), which reads as "the whole session
+	// repeats each turn". Subprocess providers (claudesdk) resume server-side,
+	// so their tail stays empty by design.
+	if ph.directAPI {
+		req.SessionTail = m.sessionTails[ph.key]
+	}
 
-	result, err := harness.RunTurn(turnCtx, req, newSurfaceRunner(m.surface), sink)
+	result, err := ph.harness.RunTurn(turnCtx, req, newSurfaceRunner(m.surface), sink)
 
 	switch result.StopReason {
 	case bridle.StopReasonModelDone, bridle.StopReasonMaxSteps:
@@ -720,6 +758,28 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 		// posture and why aborted/errored turns don't persist at v1.
 		if m.store != nil {
 			m.persistTurn(input, result)
+		}
+		// Extend this provider's replay tail with the turn just completed: the
+		// user message (bridle lowers SessionTail then appends the NEXT turn's
+		// UserMessage, so the user turn must live in the tail) followed by the
+		// model's own SessionDelta (assistant text + tool calls/results +
+		// reasoning_content/thinking blocks that reasoner models require back).
+		// Only for direct-API providers; the subscription path never gets here
+		// with directAPI set.
+		if ph.directAPI {
+			if m.sessionTails == nil {
+				m.sessionTails = map[string][]bridle.SessionEvent{}
+			}
+			tail := m.sessionTails[ph.key]
+			if input.Text != "" {
+				tail = append(tail, bridle.SessionEvent{
+					Provider: ph.id,
+					Role:     bridle.RoleUser,
+					Content:  input.Text,
+				})
+			}
+			tail = append(tail, result.SessionDelta...)
+			m.sessionTails[ph.key] = tail
 		}
 		terminal(contracts.Event{
 			Type:    contracts.EvTurnCompleted,
