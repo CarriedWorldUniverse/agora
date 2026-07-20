@@ -828,6 +828,19 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 
 	result, err := ph.harness.RunTurn(turnCtx, req, newSurfaceRunner(m.surface), sink)
 
+	// Normalize interruption: a provider whose in-flight HTTP call is killed by
+	// turnCtx cancellation (InInterrupt, or Run teardown) surfaces an ERROR with
+	// a ZERO StopReason — not StopReasonAborted (only a provider that checks
+	// ctx itself, like the claudesdk lane, reports Aborted). Without this the
+	// live /exit path fell into the generic-error branch and the interrupted
+	// exchange was never persisted — the unit test missed it by scripting a
+	// provider that politely returned Aborted (mock-the-producer's-REAL-output,
+	// again). turnCtx is canceled ONLY for interruption/teardown, so this
+	// classification is unambiguous.
+	if err != nil && result.StopReason != bridle.StopReasonAborted && turnCtx.Err() != nil {
+		result.StopReason = bridle.StopReasonAborted
+	}
+
 	switch result.StopReason {
 	case bridle.StopReasonModelDone, bridle.StopReasonMaxSteps:
 		// U-C6: persist the transcript core for a SUCCEEDED turn — the
@@ -866,6 +879,28 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 		})
 
 	case bridle.StopReasonAborted:
+		// NEX-798: an INTERRUPTED turn persists (user message + whatever the
+		// model produced before cancellation) — /exit and Esc-interrupt must
+		// leave the thread JSONL reflecting the exchange for resume, not
+		// silently drop it. (Errored turns still don't persist — an error
+		// means the exchange may never have reached the model at all.)
+		if m.store != nil {
+			m.persistTurn(input, result)
+		}
+		// Keep the in-memory replay tail consistent with what was persisted,
+		// so an in-session continuation after Esc-interrupt remembers the
+		// interrupted exchange the same way a resumed session would read it.
+		if ph.directAPI {
+			if m.sessionTails == nil {
+				m.sessionTails = map[string][]bridle.SessionEvent{}
+			}
+			tail := m.sessionTails[ph.key]
+			if input.Text != "" {
+				tail = append(tail, bridle.SessionEvent{Provider: ph.id, Role: bridle.RoleUser, Content: input.Text})
+			}
+			tail = append(tail, result.SessionDelta...)
+			m.sessionTails[ph.key] = tail
+		}
 		terminal(contracts.Event{
 			Type:    contracts.EvTurnFailed,
 			Payload: mustMarshal(turnFailedPayload{Interrupted: true}),

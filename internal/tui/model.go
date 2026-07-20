@@ -100,6 +100,15 @@ type Model struct {
 	sessCost                    float64
 	haveUsage                   bool
 	turnModelID                 string
+
+	// quitting is set when an exit command arrives while a turn is running
+	// (NEX-798): the turn is interrupted first (so the engine winds down and
+	// the interrupted exchange persists — thread JSONL stays resume-clean),
+	// then the terminal event quits the program. quitGraceCmd is the backstop:
+	// if the engine never delivers a terminal event (wedged provider), quit
+	// anyway after the grace period — the JSONL is still structurally safe
+	// (torn-tail healing) even on a hard exit.
+	quitting bool
 }
 
 // resolveModelForTurn maps a /model name (a registry key) or a raw model id to
@@ -149,6 +158,21 @@ type backendEventMsg struct {
 	ok bool
 }
 
+// quitGraceMsg fires quitGrace after an exit-while-running interrupted the
+// turn: if the engine's terminal event hasn't quit us by then (wedged
+// provider/sidecar), quit anyway — the JSONL is structurally safe regardless
+// (torn-tail healing on the next open).
+type quitGraceMsg struct{}
+
+// quitGrace is how long an exit-while-running waits for the interrupted
+// turn's terminal event before force-quitting. var, not const: tests shrink
+// it so executing the tick cmd synchronously doesn't stall the suite.
+var quitGrace = 3 * time.Second
+
+func quitGraceCmd() tea.Cmd {
+	return tea.Tick(quitGrace, func(time.Time) tea.Msg { return quitGraceMsg{} })
+}
+
 func waitForEvent(b Backend) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-b.Events()
@@ -160,6 +184,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		return m, nil
+	case quitGraceMsg:
+		if m.quitting {
+			return m, tea.Quit // engine never delivered the terminal event
+		}
 		return m, nil
 	case backendEventMsg:
 		if !msg.ok {
@@ -212,6 +241,9 @@ func (m *Model) renderStatusRow() string {
 			return m.cfg.Theme.Danger.Render("error: " + m.statusErr)
 		}
 		return m.cfg.Theme.Muted.Render(fmt.Sprintf("%s · %s%s · Esc to quit", m.cfg.AgentID, m.currentModel, m.usageSegment()))
+	}
+	if m.quitting {
+		return m.cfg.Theme.Muted.Render("⣾ interrupting turn · exiting…")
 	}
 	return m.cfg.Theme.Muted.Render(fmt.Sprintf("⣾ running · %s%s · Esc to interrupt", m.currentModel, m.usageSegment()))
 }
@@ -451,6 +483,12 @@ func (m *Model) handleEvent(ev contracts.Event) []tea.Cmd {
 		}
 		m.running = false
 		m.composer.SetRunning(false)
+		if m.quitting {
+			// NEX-798: exit-while-running — the interrupted turn just reached
+			// its terminal event (persisted engine-side), so leave now.
+			cmds = append(cmds, tea.Quit)
+			return cmds
+		}
 		for _, q := range m.composer.DrainQueued() {
 			cmds = append(cmds, m.cfg.Printer("› "+q))
 		}
@@ -644,6 +682,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.modalCursor = 0
 		m.composer.SetValue("")
 		return m, nil
+	}
+	if msg.String() == "esc" && m.running {
+		// The running status row promises "Esc to interrupt" — honor it
+		// (NEX-798; previously Esc mid-turn did nothing outside modals). The
+		// engine cancels the turn; it lands as turn.failed{interrupted} with
+		// the exchange persisted, and the session stays live for the next
+		// message.
+		return m, m.send(contracts.Input{Type: contracts.InInterrupt})
 	}
 	switch msg.String() {
 	case "enter":
@@ -862,6 +908,22 @@ func (m *Model) submitComposer() tea.Cmd {
 			return nil
 		}
 		return m.resolvePendingDeny(text)
+	}
+	// NEX-798: exit commands NEVER queue. Peek the buffer BEFORE Submit —
+	// Submit's queue-while-running logic would swallow "/exit" into the
+	// message queue and the operator would stay trapped until the turn ended.
+	// Idle → quit immediately (engine teardown via backend.Close, as before).
+	// Running → interrupt the turn first so it lands as a persisted
+	// turn.failed{interrupted} (the thread JSONL stays resume-clean), then the
+	// terminal event quits (see handleEvent); quitGraceCmd backstops a wedged
+	// engine.
+	if isExitCommand(m.composer.Value()) {
+		m.composer.SetValue("")
+		if !m.running {
+			return tea.Quit
+		}
+		m.quitting = true
+		return tea.Batch(m.send(contracts.Input{Type: contracts.InInterrupt}), quitGraceCmd())
 	}
 	text, sent := m.composer.Submit()
 	if !sent {
