@@ -60,7 +60,10 @@ func TestSubmitComposer_UnknownSlash_StillSent(t *testing.T) {
 	backend := newFakeBackend()
 	m := testModel(backend)
 	m.composer.InsertText("/quitter")
-	m.press(tea.KeyMsg{Type: tea.KeyEnter})
+	// submitComposer returns an echo+send batch since #72 — drain it so the
+	// send actually fires (kimi's branch predated the batch).
+	_, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	runCmd(cmd)
 	if len(backend.Sent) != 1 || backend.Sent[0].Text != "/quitter" {
 		t.Fatalf("Sent = %+v; want one user message with text /quitter", backend.Sent)
 	}
