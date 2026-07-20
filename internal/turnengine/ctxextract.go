@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -26,6 +27,13 @@ const extractTimeout = 120 * time.Second
 // side-stack, no gateway-specific config. Whatever /model is set to (kimi, glm,
 // sonnet, …) is what distills that model's own conversation into durable facts.
 // This is the "the configured model should just use it" wiring.
+//
+// Honest scope note: with agora's nil Embedder the engine's reconcileScan
+// short-circuits to token-overlap matching and NEVER reaches the PairJudge
+// (ctxmap/memory/engine.go: `if e.emb == nil || e.judge == nil` → token path).
+// JudgePair below is therefore DORMANT in production today — implemented and
+// tested because it's the seam contract, and it goes live the moment an
+// Embedder is wired, but reconciliation currently runs on token overlap alone.
 //
 // active() returns the current (provider, model). The engine runs extraction on
 // a background worker, so active() is called off the turn goroutine — the
@@ -71,12 +79,23 @@ func (x *activeModelExtractor) complete(sys, user string) (string, error) {
 }
 
 // Propose extracts durable facts from the current turn (ctxmap Proposer seam).
+// Failures are logged to stderr (→ agora's log file in TUI mode) BEFORE being
+// returned: the ctxmap engine deliberately swallows Propose errors (extraction
+// degrades to plain transcript), so without this line a broken extraction path
+// is fully silent — which is exactly how the first live-run failure hid.
 func (x *activeModelExtractor) Propose(current extractor.Turn, ctxTurns []extractor.Turn, glossary map[string]string) ([]extractor.FactProposal, error) {
 	out, err := x.complete(extractSystemPrompt, buildExtractUser(current, ctxTurns, glossary))
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "ctxextract: propose failed: %v\n", err)
 		return nil, err
 	}
-	return parseFacts(out)
+	facts, perr := parseFacts(out)
+	if perr != nil {
+		fmt.Fprintf(os.Stderr, "ctxextract: propose parse failed: %v\n", perr)
+		return nil, perr
+	}
+	fmt.Fprintf(os.Stderr, "ctxextract: proposed %d fact(s)\n", len(facts))
+	return facts, nil
 }
 
 // JudgePair classifies two same-topic statements (ctxmap PairJudge seam).
