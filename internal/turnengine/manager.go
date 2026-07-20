@@ -17,10 +17,10 @@ import (
 	"github.com/CarriedWorldUniverse/agora/internal/toolrunner"
 	bridle "github.com/CarriedWorldUniverse/bridle"
 	bridleadapter "github.com/CarriedWorldUniverse/bridle/ctxmap/adapter"
-	openai "github.com/CarriedWorldUniverse/bridle/provider/openai"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/memory"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/render"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/store"
+	openai "github.com/CarriedWorldUniverse/bridle/provider/openai"
 )
 
 // Manager implements agora's io.Engine (internal/io/engine.go) over a
@@ -71,7 +71,7 @@ type Manager struct {
 	// reasoning_content / thinking blocks a stateless model REQUIRES replayed
 	// are provider-shaped, not portable across providers.
 	sessionTails map[string][]bridle.SessionEvent
-	surface  *toolrunner.Surface
+	surface      *toolrunner.Surface
 
 	model              string
 	appendSystemPrompt string
@@ -121,6 +121,21 @@ type Manager struct {
 	ctxEngineEnabled bool
 	eng              *memory.Engine
 	detach           func()
+
+	// ctxExtractEnabled turns on active-model fact extraction: the ctxmap
+	// engine's Proposer/PairJudge seams are wired to activeModelExtractor, which
+	// distills each turn into durable facts using the SAME provider/model that
+	// ran the turn (no separate extraction tier). Default OFF — it costs an
+	// extra model call per turn, so it's opt-in (WithContextExtraction(true),
+	// set by the interactive cmd/agora path). Requires ctxEngineEnabled.
+	ctxExtractEnabled bool
+	// activeProv/activeModel are the provider+model the MOST RECENT turn ran on
+	// — what the async extraction worker calls. Written before each RunTurn
+	// (setActiveModel) on the turn goroutine, read on the engine's extraction
+	// worker, so guarded by activeMu.
+	activeMu    sync.Mutex
+	activeProv  bridle.Provider
+	activeModel string
 }
 
 var _ agoraio.Engine = (*Manager)(nil)
@@ -221,6 +236,17 @@ func WithStore(store contracts.ThreadStore) Option {
 // turn runs exactly as it did before this unit.
 func WithContextEngine(enabled bool) Option {
 	return func(m *Manager) { m.ctxEngineEnabled = enabled }
+}
+
+// WithContextExtraction turns on active-model fact extraction (default OFF).
+// When enabled AND the context engine is on, the ctxmap Proposer/PairJudge seams
+// are wired to activeModelExtractor, so every turn is distilled into durable
+// facts by whatever provider/model ran it — no separate extraction tier. It
+// costs an extra (async, off-turn) model call per turn, which is why it's opt-in
+// rather than on-by-default: the interactive cmd/agora path enables it; tests
+// and one-shot callers leave it off. No effect if WithContextEngine(false).
+func WithContextExtraction(enabled bool) Option {
+	return func(m *Manager) { m.ctxExtractEnabled = enabled }
 }
 
 // NewManager builds a Manager for one thread over provider. provider is
@@ -332,10 +358,49 @@ func (m *Manager) attachContextEngine() {
 		fmt.Fprintf(os.Stderr, "turnengine: ctxmap render.New failed for thread %s: %v (running WITHOUT the context engine)\n", m.threadID, err)
 		return
 	}
-	eng := memory.New(memory.Config{SessionID: m.threadID}, st, rend, nil, nil, nil)
+	// Extraction seams: OFF by default (nil Proposer/PairJudge → working-state
+	// only, as before). WithContextExtraction wires activeModelExtractor as BOTH
+	// the Proposer and the PairJudge, so each turn's facts are distilled — and
+	// reconciled — by the same provider/model that ran the turn. The Embedder
+	// stays nil deliberately: a chat model can't embed, and the engine
+	// nil-guards it (reconcileScan falls back to token-overlap when emb==nil),
+	// so extraction works without a separate embeddings endpoint.
+	var prop memory.Proposer
+	var judge memory.PairJudge
+	if m.ctxExtractEnabled {
+		ext := &activeModelExtractor{active: m.activeModelForExtraction}
+		prop, judge = ext, ext
+	}
+	eng := memory.New(memory.Config{SessionID: m.threadID}, st, rend, prop, nil, judge)
 	eng.EnableWorkingState()
 	m.eng = eng
 	m.detach = bridleadapter.Attach(m.harness, eng)
+}
+
+// setActiveModel records the provider+model of the turn about to run, so the
+// async extraction worker (activeModelExtractor.active) distills with the SAME
+// model the operator is talking to. Called on the turn goroutine; the fields are
+// read off the extraction worker, hence the lock.
+func (m *Manager) setActiveModel(prov bridle.Provider, model string) {
+	m.activeMu.Lock()
+	m.activeProv, m.activeModel = prov, model
+	m.activeMu.Unlock()
+}
+
+// activeModelForExtraction returns the provider+model the extractor should use:
+// the most recent turn's, falling back to the Manager's default provider+model
+// before any turn has run.
+func (m *Manager) activeModelForExtraction() (bridle.Provider, string) {
+	m.activeMu.Lock()
+	defer m.activeMu.Unlock()
+	prov, model := m.activeProv, m.activeModel
+	if prov == nil {
+		prov = m.provider
+	}
+	if model == "" {
+		model = m.model
+	}
+	return prov, model
 }
 
 // defaultRoots builds WithRoots's zero-value default: the process's own
@@ -604,6 +669,7 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 // provider's own history separate).
 type providerHarness struct {
 	harness   *bridle.Harness
+	provider  bridle.Provider // the bound provider (for direct one-shot extraction calls)
 	id        bridle.ProviderID
 	directAPI bool
 	key       string
@@ -621,6 +687,7 @@ func (m *Manager) harnessFor(spec *contracts.ProviderSpec) (providerHarness, err
 	if spec == nil || spec.Name == "" {
 		return providerHarness{
 			harness:   m.harness,
+			provider:  m.provider,
 			id:        m.provider.Name(),
 			directAPI: m.provider.Capabilities().Category == bridle.CategoryDirectAPI,
 			key:       defaultProviderKey,
@@ -646,6 +713,7 @@ func (m *Manager) harnessFor(spec *contracts.ProviderSpec) (providerHarness, err
 	}
 	ph := providerHarness{
 		harness:   h,
+		provider:  prov,
 		id:        prov.Name(),
 		directAPI: prov.Capabilities().Category == bridle.CategoryDirectAPI,
 		key:       key,
@@ -746,6 +814,9 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 	if ph.directAPI {
 		req.SessionTail = m.sessionTails[ph.key]
 	}
+	// Record this turn's provider+model so ctxmap's async fact extraction (when
+	// enabled) distills with the same model the operator is actually talking to.
+	m.setActiveModel(ph.provider, model)
 
 	result, err := ph.harness.RunTurn(turnCtx, req, newSurfaceRunner(m.surface), sink)
 

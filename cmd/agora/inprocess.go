@@ -58,6 +58,10 @@ func newInProcessBackend(ctx context.Context, threadID string, attach agoraio.At
 	mgr := turnengine.NewManager(threadID, provider,
 		turnengine.WithRoots(roots),
 		turnengine.WithStore(store),
+		// Interactive sessions distill each turn into durable facts using the
+		// active model itself (ctxmap fact extraction) — off by default in the
+		// engine, on here.
+		turnengine.WithContextExtraction(true),
 	)
 
 	sess := agoraio.NewSession(ctx, threadID, mgr)
