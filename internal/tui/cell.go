@@ -70,7 +70,7 @@ func (c Cell) Render(width int, th Theme) []string {
 	case CellSessionHeader:
 		return []string{th.Header.Render(fmt.Sprintf("── %s · %s ──", c.AgentID, c.Model))}
 	case CellUserMessage:
-		return wrapPrefixed("›", sanitizeTerminalText(c.Text), width)
+		return wrapPrefixed(th.Accent.Render("›"), sanitizeTerminalText(c.Text), width)
 	case CellAgentMessage:
 		return renderMarkdown(sanitizeTerminalText(c.Text), width)
 	case CellReasoning:
@@ -118,11 +118,19 @@ func wrapPrefixed(prefix, text string, width int) []string {
 
 func renderExec(c Cell, th Theme) []string {
 	var out []string
-	status := "running"
-	if c.ExecDone {
-		status = fmt.Sprintf("exit %d", c.ExitCode)
+	// Status gets a glyph + semantic color so the operator can scan a
+	// transcript for failures without reading exit codes: amber "(running)"
+	// while in flight, green ✓ on success, red ✗ on failure.
+	var status string
+	switch {
+	case !c.ExecDone:
+		status = th.Warning.Render("(running)")
+	case c.ExitCode == 0:
+		status = th.Success.Render(fmt.Sprintf("(✓ exit %d)", c.ExitCode))
+	default:
+		status = th.Danger.Render(fmt.Sprintf("(✗ exit %d)", c.ExitCode))
 	}
-	out = append(out, th.Bold.Render("$ "+sanitizeTerminalText(c.Command))+"  "+th.Muted.Render("("+status+")"))
+	out = append(out, th.Bold.Render("$ "+sanitizeTerminalText(c.Command))+"  "+status)
 	lines := c.Output
 	if !c.ExecDone && len(lines) > execTailLines {
 		lines = lines[len(lines)-execTailLines:]
