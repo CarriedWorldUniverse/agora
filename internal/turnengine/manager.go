@@ -366,11 +366,13 @@ func (m *Manager) attachContextEngine() {
 	}
 	// Extraction seams: OFF by default (nil Proposer/PairJudge → working-state
 	// only, as before). WithContextExtraction wires activeModelExtractor as BOTH
-	// the Proposer and the PairJudge, so each turn's facts are distilled — and
-	// reconciled — by the same provider/model that ran the turn. The Embedder
-	// stays nil deliberately: a chat model can't embed, and the engine
-	// nil-guards it (reconcileScan falls back to token-overlap when emb==nil),
-	// so extraction works without a separate embeddings endpoint.
+	// the Proposer and the PairJudge, so each turn's facts are distilled by the
+	// same provider/model that ran the turn. The Embedder stays nil deliberately:
+	// a chat model can't embed, and the engine nil-guards it — but note the
+	// consequence: with emb==nil, reconcileScan short-circuits to token-overlap
+	// matching BEFORE ever consulting the PairJudge, so reconciliation today is
+	// token-overlap only and the JudgePair seam is dormant (it goes live if an
+	// Embedder is ever wired). See activeModelExtractor's scope note.
 	var prop memory.Proposer
 	var judge memory.PairJudge
 	if m.ctxExtractEnabled {

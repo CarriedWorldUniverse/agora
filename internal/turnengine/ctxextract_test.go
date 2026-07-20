@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/CarriedWorldUniverse/agora/contracts"
 	bridle "github.com/CarriedWorldUniverse/bridle"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/extractor"
 	"github.com/CarriedWorldUniverse/bridle/fake"
@@ -145,6 +146,36 @@ func (subprocessProvider) Capabilities() bridle.ProviderCapabilities {
 }
 func (subprocessProvider) RunTurn(_ context.Context, _ bridle.ProviderRequest, _ bridle.EventSink) (bridle.ProviderResult, error) {
 	panic("extraction must NOT call RunTurn on a subprocess provider")
+}
+
+// TestManager_ExtractionLandsInWorkingMemory is the END-TO-END loop test:
+// turn runs → adapter RecordTurn → engine worker → activeModelExtractor.Propose
+// (one-shot on the fake provider, consuming its second step) → fact stored →
+// retrieved + rendered into the working-memory block. This is the loop the
+// first live verification never actually proved (the block stayed empty).
+func TestManager_ExtractionLandsInWorkingMemory(t *testing.T) {
+	provider := fake.NewProvider(
+		fake.Step{Text: "noted, pack size recorded"}, // turn 1's reply
+		fake.Step{Text: `[{"statement":"The porter pack size is 32MiB.","kind":"OBSERVED","source":"user","entities":["porter-pack"],"confidence":0.95}]`}, // the extraction call's reply
+	)
+	m, in, out, runErr := newTestManagerWithStore(t, "th_extract", nil, provider, WithContextExtraction(true))
+	if m.eng == nil {
+		t.Fatal("context engine not attached")
+	}
+
+	in <- contracts.Input{Type: contracts.InUserMessage, Text: "Important: the porter pack size is 32MiB."}
+	if !drainToTurnCompleted(t, out, testTimeout) {
+		t.Fatal("turn never completed")
+	}
+	ids := m.eng.WaitExtraction()
+	if len(ids) == 0 {
+		t.Fatal("extraction landed no facts — the extract→store loop is broken")
+	}
+	block := m.eng.WorkingMemoryBlock("porter pack size")
+	if !strings.Contains(block, "32MiB") {
+		t.Fatalf("extracted fact not rendered in working-memory block:\n%s", block)
+	}
+	endAndClose(t, in, out, runErr)
 }
 
 func TestActiveModelExtractor_SkipsSubprocessProvider(t *testing.T) {
