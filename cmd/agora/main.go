@@ -14,12 +14,15 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -104,6 +107,19 @@ func main() {
 
 	if *clientID == "" {
 		*clientID = "tui-" + uuid.NewString()
+	}
+	// Per-directory default thread. The Claude Code SDK stores each
+	// conversation under ~/.claude/projects/<cwd>/, so a single global
+	// "default" thread breaks the moment you run agora in another directory:
+	// its derived session id was created under the FIRST dir, and resuming it
+	// from a new cwd throws "No conversation found with session ID: ...". When
+	// -thread is left at its default, derive a stable per-cwd thread id so each
+	// directory gets its own thread + session + store, matching the SDK's
+	// project layout. An explicit -thread <name> still forces a shared thread.
+	if *threadID == "default" {
+		if cwd, werr := os.Getwd(); werr == nil {
+			*threadID = cwdThreadID(cwd)
+		}
 	}
 	if err := os.MkdirAll(*stateDir, 0o700); err != nil {
 		emitExit(log, exitBadFlags, fmt.Sprintf("mkdir state dir: %v", err), 2)
@@ -225,6 +241,34 @@ func dialBackend(ctx context.Context, log *slog.Logger, socketPath, wsURL string
 	log.Info("agora: running standalone (no daemon); engine in-process", "socket", socketPath, "dial_err", dialErr.Error())
 	fmt.Fprintln(os.Stderr, "agora: running standalone (no daemon) — engine in-process.")
 	return newInProcessBackend(ctx, attach.ThreadID, attach)
+}
+
+// cwdThreadID derives a stable, filesystem-safe thread id from a working
+// directory — a sanitized basename (readable in the ~/.agora store) plus a
+// short hash of the ABSOLUTE path (uniqueness; two dirs with the same basename
+// don't collide). Deterministic: the same directory always yields the same
+// thread id, hence the same derived session id, hence the SDK resumes the
+// right per-project conversation.
+func cwdThreadID(cwd string) string {
+	sum := sha256.Sum256([]byte(cwd))
+	base := threadSafe(filepath.Base(cwd))
+	if base == "" {
+		base = "dir"
+	}
+	return base + "-" + hex.EncodeToString(sum[:])[:12]
+}
+
+// threadSafe keeps only [A-Za-z0-9-_] so a thread id is always a safe store
+// directory name and session-derivation input.
+func threadSafe(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func userHomeOrDot() string {
