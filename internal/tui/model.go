@@ -39,6 +39,11 @@ type Config struct {
 	// any non-empty alias (used where the caller has no registry to check
 	// against yet — see build report on bridle-registry wiring deferral).
 	KnownAlias KnownAliasChecker
+	// ModelRegistry backs the `/model` command (registry of name -> model
+	// id). Nil = load from ~/.agora/models.json (LoadModelRegistry),
+	// creating it with defaults if missing; tests inject a fixed registry
+	// here instead of touching the real home dir.
+	ModelRegistry ModelRegistry
 }
 
 // approvalEntry is one queued approval/question/plan request (§3: "Requests
@@ -72,6 +77,12 @@ type Model struct {
 	modalCursor    int
 
 	statusErr string
+
+	// currentModel is the model id applied to every normal user turn
+	// (submitComposer), unless a %-override on that turn wins. Set from
+	// cfg.Model if non-empty, else the registry's "sonnet" default;
+	// changed at runtime via `/model <name>`.
+	currentModel string
 }
 
 // NewModel constructs a ready Model. Backend may be nil for pure
@@ -86,7 +97,14 @@ func NewModel(cfg Config) *Model {
 	if cfg.Theme.renderer == nil {
 		cfg.Theme = DefaultTheme()
 	}
-	return &Model{cfg: cfg, composer: NewComposer()}
+	if cfg.ModelRegistry == nil {
+		cfg.ModelRegistry = LoadModelRegistry(userHomeOrDot())
+	}
+	currentModel := cfg.Model
+	if currentModel == "" {
+		currentModel = cfg.ModelRegistry["sonnet"].Model
+	}
+	return &Model{cfg: cfg, composer: NewComposer(), currentModel: currentModel}
 }
 
 func (m *Model) Init() tea.Cmd {
@@ -164,9 +182,9 @@ func (m *Model) renderStatusRow() string {
 		if m.statusErr != "" {
 			return m.cfg.Theme.Danger.Render("error: " + m.statusErr)
 		}
-		return m.cfg.Theme.Muted.Render(fmt.Sprintf("%s · %s · Esc to quit", m.cfg.AgentID, m.cfg.Model))
+		return m.cfg.Theme.Muted.Render(fmt.Sprintf("%s · %s · Esc to quit", m.cfg.AgentID, m.currentModel))
 	}
-	return m.cfg.Theme.Muted.Render(fmt.Sprintf("⣾ running · %s · Esc to interrupt", m.cfg.Model))
+	return m.cfg.Theme.Muted.Render(fmt.Sprintf("⣾ running · %s · Esc to interrupt", m.currentModel))
 }
 
 func (m *Model) renderComposer() string {
@@ -671,6 +689,52 @@ func isExitCommand(text string) bool {
 	return false
 }
 
+// parseModelCommand reports whether text is a `/model` slash command and
+// returns its trimmed argument (empty for bare `/model`).
+func parseModelCommand(text string) (arg string, ok bool) {
+	trimmed := strings.TrimSpace(text)
+	lower := strings.ToLower(trimmed)
+	switch {
+	case lower == "/model":
+		return "", true
+	case strings.HasPrefix(lower, "/model "):
+		return strings.TrimSpace(trimmed[len("/model "):]), true
+	default:
+		return "", false
+	}
+}
+
+// handleModelCommand intercepts `/model` (list) and `/model <name>` (switch)
+// before any other composer-submit handling. handled reports whether text
+// was a `/model` command at all; when true, the caller must return cmd
+// without sending a turn.
+func (m *Model) handleModelCommand(text string) (cmd tea.Cmd, handled bool) {
+	arg, ok := parseModelCommand(text)
+	if !ok {
+		return nil, false
+	}
+	names := m.cfg.ModelRegistry.Names()
+	if arg == "" {
+		var b strings.Builder
+		b.WriteString("available models:")
+		for _, name := range names {
+			marker := "  "
+			if m.cfg.ModelRegistry[name].Model == m.currentModel {
+				marker = "* "
+			}
+			b.WriteString(fmt.Sprintf("\n%s%s -> %s", marker, name, m.cfg.ModelRegistry[name].Model))
+		}
+		return m.cfg.Printer(b.String()), true
+	}
+	entry, known := m.cfg.ModelRegistry[arg]
+	if !known {
+		m.statusErr = fmt.Sprintf("unknown model %q", arg)
+		return m.cfg.Printer("available models: " + strings.Join(names, ", ")), true
+	}
+	m.currentModel = entry.Model
+	return m.cfg.Printer(fmt.Sprintf("model set to %s (%s)", arg, entry.Model)), true
+}
+
 func (m *Model) submitComposer() tea.Cmd {
 	if m.pendingDeny != nil {
 		text, sent := m.composer.Submit()
@@ -682,6 +746,9 @@ func (m *Model) submitComposer() tea.Cmd {
 	text, sent := m.composer.Submit()
 	if !sent {
 		return nil
+	}
+	if cmd, handled := m.handleModelCommand(text); handled {
+		return cmd
 	}
 	if isExitCommand(text) {
 		// Explicit slash-command exit (/quit, /exit, /q). Bare "quit"/"exit"
@@ -697,9 +764,14 @@ func (m *Model) submitComposer() tea.Cmd {
 			m.statusErr = err.Error()
 			return nil
 		}
+		if model == "" {
+			// A %-override that only raised effort (e.g. "%:high") didn't
+			// name a model — the current model still applies.
+			model = m.currentModel
+		}
 		in = contracts.Input{Type: contracts.InUserMessage, Text: rest, Model: model, Effort: effort}
 	} else {
-		in = contracts.Input{Type: contracts.InUserMessage, Text: text}
+		in = contracts.Input{Type: contracts.InUserMessage, Text: text, Model: m.currentModel}
 	}
 	// Echo the operator's OWN message into the transcript (scrollback) before
 	// sending — the engine never emits it back (it only persists it + runs the
