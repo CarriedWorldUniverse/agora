@@ -67,6 +67,19 @@ Rationale for `%`: single unshifted-adjacent char, unused by the composer (`/` c
 
 Full codex list (45+) in the extraction if needed; the rest is settings-pickers and feature surface.
 
+### 6a. Slash-command containment (NEX-795, session-log finding 2026-07-20)
+
+**No slash-prefixed input ever reaches the model.** The composer intercepts ANY
+input starting with `/`: known commands dispatch; unknown produce a LOCAL error
+with a nearest-command suggestion. Rationale (measured, thread
+agora-6dac2f837e54): unintercepted `/mode`, `/eit`, `/glm`, `/modek` fell
+through as user messages and the model ROLE-PLAYED a CLI error ("Unknown
+command: /mode. Did you mean /model?") — fake-authoritative output that misled
+the operator (and shadow), plus a billed turn per typo. Additionally:
+`/<registry-name>` (e.g. `/kimi`, `/glm`) is sugar for `/model <name>` — the
+shortcut form the operator typed instinctively. Escape hatch: a literal message
+starting with `/` requires a leading space or `\/`.
+
 ## 7. Diff rendering
 
 Right-aligned line numbers + gutter sign (+/-/space) + content; muted add/del background tints (theme-aware: dark `#213A2B`/`#4A221D`, light GitHub pastels; fall back to fg-only on ANSI-16). Hard-wrap long lines preserving style spans. Appears in the apply-patch approval modal and in finalized patch cells. Syntax highlighting inside diffs = polish, later (chroma if wanted).
