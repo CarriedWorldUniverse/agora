@@ -609,9 +609,18 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 		})
 		return
 	}
+	// Per-turn model override: a non-empty input.Model (the TUI's /model
+	// switch and the %-override both set it) wins for THIS turn; otherwise the
+	// Manager's configured model (DevProfile / WithModel) applies. Without this
+	// the request always used m.model and input.Model was silently dropped — so
+	// /model and % changed only the status row, never the actual turn model.
+	model := m.model
+	if input.Model != "" {
+		model = input.Model
+	}
 	req := bridle.TurnRequest{
 		Provider:           m.provider.Name(),
-		Model:              m.model,
+		Model:              model,
 		AppendSystemPrompt: m.appendSystemPrompt,
 		UserMessage:        input.Text,
 		MaxSteps:           m.maxSteps,
