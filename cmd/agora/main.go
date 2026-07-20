@@ -163,10 +163,11 @@ func main() {
 	printResumeHistory(backend, *threadID)
 
 	m := tui.NewModel(tui.Config{
-		Backend:  backend,
-		AgentID:  *agentID,
-		Model:    *model,
-		ThreadID: *threadID,
+		Backend:     backend,
+		AgentID:     *agentID,
+		Model:       *model,
+		ThreadID:    *threadID,
+		ListServers: listMCPServers,
 	})
 	// Never tea.WithAltScreen() (§0 non-negotiable: the transcript lives in
 	// the terminal's own scrollback, not a full-screen widget) — and NO mouse

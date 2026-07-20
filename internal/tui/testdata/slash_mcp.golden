@@ -1,0 +1,5 @@
+MCP servers
+  github  stdio · npx -y @modelcontextprotocol/server-github
+  old-tool (disabled)  stdio · uvx old-tool
+  remote  streamable_http · https://example.com/mcp
+  configured only — live connection state is not exposed by the engine yet

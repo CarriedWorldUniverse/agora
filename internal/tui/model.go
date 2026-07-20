@@ -47,6 +47,11 @@ type Config struct {
 	ModelRegistry ModelRegistry
 	// ThreadID is the attached thread — `/resume` marks it in its listing.
 	ThreadID string
+	// ListServers feeds /mcp: returns the operator's configured MCP
+	// servers (cmd/agora adapts the internal/mcp .mcp.json loader into
+	// []ServerInfo, keeping internal/tui free of an mcp dependency).
+	// Nil = not wired on this connection.
+	ListServers func() ([]ServerInfo, error)
 }
 
 // ThreadLister is the OPTIONAL backend seam behind `/resume` (NEX-798): list
@@ -1044,6 +1049,9 @@ func (m *Model) submitComposer() tea.Cmd {
 		// slash-prefixed forms (and Ctrl+C, see handleKey) quit, so you can
 		// still literally say "exit" to Claude without leaving.
 		return tea.Quit
+	}
+	if c, args, ok := slashDispatch(text); ok {
+		return c.run(m, args)
 	}
 	model, effort, rest, isOverride, err := ParseOverride(text, m.cfg.KnownAlias)
 	var in contracts.Input
