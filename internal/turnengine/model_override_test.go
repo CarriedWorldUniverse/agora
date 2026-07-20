@@ -1,6 +1,7 @@
 package turnengine
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -71,8 +72,14 @@ func TestManager_DirectAPIProviderRepliesRememberHistory(t *testing.T) {
 		t.Fatal("turn 2 never completed")
 	}
 
-	// Turn 2's lowered request = [user:"remember 7", assistant:"the number is 7", user:"what did I say?"].
+	// Turn 2's lowered request = [user:"remember 7", assistant:"the number is 7",
+	// user:"what did I say?"] + ctxmap's working-memory message appended LAST
+	// (NEX-793 cache-aware placement). Strip that trailing injection and assert
+	// the conversation itself.
 	msgs := provider.LastRequest().Messages
+	if n := len(msgs); n > 0 && strings.HasPrefix(msgs[n-1].Content, "## Working memory") {
+		msgs = msgs[:n-1]
+	}
 	if len(msgs) != 3 {
 		t.Fatalf("turn 2 messages = %d (%+v), want 3 (prior user+assistant + this user)", len(msgs), msgs)
 	}
