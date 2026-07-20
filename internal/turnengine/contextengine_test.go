@@ -25,10 +25,13 @@ func recallCall(id, query string) bridle.ToolInvocation {
 
 // TestManager_ContextEngine_WorkingStateInSystemPrompt drives a turn with
 // one host-tool call (write_file, auto-allowed) and asserts the NEXT
-// request's AppendSystemPrompt carries BOTH DevProfile's own harness note
-// (composition — ctxmap must not clobber it) AND ctxmap's working-state
-// block (the deterministic "your own progress so far" section,
-// memory.go's renderWorkingState).
+// request follows NEX-793's cache-aware placement: AppendSystemPrompt
+// carries DevProfile's own harness note AND ctxmap's framing (the static
+// prefix — ctxmap must not clobber the host note), while the CHURNING
+// working-state block ("your own progress so far", memory.go's
+// renderWorkingState) rides as the LAST message — never in the system
+// prompt, where its per-tool-call mutation busted the provider prefix
+// cache from position 0.
 func TestManager_ContextEngine_WorkingStateInSystemPrompt(t *testing.T) {
 	roots := managerTestRoots(t)
 	policy := defaultPolicy()
@@ -62,11 +65,25 @@ func TestManager_ContextEngine_WorkingStateInSystemPrompt(t *testing.T) {
 	if !strings.Contains(sys, devSystemPrompt) {
 		t.Fatalf("AppendSystemPrompt lost DevProfile's own note (composition broke); got:\n%s", sys)
 	}
-	if !strings.Contains(sys, "Working state") {
-		t.Fatalf("AppendSystemPrompt missing ctxmap's working-state block; got:\n%s", sys)
+	if !strings.Contains(sys, "Working memory (automatic)") {
+		t.Fatalf("AppendSystemPrompt missing ctxmap's framing; got:\n%s", sys)
 	}
-	if !strings.Contains(sys, "note.txt") {
-		t.Fatalf("working-state block does not mention the file this turn wrote (note.txt); got:\n%s", sys)
+	// NEX-793: the churning block must NOT be in the system prompt (that
+	// placement rewrote position 0 on every tool call → zero cache hits) …
+	if strings.Contains(sys, "Working state") {
+		t.Fatalf("working-state block leaked back into the system prompt (cache-busting placement); got:\n%s", sys)
+	}
+	// … it rides as the LAST message instead, carrying this turn's progress.
+	msgs := provider.LastRequest().Messages
+	if len(msgs) == 0 {
+		t.Fatal("no messages in the last request")
+	}
+	last := msgs[len(msgs)-1]
+	if last.Role != "user" || !strings.Contains(last.Content, "Working state") {
+		t.Fatalf("working-state block not in the final message; got: %+v", last)
+	}
+	if !strings.Contains(last.Content, "note.txt") {
+		t.Fatalf("working-state block does not mention the file this turn wrote (note.txt); got:\n%s", last.Content)
 	}
 }
 
