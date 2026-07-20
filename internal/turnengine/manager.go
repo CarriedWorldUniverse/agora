@@ -17,6 +17,7 @@ import (
 	"github.com/CarriedWorldUniverse/agora/internal/toolrunner"
 	bridle "github.com/CarriedWorldUniverse/bridle"
 	bridleadapter "github.com/CarriedWorldUniverse/bridle/ctxmap/adapter"
+	openai "github.com/CarriedWorldUniverse/bridle/provider/openai"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/memory"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/render"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/store"
@@ -55,6 +56,13 @@ type Manager struct {
 	threadID string
 	provider bridle.Provider
 	harness  *bridle.Harness
+	// altHarnesses caches provider-specific harnesses (keyed by provider
+	// identity) for per-turn provider selection (harnessFor). Each is built
+	// over a non-default bridle provider (e.g. OpenAI-compatible at a LiteLLM
+	// base_url) and carries the SAME approval + ctxmap hooks as the default.
+	// Lazily populated; altDetachers holds their ctxmap detach funcs for Close.
+	altHarnesses map[string]providerHarness
+	altDetachers []func()
 	surface  *toolrunner.Surface
 
 	model              string
@@ -369,6 +377,12 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 	if m.detach != nil {
 		defer m.detach()
 	}
+	// Alt-provider harnesses (built lazily by harnessFor for /model entries that
+	// route to a non-default provider) share m.eng but each Attach'd their own
+	// ctxmap hooks — detach them here too so no extraction hooks outlive Run.
+	for _, d := range m.altDetachers {
+		defer d()
+	}
 	if m.eng != nil {
 		defer m.eng.Close()
 	}
@@ -574,6 +588,59 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 // on this goroutine (a cross-goroutine clobber the turnDone handoff does
 // not order against the NEXT turn's set — see the InUserMessage doc
 // comment above for the full trace).
+// providerHarness pairs a built harness with its provider's id (for
+// TurnRequest.Provider).
+type providerHarness struct {
+	harness *bridle.Harness
+	id      bridle.ProviderID
+}
+
+// harnessFor returns the harness (and provider id) to run this turn on. A nil
+// spec (the common case) uses the Manager's default harness/provider. A spec
+// naming a non-default provider gets a lazily-built, hook-configured harness
+// bound to that provider, cached by identity for reuse across turns.
+func (m *Manager) harnessFor(spec *contracts.ProviderSpec) (*bridle.Harness, bridle.ProviderID, error) {
+	if spec == nil || spec.Name == "" {
+		return m.harness, m.provider.Name(), nil
+	}
+	key := spec.Name + "|" + spec.BaseURL
+	if m.altHarnesses == nil {
+		m.altHarnesses = map[string]providerHarness{}
+	}
+	if ph, ok := m.altHarnesses[key]; ok {
+		return ph.harness, ph.id, nil
+	}
+	prov, err := buildProvider(spec)
+	if err != nil {
+		return nil, "", err
+	}
+	h := bridle.NewHarness(prov)
+	// Same hooks as the default harness so the approval gate and working-state
+	// context apply to every provider, not just the subscription one.
+	h.RegisterBeforeToolCall(m.beforeToolCall)
+	if m.eng != nil {
+		m.altDetachers = append(m.altDetachers, bridleadapter.Attach(h, m.eng))
+	}
+	m.altHarnesses[key] = providerHarness{harness: h, id: prov.Name()}
+	return h, prov.Name(), nil
+}
+
+// buildProvider constructs a bridle provider from a per-turn spec. "openai" is
+// the OpenAI-compatible provider (chat/completions) at spec.BaseURL — the path
+// for local models behind a LiteLLM gateway; the key defaults to "dummy".
+func buildProvider(spec *contracts.ProviderSpec) (bridle.Provider, error) {
+	switch spec.Name {
+	case "openai":
+		key := spec.APIKey
+		if key == "" {
+			key = "dummy"
+		}
+		return openai.NewWithBaseURL(key, spec.BaseURL), nil
+	default:
+		return nil, fmt.Errorf("unknown provider %q (known: openai)", spec.Name)
+	}
+}
+
 func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, input contracts.Input, out chan<- contracts.Event, done chan<- contracts.Event) {
 	emit := func(ev contracts.Event) {
 		ev.ThreadID = m.threadID
@@ -618,21 +685,31 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 	if input.Model != "" {
 		model = input.Model
 	}
+	// Per-turn PROVIDER selection: a /model entry may name a non-default bridle
+	// provider (e.g. the OpenAI-compatible provider at a LiteLLM base_url for a
+	// local model). harnessFor returns the harness bound to that provider —
+	// same approval + ctxmap hooks — so agora talks to any bridle provider
+	// natively instead of forcing the Anthropic API. Nil spec = default.
+	harness, providerID, herr := m.harnessFor(input.Provider)
+	if herr != nil {
+		emit(contracts.Event{Type: contracts.EvError, Payload: mustMarshal(errorPayload{Message: herr.Error()})})
+		terminal(contracts.Event{
+			Type:    contracts.EvTurnFailed,
+			Payload: mustMarshal(turnFailedPayload{Interrupted: false}),
+		})
+		return
+	}
 	req := bridle.TurnRequest{
-		Provider:           m.provider.Name(),
+		Provider:           providerID,
 		Model:              model,
 		AppendSystemPrompt: m.appendSystemPrompt,
 		UserMessage:        input.Text,
 		MaxSteps:           m.maxSteps,
 		Tools:              toolDefsFromSpecs(toolSpecs),
 		Session:            m.turnSession(),
-		// Per-turn provider routing: a /model entry that names a non-default
-		// endpoint (LiteLLM/local) supplies ANTHROPIC_BASE_URL + a key here so
-		// this turn routes there; empty for the default subscription provider.
-		ProviderEnv: input.ProviderEnv,
 	}
 
-	result, err := m.harness.RunTurn(turnCtx, req, newSurfaceRunner(m.surface), sink)
+	result, err := harness.RunTurn(turnCtx, req, newSurfaceRunner(m.surface), sink)
 
 	switch result.StopReason {
 	case bridle.StopReasonModelDone, bridle.StopReasonMaxSteps:

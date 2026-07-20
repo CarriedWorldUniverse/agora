@@ -85,29 +85,33 @@ func TestLoadModelRegistry_LocalOverridesGlobal(t *testing.T) {
 	}
 }
 
-func TestModelEntry_ProviderEnv(t *testing.T) {
-	if (ModelEntry{Model: "claude-sonnet-5"}).ProviderEnv() != nil {
-		t.Fatal("default (no base_url) ProviderEnv should be nil")
+func TestModelEntry_ProviderSpec(t *testing.T) {
+	if (ModelEntry{Model: "claude-sonnet-5"}).ProviderSpec() != nil {
+		t.Fatal("default (no base_url) ProviderSpec should be nil")
 	}
-	pe := (ModelEntry{Model: "kimi-k3", BaseURL: "http://x:4000"}).ProviderEnv()
-	if pe["ANTHROPIC_BASE_URL"] != "http://x:4000" || pe["ANTHROPIC_API_KEY"] != "dummy" {
-		t.Fatalf("local ProviderEnv = %v, want base_url + dummy key", pe)
+	ps := (ModelEntry{Model: "kimi-k3", BaseURL: "http://x:4000/v1"}).ProviderSpec()
+	if ps == nil || ps.Name != "openai" || ps.BaseURL != "http://x:4000/v1" {
+		t.Fatalf("local ProviderSpec = %+v, want openai @ base_url", ps)
 	}
-	lit := (ModelEntry{Model: "m", BaseURL: "http://x", APIKey: "lit"}).ProviderEnv()
-	if lit["ANTHROPIC_API_KEY"] != "lit" {
+	// Empty api_key is left empty here — the turn engine defaults it to "dummy".
+	if ps.APIKey != "" {
+		t.Fatalf("APIKey = %q, want empty (engine defaults to dummy)", ps.APIKey)
+	}
+	lit := (ModelEntry{Model: "m", BaseURL: "http://x", APIKey: "lit"}).ProviderSpec()
+	if lit.APIKey != "lit" {
 		t.Fatal("literal api_key not honored")
 	}
 	t.Setenv("AGORA_TEST_KEY", "from-env")
-	env := (ModelEntry{Model: "m", BaseURL: "http://x", APIKey: "$AGORA_TEST_KEY"}).ProviderEnv()
-	if env["ANTHROPIC_API_KEY"] != "from-env" {
+	env := (ModelEntry{Model: "m", BaseURL: "http://x", APIKey: "$AGORA_TEST_KEY"}).ProviderSpec()
+	if env.APIKey != "from-env" {
 		t.Fatal("$ENV api_key not resolved")
 	}
 	f := filepath.Join(t.TempDir(), "k")
 	if err := os.WriteFile(f, []byte("from-file\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	file := (ModelEntry{Model: "m", BaseURL: "http://x", APIKey: "@" + f}).ProviderEnv()
-	if file["ANTHROPIC_API_KEY"] != "from-file" {
+	file := (ModelEntry{Model: "m", BaseURL: "http://x", APIKey: "@" + f}).ProviderSpec()
+	if file.APIKey != "from-file" {
 		t.Fatal("@file api_key not resolved/trimmed")
 	}
 }

@@ -124,12 +124,13 @@ type Input struct {
 	// Model/Effort: optional one-shot override on user_message (= %-override).
 	Model  string `json:"model,omitempty"`
 	Effort Effort `json:"effort,omitempty"`
-	// ProviderEnv is per-turn provider auth/routing env (bridle
-	// TurnRequest.ProviderEnv): the TUI sets it from a /model registry entry
-	// that names a non-default endpoint (e.g. ANTHROPIC_BASE_URL + a key for a
-	// LiteLLM/local model) so that turn routes there instead of the default
-	// subscription; empty = default provider.
-	ProviderEnv map[string]string `json:"provider_env,omitempty"`
+	// Provider selects the bridle provider for THIS turn (from a /model
+	// registry entry). Nil = the engine's default provider (the Anthropic
+	// subscription/claudesdk). A non-nil spec (e.g. the OpenAI-compatible
+	// provider at a LiteLLM base_url) routes the turn to that provider natively
+	// — this is what lets agora talk to non-Anthropic models through bridle
+	// rather than forcing everything through the Anthropic API.
+	Provider *ProviderSpec `json:"provider,omitempty"`
 	// ID correlates approval_response/question_response to the request.
 	ID       string   `json:"id,omitempty"`
 	Decision Decision `json:"decision,omitempty"`
@@ -144,6 +145,17 @@ type Input struct {
 	// Key/Value for config messages.
 	Key   string          `json:"key,omitempty"`
 	Value json.RawMessage `json:"value,omitempty"`
+}
+
+// ProviderSpec picks + configures a bridle provider for a single turn. Name is
+// the provider kind ("openai" for an OpenAI-compatible endpoint); BaseURL is
+// that endpoint (e.g. a LiteLLM gateway's /v1); APIKey is the already-resolved
+// credential. Carried on Input.Provider so the turn engine can route a turn to
+// a non-default provider without any Anthropic-shaped workaround.
+type ProviderSpec struct {
+	Name    string `json:"name"`
+	BaseURL string `json:"base_url,omitempty"`
+	APIKey  string `json:"api_key,omitempty"`
 }
 
 // Usage is the per-request token accounting, required on turn.completed.
