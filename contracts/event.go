@@ -124,6 +124,12 @@ type Input struct {
 	// Model/Effort: optional one-shot override on user_message (= %-override).
 	Model  string `json:"model,omitempty"`
 	Effort Effort `json:"effort,omitempty"`
+	// ProviderEnv is per-turn provider auth/routing env (bridle
+	// TurnRequest.ProviderEnv): the TUI sets it from a /model registry entry
+	// that names a non-default endpoint (e.g. ANTHROPIC_BASE_URL + a key for a
+	// LiteLLM/local model) so that turn routes there instead of the default
+	// subscription; empty = default provider.
+	ProviderEnv map[string]string `json:"provider_env,omitempty"`
 	// ID correlates approval_response/question_response to the request.
 	ID       string   `json:"id,omitempty"`
 	Decision Decision `json:"decision,omitempty"`

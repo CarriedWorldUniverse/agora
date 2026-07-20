@@ -7,9 +7,35 @@ import (
 	"sort"
 )
 
-// ModelEntry is one named model in the registry.
+// ModelEntry is one named model in the registry. BaseURL/APIKey are optional:
+// when BaseURL is set the model is served by a non-default endpoint (a LiteLLM
+// gateway / local model), and selecting it routes that turn there (via
+// ProviderEnv: ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY) instead of the default
+// Anthropic subscription. Both empty = the subscription model named by Model.
 type ModelEntry struct {
-	Model string `json:"model"`
+	Model   string `json:"model"`
+	BaseURL string `json:"base_url,omitempty"`
+	APIKey  string `json:"api_key,omitempty"`
+}
+
+// ProviderEnv returns the per-turn provider routing env for this entry, or nil
+// for a default (subscription) entry. For a local/LiteLLM entry it sets
+// ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY — the key intentionally OUTRANKS the
+// ambient subscription OAuth token in the SDK's auth precedence, so the turn
+// goes to the named endpoint. A missing APIKey defaults to "dummy" (LiteLLM
+// accepts any bearer).
+func (e ModelEntry) ProviderEnv() map[string]string {
+	if e.BaseURL == "" {
+		return nil
+	}
+	key := e.APIKey
+	if key == "" {
+		key = "dummy"
+	}
+	return map[string]string{
+		"ANTHROPIC_BASE_URL": e.BaseURL,
+		"ANTHROPIC_API_KEY":  key,
+	}
 }
 
 // ModelRegistry maps a short name (e.g. "sonnet") to its backing model id.
@@ -22,10 +48,18 @@ type ModelRegistry map[string]ModelEntry
 // is missing, unreadable, or corrupt — the TUI must never fail to start over
 // a registry file problem.
 func DefaultModelRegistry() ModelRegistry {
+	// LiteLLM Anthropic-passthrough gateway (robo-dog) for local models.
+	const litellm = "http://100.92.111.3:4000"
 	return ModelRegistry{
+		// Anthropic subscription (default provider — no endpoint).
 		"sonnet": {Model: "claude-sonnet-5"},
 		"opus":   {Model: "claude-opus-4-8"},
 		"haiku":  {Model: "claude-haiku-4-5-20251001"},
+		// Local models via LiteLLM (free; routed by BaseURL + a dummy key).
+		"kimi":          {Model: "kimi-k3", BaseURL: litellm},
+		"glm":           {Model: "glm-4.6", BaseURL: litellm},
+		"deepseek":      {Model: "deepseek-v4-flash", BaseURL: litellm},
+		"deepseek-fast": {Model: "deepseek-v4-flash-fast", BaseURL: litellm},
 	}
 }
 
