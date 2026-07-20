@@ -71,7 +71,14 @@ type Manager struct {
 	// reasoning_content / thinking blocks a stateless model REQUIRES replayed
 	// are provider-shaped, not portable across providers.
 	sessionTails map[string][]bridle.SessionEvent
-	surface      *toolrunner.Surface
+	// tailSeeded marks provider keys whose SessionTail was seeded from the
+	// persisted thread on RESUME (NEX-798): a fresh process starts with empty
+	// in-memory tails, so without seeding a resumed kimi/glm session has
+	// amnesia despite a complete JSONL. Seeding happens once per key, text
+	// messages only (tool items skipped — their provider-shaped RawJSON was
+	// never persisted), capped at seedTailMaxMsgs.
+	tailSeeded map[string]bool
+	surface    *toolrunner.Surface
 
 	model              string
 	appendSystemPrompt string
@@ -687,6 +694,66 @@ type providerHarness struct {
 // provider (the one from WithProvider — normally the claudesdk subscription).
 const defaultProviderKey = "default"
 
+// seedTailMaxMsgs caps how many persisted text messages seed a resumed tail —
+// enough conversation for continuity without re-prefilling an entire long
+// thread on the first resumed turn.
+const seedTailMaxMsgs = 40
+
+// seedTailFromStore populates a direct-API provider's empty SessionTail from
+// the persisted thread, once per provider key (NEX-798 resume). Only user/agent
+// TEXT messages seed — tool call/result items are skipped (their
+// provider-shaped RawJSON was never persisted, and lowerRequest would need it
+// to reconstruct legal tool messages). Errors degrade to an unseeded tail
+// (fresh-conversation behavior, same as before this existed).
+func (m *Manager) seedTailFromStore(ph providerHarness) {
+	if m.store == nil || m.tailSeeded[ph.key] || len(m.sessionTails[ph.key]) > 0 {
+		return
+	}
+	if m.tailSeeded == nil {
+		m.tailSeeded = map[string]bool{}
+	}
+	m.tailSeeded[ph.key] = true // one attempt per key, even on error
+	it, err := m.store.Resume(m.threadID)
+	if err != nil {
+		return
+	}
+	defer it.Close()
+	var msgs []bridle.SessionEvent
+	for {
+		item, ok := it.Next()
+		if !ok {
+			break
+		}
+		var role bridle.SessionRole
+		switch item.Type {
+		case contracts.TIUserMessage:
+			role = bridle.RoleUser
+		case contracts.TIAgentMessage:
+			role = bridle.RoleAssistant
+		default:
+			continue
+		}
+		var p struct {
+			Text string `json:"text"`
+		}
+		b, merr := json.Marshal(item.Payload)
+		if merr != nil || json.Unmarshal(b, &p) != nil || p.Text == "" {
+			continue
+		}
+		msgs = append(msgs, bridle.SessionEvent{Provider: ph.id, Role: role, Content: p.Text})
+	}
+	if len(msgs) > seedTailMaxMsgs {
+		msgs = msgs[len(msgs)-seedTailMaxMsgs:]
+	}
+	if len(msgs) == 0 {
+		return
+	}
+	if m.sessionTails == nil {
+		m.sessionTails = map[string][]bridle.SessionEvent{}
+	}
+	m.sessionTails[ph.key] = msgs
+}
+
 // harnessFor returns the harness to run this turn on. A nil spec (the common
 // case) uses the Manager's default harness/provider. A spec naming a non-default
 // provider gets a lazily-built, hook-configured harness bound to that provider,
@@ -820,6 +887,7 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 	// repeats each turn". Subprocess providers (claudesdk) resume server-side,
 	// so their tail stays empty by design.
 	if ph.directAPI {
+		m.seedTailFromStore(ph)
 		req.SessionTail = m.sessionTails[ph.key]
 	}
 	// Record a direct-api turn's provider+model as the extraction target so
