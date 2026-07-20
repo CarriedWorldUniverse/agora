@@ -8,6 +8,8 @@ github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260720174853-c60c98af4f8d h1:j
 github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260720174853-c60c98af4f8d/go.mod h1:FjRoDAMvb7WlN11eXHbFpHOkqn9Xc8fmNMmPvFOthhk=
 github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260720180103-87d80fdb74a9 h1:fbRFQOEp8HdHn97ojW6u93CJEllNZzRaACwRJVp6+60=
 github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260720180103-87d80fdb74a9/go.mod h1:FjRoDAMvb7WlN11eXHbFpHOkqn9Xc8fmNMmPvFOthhk=
+github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260720181621-536679fe53f2 h1:l9+H1ed0vVTuEMH92c3sydYOH7892IRjkXzEwjSEtk4=
+github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260720181621-536679fe53f2/go.mod h1:FjRoDAMvb7WlN11eXHbFpHOkqn9Xc8fmNMmPvFOthhk=
 github.com/CarriedWorldUniverse/nexus v0.2.1-0.20260529191407-d8a3450956ea h1:IfYiZi1dxuVZfa8Nu6jrtXNk744QEsGNrzgedOFClMs=
 github.com/CarriedWorldUniverse/nexus v0.2.1-0.20260529191407-d8a3450956ea/go.mod h1:HOl9poSAJz9qH+WtZ16sIWT4304VU/CPjKZRPY+8qv8=
 github.com/alecthomas/assert/v2 v2.11.0 h1:2Q9r3ki8+JYXvGsDyBXwH3LcJ+WK5D0gc5E8vS6K3D0=
