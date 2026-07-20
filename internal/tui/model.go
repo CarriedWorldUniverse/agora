@@ -112,10 +112,12 @@ func NewModel(cfg Config) *Model {
 		cfg.Theme = DefaultTheme()
 	}
 	if cfg.ModelRegistry == nil {
-		cfg.ModelRegistry = LoadModelRegistry(userHomeOrDot())
+		cfg.ModelRegistry = LoadModelRegistry(userHomeOrDot(), cwdOrDot())
 	}
 	currentModel := cfg.Model
 	if currentModel == "" {
+		// Convenience: if the config defines a "sonnet" name, start on it;
+		// otherwise start empty and the engine's default model applies.
 		currentModel = cfg.ModelRegistry["sonnet"].Model
 	}
 	return &Model{cfg: cfg, composer: NewComposer(), currentModel: currentModel}

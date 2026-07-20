@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // ModelEntry is one named model in the registry. BaseURL/APIKey are optional:
@@ -19,16 +20,17 @@ type ModelEntry struct {
 }
 
 // ProviderEnv returns the per-turn provider routing env for this entry, or nil
-// for a default (subscription) entry. For a local/LiteLLM entry it sets
+// for a default (subscription) entry. For a local/gateway entry it sets
 // ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY — the key intentionally OUTRANKS the
 // ambient subscription OAuth token in the SDK's auth precedence, so the turn
-// goes to the named endpoint. A missing APIKey defaults to "dummy" (LiteLLM
-// accepts any bearer).
+// goes to the named endpoint. The key is resolved via resolveSecret (a `$ENV`
+// or `@file` reference keeps a real key out of the world-readable models.json);
+// an empty/unresolved key defaults to "dummy" (gateways that accept any bearer).
 func (e ModelEntry) ProviderEnv() map[string]string {
 	if e.BaseURL == "" {
 		return nil
 	}
-	key := e.APIKey
+	key := resolveSecret(e.APIKey)
 	if key == "" {
 		key = "dummy"
 	}
@@ -38,60 +40,71 @@ func (e ModelEntry) ProviderEnv() map[string]string {
 	}
 }
 
-// ModelRegistry maps a short name (e.g. "sonnet") to its backing model id.
-// Loaded from ~/.agora/models.json (LoadModelRegistry); the zero value is
-// not useful on its own — callers needing a ready registry should go
-// through LoadModelRegistry or DefaultModelRegistry.
+// resolveSecret expands an api_key value so real credentials need not live in
+// models.json: "$NAME" reads env var NAME, "@path" reads the file at path
+// (~ expanded, trimmed), anything else is a literal. A missing env var / file
+// yields "" (ProviderEnv then falls back to "dummy").
+func resolveSecret(v string) string {
+	switch {
+	case strings.HasPrefix(v, "$"):
+		return os.Getenv(v[1:])
+	case strings.HasPrefix(v, "@"):
+		p := v[1:]
+		if strings.HasPrefix(p, "~/") {
+			p = filepath.Join(userHomeOrDot(), p[2:])
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(b))
+	default:
+		return v
+	}
+}
+
+// ModelRegistry maps a short name (e.g. "sonnet") to its backing model. It is
+// CONFIGURATION, not built into the binary: it comes entirely from
+// `.agora/models.json` files (LoadModelRegistry). An empty registry is valid —
+// agora still runs on the engine's default model; `/model` just has nothing to
+// list until the operator configures it.
 type ModelRegistry map[string]ModelEntry
 
-// DefaultModelRegistry is the built-in fallback used when ~/.agora/models.json
-// is missing, unreadable, or corrupt — the TUI must never fail to start over
-// a registry file problem.
-func DefaultModelRegistry() ModelRegistry {
-	// LiteLLM Anthropic-passthrough gateway (robo-dog) for local models.
-	const litellm = "http://100.92.111.3:4000"
-	return ModelRegistry{
-		// Anthropic subscription (default provider — no endpoint).
-		"sonnet": {Model: "claude-sonnet-5"},
-		"opus":   {Model: "claude-opus-4-8"},
-		"haiku":  {Model: "claude-haiku-4-5-20251001"},
-		// Local models via LiteLLM (free; routed by BaseURL + a dummy key).
-		"kimi":          {Model: "kimi-k3", BaseURL: litellm},
-		"glm":           {Model: "glm-4.6", BaseURL: litellm},
-		"deepseek":      {Model: "deepseek-v4-flash", BaseURL: litellm},
-		"deepseek-fast": {Model: "deepseek-v4-flash-fast", BaseURL: litellm},
+// modelRegistryDirs are the .agora config locations, in increasing precedence:
+// the user-global home/.agora, then the per-project cwd/.agora which OVERRIDES
+// it (a repo can pin its own models). Both files are optional.
+func modelRegistryDirs(home, cwd string) []string {
+	var dirs []string
+	for _, d := range []string{home, cwd} {
+		if d != "" {
+			dirs = append(dirs, filepath.Join(d, ".agora", "models.json"))
+		}
 	}
+	return dirs
 }
 
-// LoadModelRegistry loads home/.agora/models.json, creating it with
-// DefaultModelRegistry's contents if the file is missing. A corrupt or
-// empty file also falls back to the built-in defaults (best-effort write
-// back to disk is not attempted in that case — an existing bad file is
-// left alone rather than clobbered).
-func LoadModelRegistry(home string) ModelRegistry {
-	path := filepath.Join(home, ".agora", "models.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		reg := DefaultModelRegistry()
-		_ = writeModelRegistry(path, reg)
-		return reg
-	}
-	var reg ModelRegistry
-	if err := json.Unmarshal(data, &reg); err != nil || len(reg) == 0 {
-		return DefaultModelRegistry()
+// LoadModelRegistry reads and MERGES the model registry from the .agora config
+// files — global (home/.agora/models.json) then per-project
+// (cwd/.agora/models.json), the latter overriding by name. Missing files are
+// skipped; a corrupt/unparseable file is skipped (its models ignored) rather
+// than being fatal or clobbered. No models are hardcoded — the config files are
+// the sole source.
+func LoadModelRegistry(home, cwd string) ModelRegistry {
+	reg := ModelRegistry{}
+	for _, path := range modelRegistryDirs(home, cwd) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var m ModelRegistry
+		if json.Unmarshal(data, &m) != nil {
+			continue
+		}
+		for name, entry := range m {
+			reg[name] = entry
+		}
 	}
 	return reg
-}
-
-func writeModelRegistry(path string, reg ModelRegistry) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(reg, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
 }
 
 // Names returns the registry's names sorted alphabetically — the order
@@ -114,4 +127,14 @@ func userHomeOrDot() string {
 		return "."
 	}
 	return home
+}
+
+// cwdOrDot returns the current working directory, or "." if it can't be
+// determined — the per-project half of the .agora model config lookup.
+func cwdOrDot() string {
+	cwd, err := os.Getwd()
+	if err != nil || cwd == "" {
+		return "."
+	}
+	return cwd
 }
