@@ -56,13 +56,17 @@ func TestParseFacts_NoArrayIsEmptyNotError(t *testing.T) {
 	}
 }
 
-func TestParseVerdict_PrecedenceAndThink(t *testing.T) {
+func TestParseVerdict_LastWordWins(t *testing.T) {
 	cases := map[string]extractor.PairVerdict{
-		"SAME":                         extractor.PairSame,
-		"CONTRADICTS":                  extractor.PairContradicts,
-		"DISTINCT":                     extractor.PairDistinct,
-		"not the SAME — CONTRADICTS":   extractor.PairContradicts, // CONTRADICTS wins over SAME
-		"<think>hmm</think>\nDISTINCT": extractor.PairDistinct,
+		"SAME":        extractor.PairSame,
+		"CONTRADICTS": extractor.PairContradicts,
+		"DISTINCT":    extractor.PairDistinct,
+		// The real answer is the LAST verdict word, not the first-by-priority:
+		// a model that reasons through the other candidates before answering
+		// must not be mis-read (this is the store-corruption bug the review found).
+		"This is not DISTINCT, and it does not CONTRADICTS — verdict: SAME": extractor.PairSame,
+		"They look similar but a value differs, so CONTRADICTS":             extractor.PairContradicts,
+		"<think>could be SAME</think>\nDISTINCT":                            extractor.PairDistinct,
 	}
 	for in, want := range cases {
 		got, err := parseVerdict(in)
@@ -72,6 +76,30 @@ func TestParseVerdict_PrecedenceAndThink(t *testing.T) {
 	}
 	if _, err := parseVerdict("I'm not sure"); err == nil {
 		t.Fatal("want error when no verdict word is present")
+	}
+}
+
+func TestParseFacts_StrayBracketsInProse(t *testing.T) {
+	// Trailing prose with a bracket after the real array must not extend the
+	// span past the true close (the review's repro #1).
+	trailing := `[{"statement":"x","kind":"OBSERVED","source":"user"}]  See step [2] for details.`
+	facts, err := parseFacts(trailing)
+	if err != nil || len(facts) != 1 || facts[0].Statement != "x" {
+		t.Fatalf("trailing-bracket: facts=%+v err=%v", facts, err)
+	}
+	// Leading prose with a bracket before the fenced array must not shift start
+	// (the review's repro #2).
+	leading := "[Understood, extracting now]\n```json\n[{\"statement\":\"y\",\"kind\":\"OBSERVED\",\"source\":\"assistant\"}]\n```"
+	facts, err = parseFacts(leading)
+	if err != nil || len(facts) != 1 || facts[0].Statement != "y" {
+		t.Fatalf("leading-bracket: facts=%+v err=%v", facts, err)
+	}
+	// A statement that itself contains a bracket inside its JSON string must
+	// balance correctly (string-literal aware).
+	nested := `[{"statement":"the array is [1,2,3]","kind":"OBSERVED","source":"user"}]`
+	facts, err = parseFacts(nested)
+	if err != nil || len(facts) != 1 || facts[0].Statement != "the array is [1,2,3]" {
+		t.Fatalf("nested-bracket: facts=%+v err=%v", facts, err)
 	}
 }
 

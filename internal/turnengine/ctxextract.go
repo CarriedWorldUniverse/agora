@@ -6,10 +6,20 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/extractor"
 )
+
+// extractTimeout bounds a single extraction model call. Extraction runs on the
+// ctxmap engine's SINGLE serial worker, and Manager.Run's teardown blocks on
+// eng.Close() → that worker draining — so a call that never returns (dead
+// gateway, a stream that never closes) would wedge the worker AND hang shutdown
+// forever. context.Background() is detached from the turn lifecycle, so this
+// timeout is the only cancellation on this path. Generous: a reasoner model's
+// extraction pass can legitimately take tens of seconds.
+const extractTimeout = 120 * time.Second
 
 // activeModelExtractor implements ctxmap's Proposer + PairJudge seams using the
 // harness's OWN active provider/model — no separate extraction tier, no llama.cpp
@@ -47,7 +57,9 @@ func (x *activeModelExtractor) complete(sys, user string) (string, error) {
 	if prov.Capabilities().Category != bridle.CategoryDirectAPI {
 		return "", fmt.Errorf("ctxextract: skipped, provider %q is not direct-api", prov.Name())
 	}
-	res, err := prov.RunTurn(context.Background(), bridle.ProviderRequest{
+	ctx, cancel := context.WithTimeout(context.Background(), extractTimeout)
+	defer cancel()
+	res, err := prov.RunTurn(ctx, bridle.ProviderRequest{
 		AppendSystemPrompt: sys,
 		Model:              model,
 		Messages:           []bridle.ProviderMessage{{Role: "user", Content: user}},
@@ -107,36 +119,86 @@ func buildExtractUser(current extractor.Turn, ctxTurns []extractor.Turn, glossar
 }
 
 // parseFacts pulls the JSON fact array out of a model reply. Robust to thinking
-// preambles (cut after the last </think>) and to ```json fences or surrounding
-// prose (take the outermost [...] span). An empty/"no facts" reply is a valid
-// zero result, not an error.
+// preambles (cut after the last </think>), ```json fences, and prose that itself
+// contains stray brackets ("see step [2]", "[Understood]…"): it tries EACH '['
+// as a candidate array start, balanced-matches its ']' (string-literal aware),
+// and returns the first slice that actually parses as a fact array — so a stray
+// bracket in prose can't extend/shift the span and lose a well-formed batch. An
+// empty / "no facts" reply is a valid zero result, not an error.
 func parseFacts(out string) ([]extractor.FactProposal, error) {
 	s := stripThink(out)
-	start := strings.IndexByte(s, '[')
-	end := strings.LastIndexByte(s, ']')
-	if start < 0 || end < start {
-		// No array at all — treat as "nothing durable this turn" rather than a
-		// hard error, so one terse reply never fails the extraction worker.
-		return nil, nil
-	}
-	var facts []extractor.FactProposal
-	if err := json.Unmarshal([]byte(s[start:end+1]), &facts); err != nil {
-		return nil, fmt.Errorf("ctxextract: fact JSON parse: %w", err)
-	}
-	return facts, nil
-}
-
-// parseVerdict scans for a pair verdict. Order matters: CONTRADICTS and DISTINCT
-// are checked before SAME (a model may say "not the SAME — CONTRADICTS"), same
-// precedence the llama judge uses.
-func parseVerdict(out string) (extractor.PairVerdict, error) {
-	v := stripThink(out)
-	for _, cand := range []extractor.PairVerdict{extractor.PairContradicts, extractor.PairDistinct, extractor.PairSame} {
-		if strings.Contains(v, string(cand)) {
-			return cand, nil
+	for i := 0; i < len(s); i++ {
+		if s[i] != '[' {
+			continue
+		}
+		end := matchBracket(s, i)
+		if end < 0 {
+			continue
+		}
+		var facts []extractor.FactProposal
+		if json.Unmarshal([]byte(s[i:end+1]), &facts) == nil {
+			return facts, nil
 		}
 	}
-	return "", fmt.Errorf("ctxextract: no pair verdict in %q", strings.TrimSpace(out))
+	// No parseable array anywhere — treat as "nothing durable this turn" rather
+	// than a hard error, so a terse/no-facts reply never spams the worker.
+	return nil, nil
+}
+
+// matchBracket returns the index of the ']' that balances the '[' at start,
+// tracking nesting and skipping brackets inside JSON string literals (honoring
+// backslash escapes). Returns -1 if unbalanced.
+func matchBracket(s string, start int) int {
+	depth := 0
+	inStr := false
+	esc := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if inStr {
+			switch {
+			case esc:
+				esc = false
+			case c == '\\':
+				esc = true
+			case c == '"':
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// parseVerdict extracts the pair verdict. The prompt asks the model to "think
+// briefly, then answer" — the real answer is the LAST verdict word in the reply,
+// not the first by priority. Scanning first-match-by-priority (the llama judge's
+// approach, which relied on a terse post-</think> reply) mis-reads a reasoned
+// "not DISTINCT, nor CONTRADICTS — verdict: SAME" as CONTRADICTS, feeding a
+// WRONG verdict into reconciliation. So take the latest-occurring candidate.
+func parseVerdict(out string) (extractor.PairVerdict, error) {
+	v := stripThink(out)
+	best := -1
+	var found extractor.PairVerdict
+	for _, cand := range []extractor.PairVerdict{extractor.PairSame, extractor.PairContradicts, extractor.PairDistinct} {
+		if idx := strings.LastIndex(v, string(cand)); idx > best {
+			best, found = idx, cand
+		}
+	}
+	if best < 0 {
+		return "", fmt.Errorf("ctxextract: no pair verdict in %q", strings.TrimSpace(out))
+	}
+	return found, nil
 }
 
 // stripThink drops everything up to and including a closing </think> tag, so a
