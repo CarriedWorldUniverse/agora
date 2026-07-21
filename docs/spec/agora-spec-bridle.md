@@ -15,7 +15,7 @@ Closes coherence hole #2 (2026-07-15). bridle is the existing Go multi-model lay
 Events (normalized across providers — agora never sees provider wire formats):
 - `text_delta {s}` / `reasoning_delta {s}`
 - `tool_call {id, name, args_json}` — complete calls; bridle assembles streamed arg fragments. Parallel calls emitted in order received.
-- `usage {input, output, cached, reasoning}` — final, per request; required (budget/`/status`/token displays).
+- `usage {input, output, cached, cache_write, reasoning, cost}` — final, per request; required (budget/`/status`/token displays). `input`, `cached`, and `cache_write` are **disjoint** counts (bridle's uncached-only `InputTokens` contract): `input` = uncached prompt tokens at full rate, `cached` = cache re-reads at the discounted rate, `cache_write` = tokens newly written into the cache (Anthropic bills at a premium; zero on OpenAI-shape backends). Total submitted prompt = `input + cached + cache_write`; cache-hit %% = `cached / total`. Providers whose wire shape reports an inclusive prompt total (OpenAI `prompt_tokens`) MUST be normalized to disjoint at the provider layer — the 2026-07-21 status-row bug was the two lanes carrying different semantics through one field.
 - `done {stop_reason: end|tool_calls|max_tokens|refusal}` / `error {class}`.
 - Cancellation via ctx — must abort the upstream request promptly (Esc-interrupt path).
 

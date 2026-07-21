@@ -160,11 +160,18 @@ type ProviderSpec struct {
 
 // Usage is the per-request token accounting, required on turn.completed.
 // Spec: agora-spec-bridle.md §2 (usage event).
+//
+// Input, Cached, and CacheWrite are DISJOINT counts (bridle.Usage's
+// contract): Input is the uncached prompt tokens billed at full rate,
+// Cached the prompt tokens re-read from cache at the discounted rate,
+// CacheWrite the prompt tokens newly written into the cache (billed at a
+// premium on Anthropic). Total prompt size = Input + Cached + CacheWrite.
 type Usage struct {
-	Input     int64 `json:"input"`
-	Output    int64 `json:"output"`
-	Cached    int64 `json:"cached,omitempty"`
-	Reasoning int64 `json:"reasoning,omitempty"`
+	Input      int64 `json:"input"`
+	Output     int64 `json:"output"`
+	Cached     int64 `json:"cached,omitempty"`
+	CacheWrite int64 `json:"cache_write,omitempty"`
+	Reasoning  int64 `json:"reasoning,omitempty"`
 	// Cost is the provider-reported charge for the turn in USD (OpenRouter's
 	// exact upstream cost via the openai provider). 0 = not reported — the
 	// client may estimate from a configured price table instead (the
