@@ -1186,17 +1186,18 @@ func (m *Manager) persistTurn(input contracts.Input, result bridle.TurnResult) {
 }
 
 // mapUsage translates bridle.Usage (per-provider accounting detail) onto
-// contracts.Usage (the wire shape, agora-spec-bridle §2). CacheReadInputTokens
-// maps to Cached — the discounted-rate re-read count is the field
-// contracts.Usage.Cached documents; CacheCreationInputTokens (tokens newly
-// WRITTEN into the cache) has no wire equivalent yet and is dropped rather
-// than double-counted into either Input or Cached.
+// contracts.Usage (the wire shape, agora-spec-bridle §2). The three prompt
+// counts are DISJOINT on both sides of this mapping (bridle.Usage's
+// uncached-only InputTokens contract): Input full-rate, Cached the
+// discounted cache re-reads, CacheWrite the tokens newly written into the
+// cache this turn (Anthropic bills these at a premium; zero elsewhere).
 func mapUsage(u bridle.Usage) contracts.Usage {
 	return contracts.Usage{
-		Input:     int64(u.InputTokens),
-		Output:    int64(u.OutputTokens),
-		Cached:    int64(u.CacheReadInputTokens),
-		Reasoning: int64(u.ReasoningTokens),
-		Cost:      u.CostUSD,
+		Input:      int64(u.InputTokens),
+		Output:     int64(u.OutputTokens),
+		Cached:     int64(u.CacheReadInputTokens),
+		CacheWrite: int64(u.CacheCreationInputTokens),
+		Reasoning:  int64(u.ReasoningTokens),
+		Cost:       u.CostUSD,
 	}
 }

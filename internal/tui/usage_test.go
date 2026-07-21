@@ -22,11 +22,12 @@ func applyUsage(m *Model, u contracts.Usage) {
 
 func TestUsage_AccumulatesAcrossTurns(t *testing.T) {
 	m := testModelWithRegistry(newFakeBackend(), testRegistry())
-	applyUsage(m, contracts.Usage{Input: 1000, Output: 200, Cached: 500, Cost: 0.004})
-	applyUsage(m, contracts.Usage{Input: 3000, Output: 300, Cached: 2500, Cost: 0.001})
+	// Counts are disjoint (contracts.Usage): total submitted = in + cached.
+	applyUsage(m, contracts.Usage{Input: 500, Output: 200, Cached: 500, Cost: 0.004})
+	applyUsage(m, contracts.Usage{Input: 500, Output: 300, Cached: 2500, Cost: 0.001})
 
-	if m.sessIn != 4000 || m.sessOut != 500 || m.sessCached != 3000 {
-		t.Fatalf("totals = in %d out %d cached %d, want 4000/500/3000", m.sessIn, m.sessOut, m.sessCached)
+	if m.sessIn != 1000 || m.sessOut != 500 || m.sessCached != 3000 {
+		t.Fatalf("totals = in %d out %d cached %d, want 1000/500/3000", m.sessIn, m.sessOut, m.sessCached)
 	}
 	if m.sessCost != 0.005 {
 		t.Fatalf("sessCost = %v, want 0.005 (provider-reported costs summed)", m.sessCost)
@@ -54,9 +55,9 @@ func TestUsage_PricingFallbackWhenProviderReportsNoCost(t *testing.T) {
 	m := testModelWithRegistry(newFakeBackend(), reg)
 	m.turnModelID = "claude-opus-4-8" // the model the turn ran on
 
-	// 10k input of which 8k cached, 1k output, NO provider cost:
+	// 2k uncached + 8k cache-read (disjoint), 1k output, NO provider cost:
 	// (2k·$15 + 8k·$1.5 + 1k·$75)/1e6 = (30000+12000+75000)/1e6 = $0.117
-	applyUsage(m, contracts.Usage{Input: 10_000, Output: 1_000, Cached: 8_000})
+	applyUsage(m, contracts.Usage{Input: 2_000, Output: 1_000, Cached: 8_000})
 	if got := m.sessCost; got < 0.1169 || got > 0.1171 {
 		t.Fatalf("sessCost = %v, want ≈0.117 from the price table", got)
 	}
@@ -90,12 +91,37 @@ func TestUsage_NoCostNoPricingOmitsDollar(t *testing.T) {
 
 func TestModelPricing_Cost(t *testing.T) {
 	p := &ModelPricing{Input: 3, Output: 15, CachedInput: 0.3}
-	// 1M fresh input + 1M cached + 1M output = 3 + 0.3 + 15
-	if got := p.Cost(2_000_000, 1_000_000, 1_000_000); got != 18.3 {
+	// Disjoint counts: 1M uncached + 1M cache-read + 1M output = 3 + 0.3 + 15
+	if got := p.Cost(1_000_000, 1_000_000, 0, 1_000_000); got != 18.3 {
 		t.Fatalf("Cost = %v, want 18.3", got)
 	}
-	// cached > input is clamped (defensive; providers shouldn't report it)
-	if got := p.Cost(100, 200, 0); got != 200*0.3/1e6 {
-		t.Fatalf("Cost with cached>input = %v, want cached-only pricing", got)
+	// cache_write unset → writes priced at Anthropic's 1.25× input premium
+	if got := p.Cost(0, 0, 1_000_000, 0); got != 3.75 {
+		t.Fatalf("Cost of 1M cache-writes = %v, want 3.75 (1.25× input default)", got)
+	}
+	// explicit cache_write rate wins over the default
+	pw := &ModelPricing{Input: 3, Output: 15, CacheWrite: 6}
+	if got := pw.Cost(0, 0, 1_000_000, 0); got != 6 {
+		t.Fatalf("Cost with configured cache_write = %v, want 6", got)
+	}
+}
+
+// TestUsage_AnthropicDisjointCachePercent is the "cache percentage comes
+// back wrong for claude" regression (2026-07-21). The Anthropic lane
+// reports input/cached/cache_write DISJOINT — a warm turn is a tiny
+// uncached count next to a large cache-read count. Dividing cached by
+// input alone printed absurd percentages (3800%); the denominator must be
+// the total submitted prompt.
+func TestUsage_AnthropicDisjointCachePercent(t *testing.T) {
+	m := testModelWithRegistry(newFakeBackend(), testRegistry())
+	applyUsage(m, contracts.Usage{Input: 50, Output: 40, Cached: 1900, CacheWrite: 50})
+	row := m.renderStatusRow()
+	for _, want := range []string{"↑2.0k", "cache 95%"} {
+		if !strings.Contains(row, want) {
+			t.Fatalf("status row missing %q:\n%s", want, row)
+		}
+	}
+	if strings.Contains(row, "cache 3800%") {
+		t.Fatalf("cached/input regression is back:\n%s", row)
 	}
 }

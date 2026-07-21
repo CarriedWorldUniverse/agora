@@ -29,23 +29,31 @@ type ModelEntry struct {
 	Pricing *ModelPricing `json:"pricing,omitempty"`
 }
 
-// ModelPricing is USD per 1M tokens by class. CachedInput is the discounted
-// cache-read rate (e.g. 0.1× input on Anthropic models); cached tokens are a
-// SUBSET of input tokens, so cost = (input-cached)·Input + cached·CachedInput
-// + output·Output, all /1e6.
+// ModelPricing is USD per 1M tokens by class. The usage counts it prices
+// are DISJOINT (contracts.Usage): input = uncached full-rate tokens,
+// cached = cache re-reads at CachedInput (e.g. 0.1× input on Anthropic),
+// cacheWrite = tokens newly written into the cache at CacheWrite. When
+// cache_write is not configured, writes are priced at 1.25× Input —
+// Anthropic's 5-minute-cache write premium, and only the Anthropic lane
+// reports cache writes at all (OpenAI-shape backends have no write count).
 type ModelPricing struct {
 	Input       float64 `json:"input"`
 	Output      float64 `json:"output"`
 	CachedInput float64 `json:"cached_input,omitempty"`
+	CacheWrite  float64 `json:"cache_write,omitempty"`
 }
 
-// Cost prices a turn's usage against this table (USD).
-func (p *ModelPricing) Cost(input, cached, output int64) float64 {
-	fresh := input - cached
-	if fresh < 0 {
-		fresh = 0
+// Cost prices a turn's usage against this table (USD). The four counts are
+// disjoint — no subtraction: earlier revisions took OpenAI-inclusive input
+// (cached ⊆ input) and subtracted, which mispriced the Anthropic lane's
+// natively-disjoint counts (and broke the status row's cache%%).
+func (p *ModelPricing) Cost(input, cached, cacheWrite, output int64) float64 {
+	writeRate := p.CacheWrite
+	if writeRate == 0 {
+		writeRate = p.Input * 1.25
 	}
-	return (float64(fresh)*p.Input + float64(cached)*p.CachedInput + float64(output)*p.Output) / 1e6
+	return (float64(input)*p.Input + float64(cached)*p.CachedInput +
+		float64(cacheWrite)*writeRate + float64(output)*p.Output) / 1e6
 }
 
 // ProviderSpec returns the per-turn provider selection for this entry, or nil

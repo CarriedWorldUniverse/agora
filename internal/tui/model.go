@@ -118,10 +118,10 @@ type Model struct {
 	// contribute tokens but no cost. turnModelID records which model the
 	// in-flight turn was sent to, so the fallback prices the RIGHT model even
 	// if /model changes mid-turn.
-	sessIn, sessOut, sessCached int64
-	sessCost                    float64
-	haveUsage                   bool
-	turnModelID                 string
+	sessIn, sessOut, sessCached, sessWrite int64
+	sessCost                               float64
+	haveUsage                              bool
+	turnModelID                            string
 
 	// quitting is set when an exit command arrives while a turn is running
 	// (NEX-798): the turn is interrupted first (so the engine winds down and
@@ -303,9 +303,16 @@ func (m *Model) usageSegment() string {
 	if !m.haveUsage {
 		return ""
 	}
-	seg := fmt.Sprintf(" · ↑%s ↓%s", humanTokens(m.sessIn), humanTokens(m.sessOut))
-	if m.sessIn > 0 {
-		seg += fmt.Sprintf(" · cache %d%%", m.sessCached*100/m.sessIn)
+	// The three prompt counts are disjoint (contracts.Usage): total
+	// submitted = uncached + cache reads + cache writes. ↑ shows the total
+	// (what the model actually received); cache%% is reads over that total.
+	// Earlier revisions divided cached by sessIn alone — right for the old
+	// OpenAI-inclusive input, wildly over 100%% for the Anthropic lane's
+	// disjoint counts.
+	totalIn := m.sessIn + m.sessCached + m.sessWrite
+	seg := fmt.Sprintf(" · ↑%s ↓%s", humanTokens(totalIn), humanTokens(m.sessOut))
+	if totalIn > 0 {
+		seg += fmt.Sprintf(" · cache %d%%", m.sessCached*100/totalIn)
 	}
 	if m.sessCost > 0 {
 		seg += " · " + fmtUSD(m.sessCost)
@@ -332,12 +339,13 @@ func (m *Model) recordUsage(payload []byte) {
 	m.sessIn += u.Input
 	m.sessOut += u.Output
 	m.sessCached += u.Cached
+	m.sessWrite += u.CacheWrite
 	switch {
 	case u.Cost > 0:
 		m.sessCost += u.Cost
 	default:
 		if pr := m.pricingFor(m.turnModelID); pr != nil {
-			m.sessCost += pr.Cost(u.Input, u.Cached, u.Output)
+			m.sessCost += pr.Cost(u.Input, u.Cached, u.CacheWrite, u.Output)
 		}
 	}
 }
