@@ -198,3 +198,33 @@ func TestSubmitComposer_NormalTurnCarriesCurrentModel(t *testing.T) {
 		t.Fatalf("Sent[0] = %+v, want Model=claude-opus-4-8", got)
 	}
 }
+
+// TestNewModel_FlagResolvesRegistryName: `agora --model haiku` must resolve
+// the registry NAME to the real model id + provider spec exactly like /model
+// does. Unresolved, the alias ran down the claudesdk lane (the claude CLI
+// accepts aliases, masking it), pricingFor never matched — the status row
+// silently lost its $ segment — and a base_url name would have run on the
+// wrong provider entirely.
+func TestNewModel_FlagResolvesRegistryName(t *testing.T) {
+	reg := testRegistry()
+	reg["kimi"] = ModelEntry{Model: "kimi-k3", BaseURL: "http://gw/v1"}
+
+	m := NewModel(Config{Model: "haiku", Theme: PlainTheme(), ModelRegistry: reg})
+	if m.currentModel != "claude-haiku-4-5-20251001" {
+		t.Fatalf("currentModel = %q, want the resolved id", m.currentModel)
+	}
+	if m.currentProvider != nil {
+		t.Fatalf("subscription entry must have nil provider, got %+v", m.currentProvider)
+	}
+
+	m = NewModel(Config{Model: "kimi", Theme: PlainTheme(), ModelRegistry: reg})
+	if m.currentModel != "kimi-k3" || m.currentProvider == nil || m.currentProvider.BaseURL != "http://gw/v1" {
+		t.Fatalf("base_url entry: model %q provider %+v, want kimi-k3 via http://gw/v1", m.currentModel, m.currentProvider)
+	}
+
+	// A raw model id that isn't a registry name passes through verbatim.
+	m = NewModel(Config{Model: "claude-opus-4-8", Theme: PlainTheme(), ModelRegistry: reg})
+	if m.currentModel != "claude-opus-4-8" || m.currentProvider != nil {
+		t.Fatalf("raw id: model %q provider %+v, want verbatim + nil", m.currentModel, m.currentProvider)
+	}
+}
