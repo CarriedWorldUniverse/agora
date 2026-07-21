@@ -8,15 +8,33 @@ living only in PR bodies. Keep it current as the specs and code converge.
 
 Status as of main `7ef1b47` (2026-07-17), agora epic NEX-743, units U0–U18 merged.
 
-## 1. The real turn engine is unbuilt (the largest deliberate gap)
-U0–U18 build the **seams + their assembly**. The model-driven turn engine — model
-calls, the tool loop, and interactive approval/question *resume* (an
-`approval_response` continuing an in-flight turn; a blocking question parking then
-resuming) — is intentionally **out of scope**. `io.ScriptedEngine` and the U18
-`conformance/flow_engine.go` (a scripted engine with input-await points that calls
-the real seams) stand in for it. Wherever a spec says "the engine does X"
-interactively, that is the future turn-engine's job. It is gated on **U6 bridle**
-gap-closure (separate repo, still open).
+## 1. The turn engine is BUILT (Phase 2) — plan/question special-casing + MCP wiring remain
+**Revised 2026-07-20** — the original entry here ("the real turn engine is
+unbuilt", the largest deliberate gap) was true at U18 but is stale: Phase 2
+(NEX-777 → NEX-789, plus live-turn fixes #68–#71) shipped
+`internal/turnengine`, a real `io.Engine` over the bridle Harness (funnel
+mode): the approval-gated tool loop (NEX-781 `BeforeToolCall`; NEX-782
+`KindRead`), `ProfileConfig` model/system-prompt/policy resolution
+(NEX-783), protocol-complete tool-call item events (NEX-784, §11), thread
+durability + per-thread claude-sdk session resume (NEX-785), the ctxmap
+context engine (NEX-787), and the in-process launch path (NEX-789 — bare
+`agora` runs the real claudesdk lane with no daemon). Live operation is the
+daily driver. The conformance suite (U18) still drives **scripted** engines
+(`io.ScriptedEngine`, `conformance/flow_engine.go`) by design — fixtures
+don't burn subscription tokens.
+
+Still open (the remainder of the original gap):
+- **plan/question special-casing** — no plan/question tools exist on the
+  fs/exec surface; `KindQuestion`/`KindPlan` sit in the policy table only
+  for completeness, and `question_response` input is currently a no-op
+  (turnengine/manager.go). A blocking question parking then resuming a turn
+  remains future work.
+- **MCP wiring** — `internal/mcp` (U8) is still unconsumed: the turn path
+  wires a nil MCPSource and leaves `TurnRequest.MCP` unset (claudesdk
+  `SupportsMCP=false` — MCP tools ride in `Tools`, not MCP;
+  turnengine/manager.go). `mcp__`-prefixed calls already classify into
+  `ItemMCPToolCall` wire events (sink.go), so the event shape is ready for
+  the wiring ticket.
 
 ## 2. Conformance (U18): structural, not byte-exact, comparison for two flows
 `TestFlowQuestionParkResume` and `TestFlowPodProvision` assert **structural
