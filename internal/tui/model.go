@@ -159,12 +159,23 @@ func NewModel(cfg Config) *Model {
 		cfg.ModelRegistry = LoadModelRegistry(userHomeOrDot(), cwdOrDot())
 	}
 	currentModel := cfg.Model
+	var currentProvider *contracts.ProviderSpec
+	if entry, known := cfg.ModelRegistry[currentModel]; known {
+		// The -model flag names a registry entry: resolve it exactly like
+		// /model does — real model id + provider spec. Left unresolved,
+		// "agora --model haiku" ran the ALIAS down the claudesdk lane (the
+		// claude CLI happens to accept aliases, masking it), pricingFor
+		// never matched (no $ on the status row), and "--model kimi" would
+		// run "kimi" on the subscription lane with no provider at all.
+		currentModel = entry.Model
+		currentProvider = entry.ProviderSpec()
+	}
 	if currentModel == "" {
 		// Convenience: if the config defines a "sonnet" name, start on it;
 		// otherwise start empty and the engine's default model applies.
 		currentModel = cfg.ModelRegistry["sonnet"].Model
 	}
-	return &Model{cfg: cfg, composer: NewComposer(), currentModel: currentModel}
+	return &Model{cfg: cfg, composer: NewComposer(), currentModel: currentModel, currentProvider: currentProvider}
 }
 
 func (m *Model) Init() tea.Cmd {
