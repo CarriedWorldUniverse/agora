@@ -294,3 +294,61 @@ func TestSurface_Handles(t *testing.T) {
 		}
 	}
 }
+
+// recordingSubprocessProvider wraps fake.SubprocessProvider to capture the
+// lowered ProviderRequest — the fake discards it, and the shadowing
+// regression below is entirely about what the request carries.
+type recordingSubprocessProvider struct {
+	*fake.SubprocessProvider
+	lastReq bridle.ProviderRequest
+}
+
+func (p *recordingSubprocessProvider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink bridle.EventSink) (bridle.ProviderResult, error) {
+	p.lastReq = req
+	return p.SubprocessProvider.RunTurn(ctx, req, sink)
+}
+
+// TestManager_SubprocessDefault_NoCtxmapInjection: the live-turn shadowing
+// regression (2026-07-21). A subprocess-category default provider (the
+// claudesdk lane) lowers Messages via LastUserPrompt — so ctxmap's
+// trailing working-memory user message SHADOWED the operator's real text,
+// and every turn arrived at the model as just the empty memory scaffold
+// ("standing by, no task received"). The Manager must NOT attach ctxmap
+// injection to a subprocess default harness: the engine still constructs
+// (alt direct-api harnesses share it), but the subprocess request carries
+// no working-memory message and the operator's text is the LAST user
+// message the provider sees.
+func TestManager_SubprocessDefault_NoCtxmapInjection(t *testing.T) {
+	provider := &recordingSubprocessProvider{SubprocessProvider: fake.NewSubprocessProvider(
+		fake.SubprocessStep{Text: "ack", StopReason: bridle.StopReasonModelDone},
+		fake.SubprocessStep{Text: "ack2", StopReason: bridle.StopReasonModelDone},
+	)}
+	m, in, out, runErr := newTestManagerWithStore(t, "th_subproc_ctx", nil, provider)
+
+	if m.eng == nil {
+		t.Fatal("context engine did not construct — it must still exist for alt direct-api harnesses")
+	}
+	if m.detach != nil {
+		t.Fatal("ctxmap injection attached to a subprocess default harness — trailing memory message would shadow the operator's prompt")
+	}
+
+	runTurnAndDrain(t, m, in, out, runErr, "first turn")
+	runTurnAndDrain(t, m, in, out, runErr, "read the docs/spec")
+
+	msgs := provider.lastReq.Messages
+	if len(msgs) == 0 {
+		t.Fatal("no messages lowered to the subprocess provider")
+	}
+	for _, msg := range msgs {
+		if strings.Contains(msg.Content, "## Working memory") {
+			t.Fatalf("working-memory block leaked into a subprocess request message: %q", msg.Content)
+		}
+	}
+	if strings.Contains(provider.lastReq.AppendSystemPrompt, "## Working memory") {
+		t.Fatal("working-memory block leaked into the subprocess AppendSystemPrompt")
+	}
+	if last := msgs[len(msgs)-1]; last.Role != "user" || last.Content != "read the docs/spec" {
+		t.Fatalf("last lowered message = %+v; want the operator's text as the final user message (LastUserPrompt takes the trailing run)", last)
+	}
+	endAndClose(t, in, out, runErr)
+}

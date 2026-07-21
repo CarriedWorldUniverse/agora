@@ -389,7 +389,19 @@ func (m *Manager) attachContextEngine() {
 	eng := memory.New(memory.Config{SessionID: m.threadID}, st, rend, prop, nil, judge)
 	eng.EnableWorkingState()
 	m.eng = eng
-	m.detach = bridleadapter.Attach(m.harness, eng)
+	// Attach injection to the DEFAULT harness only when its provider is
+	// direct-api. On a subprocess provider (claudesdk) ctxmap is pure
+	// downside: extraction can't run there (see activeModelExtractor's
+	// direct-api guard), so the injected block is a permanently empty
+	// scaffold — and because the subprocess lane lowers Messages via
+	// LastUserPrompt, a trailing memory message SHADOWED the operator's
+	// real text (live 2026-07-21: every fable turn arrived as just the
+	// working-memory block; the model stood by, task never seen). The
+	// engine is still built: alt direct-api harnesses (harnessFor) attach
+	// to it and get the full working-state + recall path.
+	if m.provider.Capabilities().Category == bridle.CategoryDirectAPI {
+		m.detach = bridleadapter.Attach(m.harness, eng)
+	}
 }
 
 // setActiveModel records a turn's provider+model as the extraction target, but
@@ -783,14 +795,17 @@ func (m *Manager) harnessFor(spec *contracts.ProviderSpec) (providerHarness, err
 	// Same hooks as the default harness so the approval gate and working-state
 	// context apply to every provider, not just the subscription one.
 	h.RegisterBeforeToolCall(m.beforeToolCall)
-	if m.eng != nil {
+	directAPI := prov.Capabilities().Category == bridle.CategoryDirectAPI
+	// ctxmap injection is direct-api only — same rule (and same shadowing
+	// hazard) as the default-harness attach in attachContextEngine.
+	if m.eng != nil && directAPI {
 		m.altDetachers = append(m.altDetachers, bridleadapter.Attach(h, m.eng))
 	}
 	ph := providerHarness{
 		harness:   h,
 		provider:  prov,
 		id:        prov.Name(),
-		directAPI: prov.Capabilities().Category == bridle.CategoryDirectAPI,
+		directAPI: directAPI,
 		key:       key,
 	}
 	m.altHarnesses[key] = ph
