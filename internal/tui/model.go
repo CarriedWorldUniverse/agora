@@ -119,9 +119,9 @@ type Model struct {
 	// in-flight turn was sent to, so the fallback prices the RIGHT model even
 	// if /model changes mid-turn.
 	sessIn, sessOut, sessCached, sessWrite int64
-	sessCost                    float64
-	haveUsage                   bool
-	turnModelID                 string
+	sessCost                               float64
+	haveUsage                              bool
+	turnModelID                            string
 
 	// quitting is set when an exit command arrives while a turn is running
 	// (NEX-798): the turn is interrupted first (so the engine winds down and
