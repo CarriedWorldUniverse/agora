@@ -126,3 +126,29 @@ func TestManager_UnknownProviderErrors(t *testing.T) {
 	}
 	endAndClose(t, in, out, runErr)
 }
+
+// TestManager_EffortLowering: the %effort override reaches the provider, and
+// an input with no effort gets agora's HIGH default (the operator's standing
+// preference — spec: agora default effort = high). Before this lowering the
+// Effort field was parsed by the TUI and then silently DROPPED on the floor.
+func TestManager_EffortLowering(t *testing.T) {
+	provider := fake.NewProvider(fake.Step{Text: "a"}, fake.Step{Text: "b"})
+	_, in, out, runErr := newTestManagerWithStore(t, "th_effort", nil, provider)
+
+	in <- contracts.Input{Type: contracts.InUserMessage, Text: "hi", Effort: contracts.EffortLow}
+	if !drainToTurnCompleted(t, out, testTimeout) {
+		t.Fatal("turn 1 never completed")
+	}
+	if got := provider.LastRequest().Effort; got != "low" {
+		t.Fatalf("turn 1 effort = %q, want the %%-override %q", got, "low")
+	}
+
+	in <- contracts.Input{Type: contracts.InUserMessage, Text: "again"}
+	if !drainToTurnCompleted(t, out, testTimeout) {
+		t.Fatal("turn 2 never completed")
+	}
+	if got := provider.LastRequest().Effort; got != "high" {
+		t.Fatalf("turn 2 effort = %q, want the agora default %q", got, "high")
+	}
+	endAndClose(t, in, out, runErr)
+}
