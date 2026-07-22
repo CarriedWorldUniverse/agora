@@ -2,10 +2,13 @@ package turnengine
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"strings"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
 	"github.com/CarriedWorldUniverse/agora/internal/approval"
+	"github.com/CarriedWorldUniverse/agora/internal/hooks"
 	"github.com/CarriedWorldUniverse/agora/internal/toolrunner"
 	bridle "github.com/CarriedWorldUniverse/bridle"
 )
@@ -237,6 +240,32 @@ func (m *Manager) beforeToolCall(ctx context.Context, c bridle.BeforeToolCallCtx
 		return c, bridle.HookContinue, nil
 	}
 
+	// Lifecycle hooks' PreToolUse (spec §2.1) fires BEFORE the approval
+	// policy decision — a PreToolUse deny blocks the call outright, before
+	// policy is even consulted (it can only ever be MORE restrictive than
+	// whatever policy would have said, since policy hasn't said anything
+	// yet); a PreToolUse allow+updatedInput rewrites c.Call.Args so
+	// Classify/approval.Decide below see the REWRITTEN args, exactly per
+	// spec ("rewrites the tool args before execution"). PreToolUse can
+	// never itself grant execution — see FirePreToolUse's caller contract:
+	// there is no path from a PreToolUse outcome straight to HookContinue
+	// with Deny left false; the call always still runs the real approval
+	// pipeline below. This is what makes the invariant
+	// "policy deny is final; hooks may only restrict further" hold
+	// structurally for PreToolUse (agora-spec-approvals.md §4 invariant 1)
+	// — see TestHooks_PreToolUseAllow_CannotOverridePolicyDeny.
+	if m.hookRunner != nil {
+		pre := m.hookRunner.FirePreToolUse(ctx, m.threadID, htc.turnID, m.model, c.Call.Name, c.Call.Args, c.Call.ID)
+		if pre.Blocked {
+			c.Deny = true
+			c.Err = pre.Reason
+			return c, bridle.HookContinue, nil
+		}
+		if len(pre.UpdatedInput) > 0 {
+			c.Call.Args = pre.UpdatedInput
+		}
+	}
+
 	kind, payload := toolrunner.Classify(toolrunner.Call{Name: c.Call.Name, Args: c.Call.Args}, m.roots)
 	scopeKey := scopeKeyFor(kind, payload)
 
@@ -246,6 +275,25 @@ func (m *Manager) beforeToolCall(ctx context.Context, c bridle.BeforeToolCallCtx
 		SessionID: m.threadID,
 		ScopeKey:  scopeKey,
 	}, m.scopeStore)
+
+	// Lifecycle hooks' PermissionRequest (spec §2.2) runs in the approval
+	// path, after policy but before the UI/Ask rendezvous — folded onto res
+	// via hooks.ApplyPermissionRequest, the SAME already-built, already-
+	// tested seam bridge.go documents as enforcing invariant 1 verbatim
+	// (a hook deny always tightens; a hook allow over a non-allow base is
+	// the ONE logged operator-authored-bypass exception the spec itself
+	// carves out — see bridge.go's doc comment). Audited to stderr here
+	// per ApplyPermissionRequest's doc comment ("Callers MUST emit an audit
+	// line when bypassLogged is true").
+	if m.hookRunner != nil {
+		prAgg := m.hookRunner.FirePermissionRequest(ctx, m.threadID, htc.turnID, m.model, c.Call.Name, c.Call.Args)
+		var bypassLogged bool
+		res, bypassLogged = hooks.ApplyPermissionRequest(res, hooks.PermissionRequestDecision{Behavior: prAgg.Decision, Message: prAgg.Message})
+		if bypassLogged {
+			fmt.Fprintf(os.Stderr, "turnengine: hooks: PermissionRequest bypass — thread=%s turn=%s tool=%s call=%s message=%q\n",
+				m.threadID, htc.turnID, c.Call.Name, c.Call.ID, prAgg.Message)
+		}
+	}
 
 	switch res.Action {
 	case approval.ActionAllow:
