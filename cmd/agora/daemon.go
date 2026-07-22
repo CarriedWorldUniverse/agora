@@ -58,9 +58,14 @@ func runDaemon(args []string) {
 		os.Exit(1)
 	}
 
+	// One process-wide agent-graph handle shared by every thread's engine —
+	// closed at shutdown below (engine.go openAgentGraph's contract).
+	graph, closeGraph := openAgentGraph()
+	defer closeGraph()
+
 	d := daemon.NewDaemon(ctx, daemon.Config{
 		Store:         store,
-		EngineFactory: newEngineFactory(claudesdk.New(), store),
+		EngineFactory: newEngineFactory(claudesdk.New(), store, graph),
 	})
 
 	ln, err := agoraio.ListenUnix(*socketPath)
