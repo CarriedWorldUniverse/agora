@@ -107,6 +107,30 @@ const mcpPrefix = "mcp__"
 // internal/approval.Decide never erroring).
 func Classify(call Call, roots Roots) (contracts.ApprovalKind, any) {
 	switch {
+	case call.Name == ToolAgent:
+		// agent() spawns a whole new agentic subtask — closer to
+		// run_command's "beyond the sandbox-safe set" than to a read or a
+		// file write. No dedicated ApprovalKind exists for it (adding one
+		// ripples into contracts.PolicySet/BuiltinPresets and every preset
+		// table/TUI modal — a cross-cutting change out of this unit's
+		// scope), and re-using KindEscalation would DENY every spawn under
+		// the never-escalate preset (headless/pod default) by construction
+		// — the wrong default for a harness feature meant to let a model
+		// delegate work. KindExec's per-preset defaults (prompt in
+		// prompt/strict, auto in auto-safe/never-escalate) are the
+		// reasonable middle ground, so agent() classifies as KindExec; its
+		// payload reuses ExecPayload's {command} shape (the TUI's existing
+		// exec approval modal renders it with no wire/UI change needed).
+		var a agentArgs
+		if err := json.Unmarshal(call.Args, &a); err != nil {
+			return contracts.KindEscalation, EscalationPayload{Detail: "malformed agent arguments: " + err.Error()}
+		}
+		agentType := a.AgentType
+		if agentType == "" {
+			agentType = "general-purpose"
+		}
+		return contracts.KindExec, ExecPayload{Command: "agent(" + agentType + "): " + a.Prompt}
+
 	case call.Name == ToolRunCommand:
 		var a runCommandArgs
 		if err := json.Unmarshal(call.Args, &a); err != nil {

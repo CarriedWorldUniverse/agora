@@ -36,6 +36,9 @@ const (
 	FamilyWeb      = "web"
 	FamilyBrowser  = "browser"
 	FamilyComputer = "computer"
+	// FamilyAgent exposes the agent() subagent-spawn tool.
+	// Spec: agora-spec-subagents.md §2.
+	FamilyAgent = "agent"
 )
 
 // Harness-intrinsic core tools: engine-registered, always core, present in
