@@ -143,6 +143,8 @@ func itemTypeForTool(name string) contracts.ItemType {
 		return contracts.ItemCommandExecution
 	case toolrunner.ToolWriteFile, toolrunner.ToolEditFile:
 		return contracts.ItemFileChange
+	case contracts.ToolPlan:
+		return contracts.ItemPlan
 	default:
 		if strings.HasPrefix(name, mcpToolPrefix) {
 			return contracts.ItemMCPToolCall
@@ -412,6 +414,16 @@ func (s *turnSink) emitToolStart(ev bridle.ToolCallStart) {
 	case contracts.ItemMCPToolCall:
 		summary = ev.Name
 		payload = mustMarshal(mcpToolCallStartedPayload{Tool: ev.Name, Args: ev.Args})
+	case contracts.ItemPlan:
+		// planning-questions §7 / contracts/testdata/flows/plan_gate.jsonl:
+		// item.started carries NO payload for plan (the artifact only
+		// appears once, on item.completed, below) — summary stashes the
+		// original args (already a marshaled contracts.PlanArtifact) so
+		// emitToolResult can echo it back without re-deriving it from a
+		// ToolCallResult that never carries the artifact itself (our
+		// Deny+Result short-circuit's Result is a plain confirmation
+		// string, not the artifact — see turnengine/approval.go).
+		summary = string(ev.Args)
 	default: // contracts.ItemCommandExecution
 		summary = toolCommandSummary(ev.Name, ev.Args)
 		payload = mustMarshal(commandExecStartedPayload{Command: summary})
@@ -470,6 +482,14 @@ func (s *turnSink) emitToolResult(ev bridle.ToolCallResult) {
 			result = json.RawMessage(`null`)
 		}
 		payload = mustMarshal(mcpToolCallCompletedPayload{Tool: state.summary, Result: result, Error: ev.Err})
+	case contracts.ItemPlan:
+		// item.completed's payload IS the plan artifact verbatim (matching
+		// contracts/testdata/flows/plan_gate.jsonl) — state.summary is the
+		// original tool-call args stashed at Start time (see
+		// emitToolStart), already valid JSON.
+		if state.summary != "" {
+			payload = json.RawMessage(state.summary)
+		}
 	default: // contracts.ItemCommandExecution
 		payload = mustMarshal(commandExecCompletedPayload{Command: state.summary, Output: toolResultText(ev.Result), Error: ev.Err})
 	}

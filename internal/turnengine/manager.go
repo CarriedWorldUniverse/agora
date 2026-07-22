@@ -14,6 +14,8 @@ import (
 	"github.com/CarriedWorldUniverse/agora/contracts"
 	"github.com/CarriedWorldUniverse/agora/internal/approval"
 	agoraio "github.com/CarriedWorldUniverse/agora/internal/io"
+	"github.com/CarriedWorldUniverse/agora/internal/persistence"
+	"github.com/CarriedWorldUniverse/agora/internal/planning"
 	"github.com/CarriedWorldUniverse/agora/internal/subagent"
 	"github.com/CarriedWorldUniverse/agora/internal/toolrunner"
 	bridle "github.com/CarriedWorldUniverse/bridle"
@@ -177,6 +179,29 @@ type Manager struct {
 	// Manager built without WithHooks behaves exactly as it did before this
 	// existed. See WithHooks and hooks_wire.go's file-level doc comment.
 	hookRunner *HookRunner
+
+	// planLog/questionLog bring planning/questions (agora-spec-planning-
+	// questions.md) to the live turn path — see planning.go. Built once in
+	// NewManager over planStore: m.store when WithStore was used (assumed
+	// already Create'd by the caller, same assumption every other m.store
+	// touch in this package makes), or a private, auto-Create'd
+	// persistence.MemStore fallback when it wasn't (planning's PlanLog/
+	// QuestionLog have no state of their own — they REPLAY a
+	// contracts.ThreadStore — so they need somewhere to write even on a
+	// Manager built with no durability at all; "ephemeral pods" is
+	// exactly the MemStore use case planning's own doc comments call out).
+	planLog     *planning.PlanLog
+	questionLog *planning.QuestionLog
+
+	// questionWaiterMu/questionWaiters is the blocking-question rendezvous
+	// registry — id (the QuestionAsked.ID QuestionLog.Ask mints, NOT the
+	// tool call id) -> waiter channel. Mirrors waiterMu/waiters above
+	// (registerWaiter's doc comment) exactly, just keyed differently: a
+	// question's answer is resolved by InQuestionResponse (Run's input
+	// switch), a different Input type than InApprovalResponse, so it needs
+	// its own registry rather than overloading the approval one.
+	questionWaiterMu sync.Mutex
+	questionWaiters  map[string]chan questionOutcome
 }
 
 // now returns the Manager's item-creation-time clock (WithClock override)
@@ -377,8 +402,9 @@ func NewManager(threadID string, provider bridle.Provider, opts ...Option) *Mana
 	// SupportsMCP=false note — MCP tools ride in Tools, not MCP).
 	// Families: fs + exec (sandboxed by m.roots), memory.* (rooted at the
 	// dev identity's memory dir, NOT m.roots — it carries its own grant
-	// outside the fs sandbox, see MemoryFamily's doc comment;
-	// defaultMemoryDir() only computes a path and never touches disk), and
+	// outside the fs sandbox, see MemoryFamily's doc comment), the
+	// harness-intrinsic planning family (`question`/`plan` — advertised
+	// here, executed entirely inside beforeToolCall, see planning.go), and
 	// — only when WithSubagents was wired — the agent() spawn tool (nil
 	// m.subagents, the default, is this package's half of the subagent
 	// depth guard; see that Option's doc comment).
@@ -386,11 +412,25 @@ func NewManager(threadID string, provider bridle.Provider, opts ...Option) *Mana
 		toolrunner.NewFSFamily(m.roots),
 		toolrunner.NewExecFamily(m.roots),
 		toolrunner.NewMemoryFamily(defaultMemoryDir()),
+		toolrunner.NewPlanningFamily(),
 	}
 	if m.subagents != nil {
 		families = append(families, toolrunner.NewAgentFamily(m.subagents, m.threadID))
 	}
 	m.surface = toolrunner.NewSurface(nil, families...)
+
+	// Planning/questions (agora-spec-planning-questions.md) need somewhere
+	// to persist thread items even on a Manager built with no durability
+	// (WithStore unset) — see planLog/questionLog's field doc comment.
+	planStore := m.store
+	if planStore == nil {
+		ms := persistence.NewMemStore()
+		_ = ms.Create(contracts.ThreadMeta{ThreadID: m.threadID, CreatedAt: time.Now().UTC()})
+		planStore = ms
+	}
+	m.planLog = planning.NewPlanLog(planStore)
+	m.questionLog = planning.NewQuestionLog(planStore)
+	m.questionWaiters = make(map[string]chan questionOutcome)
 	// U-C3: gate every tool call through the approval pipeline. Registered
 	// ONCE here (bridle's Hook registration is documented not-safe to call
 	// concurrently with RunTurn, matching this package's existing "wired
@@ -767,10 +807,23 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 					Message:  input.Message,
 				})
 
+			case contracts.InQuestionResponse:
+				// Route straight to the question-waiter registry, exactly
+				// like InApprovalResponse above (see that case's doc
+				// comment — the same reasoning applies verbatim: the
+				// blocking-question rendezvous runs on the TURN goroutine,
+				// inside beforeToolCall, which Run's own turnCancel/
+				// turnDone bookkeeping has no visibility into).
+				// resolveQuestionWaiter no-ops on an unmatched id.
+				var ans contracts.AnswerInput
+				if input.Answer != nil {
+					ans = *input.Answer
+				}
+				m.resolveQuestionWaiter(input.ID, questionOutcome{Answer: ans})
+
 			default:
-				// steer/question_response/config/provision: no tool
-				// loop resume, no context assembly this slice — nothing
-				// to apply yet.
+				// steer/config/provision: no tool loop resume, no context
+				// assembly this slice — nothing to apply yet.
 			}
 		}
 	}

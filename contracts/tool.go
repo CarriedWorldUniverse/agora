@@ -45,6 +45,10 @@ const (
 	// profile (no per-profile toggle wired yet), but it shares the same
 	// toolrunner.Family plumbing.
 	FamilyMemory = "memory"
+	// FamilyPlanning: the harness-intrinsic `question`/`plan` tools
+	// (agora-spec-planning-questions.md §1/§4) — present in every profile,
+	// not a profile-enabled family like the ones above.
+	FamilyPlanning = "planning"
 )
 
 // Harness-intrinsic core tools: engine-registered, always core, present in
