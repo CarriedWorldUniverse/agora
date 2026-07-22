@@ -33,6 +33,9 @@ func isolateSkillsEnv(t *testing.T) string {
 	home := t.TempDir()
 	t.Chdir(wd)
 	t.Setenv("HOME", home)
+	// Windows resolves os.UserHomeDir from USERPROFILE, not HOME —
+	// without this the isolation silently fails on Windows CI.
+	t.Setenv("USERPROFILE", home)
 	return wd
 }
 
