@@ -916,9 +916,20 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 		})
 		return
 	}
+	// Effort (agora-spec-bridle §3): agora's default is HIGH — the operator's
+	// standing preference (xhigh's token cost isn't worth the marginal gain);
+	// xhigh/max stay available per-turn via a %-override. A one-shot
+	// input.Effort (the %-override, contracts/event.go) wins over the default.
+	// Bridle translates per lane (claudesdk passes the ladder through verbatim;
+	// openai clamps xhigh/max→high; lanes with no knob drop it silently).
+	effort := string(contracts.EffortHigh)
+	if input.Effort != "" {
+		effort = string(input.Effort)
+	}
 	req := bridle.TurnRequest{
 		Provider:           ph.id,
 		Model:              model,
+		Effort:             effort,
 		AppendSystemPrompt: m.appendSystemPrompt,
 		UserMessage:        input.Text,
 		MaxSteps:           m.maxSteps,
