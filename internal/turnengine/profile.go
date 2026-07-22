@@ -5,11 +5,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
 	"github.com/CarriedWorldUniverse/agora/internal/approval"
 	"github.com/CarriedWorldUniverse/agora/internal/prompt"
+	"github.com/CarriedWorldUniverse/agora/internal/skills"
 )
 
 // ProfileConfig bundles the per-Manager knobs that used to be scattered
@@ -141,12 +143,37 @@ func resolveDevCore() prompt.Effective {
 // is hardcoded to SystemPromptAppend below rather than resolved from a
 // model registry (no registry lookup is wired into this profile-
 // structuring unit; DevProfile's model is always the claudesdk lane).
+//
+// After the §1 segments (composeBaseSystemPrompt), this appends the skills
+// catalog and AGENTS.md project-context fragments (composeSkillsAndAgents
+// Fragments) — see that function's doc comment for the fold-point rationale
+// and the §1a authority ordering it preserves.
 func composeDevSystemPrompt(model string) string {
 	wd, err := os.Getwd()
 	if err != nil {
 		wd = ""
 	}
 
+	base, composeErr := composeBaseSystemPrompt(model, wd)
+	if composeErr != nil {
+		fmt.Fprintf(os.Stderr, "turnengine: prompt.Compose failed: %v (falling back to the minimal dev note)\n", composeErr)
+		return fallbackDevSystemPrompt
+	}
+
+	extra := composeSkillsAndAgentsFragments(wd)
+	if extra == "" {
+		return base
+	}
+	return base + "\n\n" + extra
+}
+
+// composeBaseSystemPrompt renders the §1 segments 1-4 (core contract,
+// profile block, identity [empty, see devSystemPrompt's doc comment],
+// environment) via internal/prompt.Compose — the pre-this-unit composition,
+// factored out so composeDevSystemPrompt can append the skills/AGENTS.md
+// fragments after it and so tests can pin the segments-only output as the
+// zero-fixtures baseline (promptassembly_test.go).
+func composeBaseSystemPrompt(model, wd string) (string, error) {
 	in := prompt.ComposeInput{
 		Core:    resolveDevCore(),
 		Profile: prompt.ProfileBlock{Text: devSystemPrompt},
@@ -168,12 +195,85 @@ func composeDevSystemPrompt(model string) string {
 		},
 	}
 
-	out, composeErr := prompt.Compose(in)
-	if composeErr != nil {
-		fmt.Fprintf(os.Stderr, "turnengine: prompt.Compose failed: %v (falling back to the minimal dev note)\n", composeErr)
-		return fallbackDevSystemPrompt
+	out, err := prompt.Compose(in)
+	if err != nil {
+		return "", err
 	}
-	return string(out)
+	return string(out), nil
+}
+
+// composeSkillsAndAgentsFragments discovers the skills catalog
+// (agora-spec-skills.md §3.1, developer-role) and AGENTS.md project context
+// (§6, user-role) from wd outward, and renders whatever is found for
+// appending onto the composed system prompt.
+//
+// Fold point: DevProfile's render target is the claudesdk/append lane
+// (composeBaseSystemPrompt's Model.Capabilities.SystemPromptMode above) —
+// it owns only an APPEND slot onto the host CLI's own prompt, so there is
+// no native role separation to fold into; everything becomes ONE append
+// string (agora-spec-prompt.md §1a: bridle normalizes roles per provider,
+// and on an append-mode target that normalization collapses to "append").
+// internal/prompt.ComposeInput has no catalog/fragment slot (only the four
+// §1 segments — see compose.go), so per this unit's scope this appends the
+// developer-role catalog fragment then the user-role AGENTS.md fragment
+// AFTER the composed §1 segments, preserving §1a's authority order (system
+// > developer > user), joined the same way prompt.Compose joins its own
+// segments (two-blank-line separator, see writeSegment in
+// internal/prompt/compose.go).
+//
+// Discovery/parse errors are never fatal to the turn (spec §2: "per-skill
+// parse errors surfaced as warnings") — every warning here goes to stderr,
+// the same pattern resolveDevCore uses for a broken override.
+//
+// Absent skills dirs and no AGENTS.md are the common case and must yield
+// NOTHING appended (byte-identical to the segments-only baseline,
+// promptassembly_test.go's regression pin) — RenderCatalog/
+// RenderAGENTSFragment are only invoked when there is something to render.
+func composeSkillsAndAgentsFragments(wd string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = ""
+	}
+
+	var parts []string
+
+	projectRoot := skills.FindProjectRoot(wd, nil)
+	roots := skills.DefaultRoots(projectRoot, wd, home)
+	all, discoverWarns := skills.Discover(roots)
+	for _, w := range discoverWarns {
+		fmt.Fprintf(os.Stderr, "turnengine: skills discovery warning (%s): %s\n", w.Path, w.Message)
+	}
+	// disabledPaths: nil — the disabled-skills toggle state (§4) and
+	// SkillAllowlist role scoping are explicitly out of this unit's scope.
+	entries := skills.EntriesFromSkills(all, nil)
+	if len(entries) > 0 {
+		// Budget: no model-registry context_window is wired into this
+		// profile-structuring unit (composeBaseSystemPrompt's render-target
+		// note above), so skills.Budget(0) resolves to the spec's documented
+		// no-window-known fallback — agora-spec-skills.md §3.2: "Default = 2%
+		// of context window in tokens (min 1); no window known ⇒ 8000-char
+		// fallback."
+		cat := skills.RenderCatalog(entries, skills.Budget(0))
+		for _, w := range cat.Warnings {
+			fmt.Fprintf(os.Stderr, "turnengine: %s\n", w)
+		}
+		parts = append(parts, cat.Text)
+	}
+
+	docs := skills.DiscoverAGENTSMD(wd, nil, nil, skills.DefaultAGENTSBudgetBytes)
+	for _, w := range docs.Warnings {
+		fmt.Fprintf(os.Stderr, "turnengine: AGENTS.md discovery warning: %s\n", w)
+	}
+	if len(docs.Docs) > 0 {
+		// AGENTS.md is project prose, not authority (agora-spec-prompt.md §5)
+		// — the core contract's "## security" section (see
+		// internal/prompt/builtin/core.md) already states this asymmetry
+		// in-prompt, so no extra framing wrapper is added here beyond
+		// RenderAGENTSFragment's own §6 <INSTRUCTIONS> format.
+		parts = append(parts, skills.RenderAGENTSFragment(wd, "", docs))
+	}
+
+	return strings.Join(parts, "\n\n")
 }
 
 // DevProfile returns the dev (codex/Claude-Code-replacement) ProfileConfig
