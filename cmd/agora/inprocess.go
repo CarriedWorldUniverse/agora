@@ -14,9 +14,7 @@ import (
 	"github.com/CarriedWorldUniverse/agora/contracts"
 	agoraio "github.com/CarriedWorldUniverse/agora/internal/io"
 	"github.com/CarriedWorldUniverse/agora/internal/persistence"
-	"github.com/CarriedWorldUniverse/agora/internal/toolrunner"
 	"github.com/CarriedWorldUniverse/agora/internal/tui"
-	"github.com/CarriedWorldUniverse/agora/internal/turnengine"
 	"github.com/CarriedWorldUniverse/bridle/provider/claudesdk"
 )
 
@@ -38,32 +36,10 @@ import (
 // creds resolve BEFORE the first turn is a separate, later follow-on
 // (blueprint Phase 0 U-A2) — noted, not built here.
 func newInProcessBackend(ctx context.Context, threadID string, attach agoraio.AttachRequest) (tui.Backend, error) {
-	cwd, err := os.Getwd()
+	mgr, store, err := newInProcessManager(threadID, claudesdk.New())
 	if err != nil {
-		return nil, fmt.Errorf("inprocess: getwd: %w", err)
+		return nil, err
 	}
-	roots, err := toolrunner.NewRoots(cwd)
-	if err != nil {
-		return nil, fmt.Errorf("inprocess: build roots for %q: %w", cwd, err)
-	}
-
-	store, err := newInProcessStore()
-	if err != nil {
-		return nil, fmt.Errorf("inprocess: open thread store: %w", err)
-	}
-	if err := ensureThreadCreated(store, threadID, roots.WorkingDir); err != nil {
-		return nil, fmt.Errorf("inprocess: create thread %q: %w", threadID, err)
-	}
-
-	provider := claudesdk.New()
-	mgr := turnengine.NewManager(threadID, provider,
-		turnengine.WithRoots(roots),
-		turnengine.WithStore(store),
-		// Interactive sessions distill each turn into durable facts using the
-		// active model itself (ctxmap fact extraction) — off by default in the
-		// engine, on here.
-		turnengine.WithContextExtraction(true),
-	)
 
 	sess := agoraio.NewSession(ctx, threadID, mgr)
 	att := sess.Attach(agoraio.AttachInfo{

@@ -67,6 +67,13 @@ func main() {
 		runDoctor(os.Args[2:])
 		return
 	}
+	// `agora pipe` (agora-spec-io.md §1): the one-shot/chainable JSONL
+	// stdin/stdout entry over the SAME in-process real engine bare `agora`
+	// falls back to — see pipe.go.
+	if len(os.Args) > 1 && os.Args[1] == "pipe" {
+		runPipe(os.Args[2:])
+		return
+	}
 
 	var (
 		socketPath  = flag.String("socket", defaultSocketPath(), "agora daemon unix socket path")
