@@ -228,6 +228,37 @@ func (m *Manager) beforeToolCall(ctx context.Context, c bridle.BeforeToolCallCtx
 		return c, bridle.HookContinue, nil
 	}
 
+	// agora-spec-planning-questions.md §4/§1: `question`/`plan` are
+	// harness-intrinsic core tools with their own bespoke resolution —
+	// neither fits the generic allow/deny Classify/Decide/askAndWait shape
+	// below (a question resolves with a structured Answer, never
+	// allow/deny; a plain plan update needs no gate at all, only
+	// submit:true does). Both are intercepted HERE, before Classify ever
+	// sees them, and resolved via bridle's Deny+Result short-circuit
+	// (same mechanism ctxmap's own hook uses — see the doc comment above).
+	// §4 also says questions BYPASS the hook stage entirely in v1
+	// (PreToolUse/PermissionRequest are permission-kind concepts) — this
+	// early return, before either hook fires below, is exactly that.
+	// planning.go has the full ask/park/wait and record/gate logic.
+	if c.Call.Name == contracts.ToolQuestion {
+		htc := m.loadHookTurn()
+		if htc == nil {
+			c.Deny = true
+			c.Err = "question: no active turn context"
+			return c, bridle.HookContinue, nil
+		}
+		return m.handleQuestionCall(ctx, htc, c)
+	}
+	if c.Call.Name == contracts.ToolPlan {
+		htc := m.loadHookTurn()
+		if htc == nil {
+			c.Deny = true
+			c.Err = "plan: no active turn context"
+			return c, bridle.HookContinue, nil
+		}
+		return m.handlePlanCall(ctx, htc, c)
+	}
+
 	htc := m.loadHookTurn()
 	if htc == nil {
 		// Defensive only: Run publishes hookTurn (setHookTurn) strictly
