@@ -74,6 +74,12 @@ func main() {
 		runPipe(os.Args[2:])
 		return
 	}
+	// `agora workflow run|list`: the CLI entry point onto the starlark
+	// workflow engine (internal/workflow, agora-spec-workflows.md).
+	if len(os.Args) > 1 && os.Args[1] == "workflow" {
+		runWorkflowCmd(os.Args[2:])
+		return
+	}
 
 	var (
 		socketPath  = flag.String("socket", defaultSocketPath(), "agora daemon unix socket path")
