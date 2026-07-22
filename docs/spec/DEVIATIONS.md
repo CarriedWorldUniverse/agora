@@ -159,6 +159,33 @@ convention for approval payloads):
   `{"tool":"...","result":<raw Result>,"error":"..."}` — both Args and
   Result ride through unmodified (no schema to decode against here).
 
+## 12. NEX-796 (event-time ts + turn_usage): usage also persists for interrupted turns; ts is captured, not clock-injected, at bridle-event granularity
+`agora-spec-persistence.md` §1 describes `turn_usage` as recording "the
+`turn.completed` usage payload" — that event is emitted only on a
+successful turn. `internal/turnengine/manager.go`'s `persistTurn` is called
+from BOTH the success path (`StopReasonModelDone`/`StopReasonMaxSteps`) and
+the interrupted path (`StopReasonAborted`, NEX-798) — this unit appends a
+`turn_usage` item from `persistTurn` unconditionally, so an interrupted
+turn's PARTIAL usage (whatever `bridle.TurnResult.Usage` carries at abort)
+is persisted too, not just a fully-completed turn's. Rationale: the spec's
+own goal — "ccusage-style session/cost history is reconstructable from the
+JSONL alone" — is better served by recording whatever usage actually
+happened than by silently dropping an interrupted turn's cost; a provider
+that bills per-token doesn't refund on interrupt. If this over-reads the
+spec, dropping `turn_usage` on the aborted branch is a one-line revert
+(`internal/turnengine/manager.go`'s two `persistTurn` call sites).
+
+Separately: the ts fix stamps each `ThreadItem` with the REAL bridle event
+time (`turnSink` now records `ToolCallStart`/`ToolCallResult`/`TurnDone`
+wall-clock timestamps as they're `Emit`ted, and `persistTurn` reads them
+back by tool-call-ID after `RunTurn` returns) rather than sourcing ts from
+a Manager-level clock sampled once per item-creation call in a tight loop
+(which would have reproduced the exact "everything looks like it happened
+at the SAME instant" bug this ticket fixes, just moved one layer down). A
+new `Manager.clock`/`WithClock` seam exists for test determinism, but the
+authoritative ts values come from the sink's live event capture, not from
+calling the clock repeatedly at persist time.
+
 ## Open follow-up tickets
 - **NEX-764** — nexus-side dispatch `needs_input` consumer (pod `blocked:
   needs-input` route to context/operator + re-dispatch; a nexus change, not agora).

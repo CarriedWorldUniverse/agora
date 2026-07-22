@@ -149,6 +149,24 @@ type Manager struct {
 	activeMu        sync.Mutex
 	lastDirectProv  bridle.Provider
 	lastDirectModel string
+
+	// clock is the Manager's item-creation-time source (NEX-796: ThreadItem
+	// ts must be EVENT time, not persist-time batch stamp). nil (the
+	// default) means now() falls back to time.Now().UTC(); WithClock lets
+	// tests inject a deterministic/stepping clock to assert per-item ts
+	// ordering without relying on real sleeps.
+	clock func() time.Time
+}
+
+// now returns the Manager's item-creation-time clock (WithClock override)
+// or time.Now().UTC() — the single source runOneTurn/persistTurn/turnSink
+// all stamp ThreadItem.TS from, per-item, at the moment each item's
+// underlying event was actually observed (NEX-796).
+func (m *Manager) now() time.Time {
+	if m.clock != nil {
+		return m.clock()
+	}
+	return time.Now().UTC()
 }
 
 var _ agoraio.Engine = (*Manager)(nil)
@@ -197,6 +215,12 @@ func WithMaxSteps(n int) Option { return func(m *Manager) { m.maxSteps = n } }
 // WithIDGen overrides the default SeqIDGen — tests use this for
 // deterministic turn ids.
 func WithIDGen(g IDGen) Option { return func(m *Manager) { m.idGen = g } }
+
+// WithClock overrides the Manager's item-creation-time source (NEX-796;
+// see Manager.now's doc comment). Tests use this to inject a
+// deterministic/stepping clock and assert per-item ts ordering without
+// relying on real sleeps. Unset (the default) uses time.Now().UTC().
+func WithClock(fn func() time.Time) Option { return func(m *Manager) { m.clock = fn } }
 
 // WithRoots sets the writable-root set (agora-spec-io.md §3a) the fs/exec
 // tool families are constrained to. Unset (the default, zero Roots{}) is
@@ -843,9 +867,15 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 		done <- ev
 	}
 
+	// turnStartTS (NEX-796): the event time this turn's user_message item
+	// is stamped with — captured as close as possible to when the input
+	// actually arrived, before any provider/tool work happens, rather than
+	// at persist time after everything in the turn has already occurred.
+	turnStartTS := m.now()
+
 	emit(contracts.Event{Type: contracts.EvTurnStarted})
 
-	sink := newTurnSink(m.threadID, turnID, out, sendCtx)
+	sink := newTurnSink(m.threadID, turnID, out, sendCtx, m.now)
 
 	// Specs is fetched fresh per turn (not cached at Manager-construction
 	// time) — the brief calls this out explicitly: Specs can be
@@ -932,7 +962,7 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 		// turn.failed; see persistTurn's doc comment for the best-effort
 		// posture and why aborted/errored turns don't persist at v1.
 		if m.store != nil {
-			m.persistTurn(input, result)
+			m.persistTurn(input, result, turnStartTS, sink)
 		}
 		// Extend this provider's replay tail with the turn just completed: the
 		// user message (bridle lowers SessionTail then appends the NEXT turn's
@@ -968,7 +998,7 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 		// silently drop it. (Errored turns still don't persist — an error
 		// means the exchange may never have reached the model at all.)
 		if m.store != nil {
-			m.persistTurn(input, result)
+			m.persistTurn(input, result, turnStartTS, sink)
 		}
 		// Keep the in-memory replay tail consistent with what was persisted,
 		// so an in-session continuation after Esc-interrupt remembers the
@@ -1119,19 +1149,34 @@ type toolResultItemPayload struct {
 }
 
 // persistTurn (U-C6) builds this turn's ThreadItems from input + result
-// and Appends them to m.store. Called only from runOneTurn's SUCCESS case
-// (StopReasonModelDone/StopReasonMaxSteps), only when m.store != nil —
-// see runOneTurn's call site comment for why aborted/errored turns don't
-// persist at v1 (the happy path is what this unit's brief asks to get
-// solid + tested first; a later unit can decide whether a partial/failed
-// turn's tool calls are worth recording too).
+// and Appends them to m.store. Called from runOneTurn's SUCCESS case
+// (StopReasonModelDone/StopReasonMaxSteps) AND its interrupted case
+// (StopReasonAborted, NEX-798 — the exchange up to the interrupt still
+// persists), only when m.store != nil.
 //
 // Item order matches the brief exactly: TIUserMessage (the input that
 // opened this turn) first, then per result.ToolCalls entry, IN ORDER, a
 // TIToolCall/TIToolResult pair, then a trailing TIAgentMessage carrying
 // FinalText — omitted entirely when FinalText is empty (a tool-only turn
 // with no closing model text has nothing to record there; an empty
-// TIAgentMessage would be a lie about what the model said).
+// TIAgentMessage would be a lie about what the model said) — and finally
+// a TITurnUsage item carrying this turn's usage accounting (NEX-796),
+// appended even for an interrupted turn's partial usage: any persisted
+// turn's cost should be reconstructable from the JSONL alone.
+//
+// ts (NEX-796): each item is stamped with the EVENT time it was actually
+// observed, not this call's persist-time batch stamp — turnStartTS (the
+// moment this turn began, captured by runOneTurn before any provider/tool
+// work) for the user_message; sink's recorded per-tool-call Start/Result
+// event times for the tool_call/tool_result pairs (sink.toolCallEventTimes,
+// keyed by the same correlation ID bridle.ToolCallStart/Result share);
+// sink's recorded TurnDone event time (sink.turnDoneEventTime) for the
+// closing agent_message and turn_usage items. Any of these that come back
+// zero (defensive — bridle always emits Start before persistTurn reads
+// TurnResult.ToolCalls, and TurnDone always precedes RunTurn's success
+// return) fall back to turnStartTS/m.now() respectively, rather than
+// leaving TS zero — a zero TS would ask persistence.Append to
+// default-stamp it at persist time, the exact bug this fixes.
 //
 // APPROVAL-decision items (TIApprovalRequest/TIApprovalDecision) are
 // DEFERRED — those decisions happen inside the BeforeToolCall hook
@@ -1151,35 +1196,49 @@ type toolResultItemPayload struct {
 // existing fail-safe-not-fail-closed posture toward side-channel
 // bookkeeping (c.f. Run's doc comment on cancelling an already-finished
 // context being "documented-safe" rather than an error condition).
-func (m *Manager) persistTurn(input contracts.Input, result bridle.TurnResult) {
-	now := time.Now().UTC()
-	items := make([]contracts.ThreadItem, 0, 2+2*len(result.ToolCalls))
+func (m *Manager) persistTurn(input contracts.Input, result bridle.TurnResult, turnStartTS time.Time, sink *turnSink) {
+	items := make([]contracts.ThreadItem, 0, 3+2*len(result.ToolCalls))
 	items = append(items, contracts.ThreadItem{
-		TS:      now,
+		TS:      turnStartTS,
 		Type:    contracts.TIUserMessage,
 		Payload: userMessageItemPayload{Text: input.Text},
 	})
 	for _, tc := range result.ToolCalls {
+		startTS, resultTS, ok := sink.toolCallEventTimes(tc.ID)
+		if !ok {
+			startTS, resultTS = turnStartTS, turnStartTS
+		} else if resultTS.IsZero() {
+			resultTS = startTS
+		}
 		items = append(items,
 			contracts.ThreadItem{
-				TS:      now,
+				TS:      startTS,
 				Type:    contracts.TIToolCall,
 				Payload: toolCallItemPayload{ID: tc.ID, Name: tc.Name, Args: tc.Args},
 			},
 			contracts.ThreadItem{
-				TS:      now,
+				TS:      resultTS,
 				Type:    contracts.TIToolResult,
 				Payload: toolResultItemPayload{ID: tc.ID, Result: tc.Result, Err: tc.Err},
 			},
 		)
 	}
+	closeTS := sink.turnDoneEventTime()
+	if closeTS.IsZero() {
+		closeTS = m.now()
+	}
 	if result.FinalText != "" {
 		items = append(items, contracts.ThreadItem{
-			TS:      now,
+			TS:      closeTS,
 			Type:    contracts.TIAgentMessage,
 			Payload: agentMessageItemPayload{Text: result.FinalText},
 		})
 	}
+	items = append(items, contracts.ThreadItem{
+		TS:      closeTS,
+		Type:    contracts.TITurnUsage,
+		Payload: mapUsage(result.Usage),
+	})
 	if err := m.store.Append(m.threadID, items); err != nil {
 		fmt.Fprintf(os.Stderr, "turnengine: persist turn items for thread %s: %v\n", m.threadID, err)
 	}

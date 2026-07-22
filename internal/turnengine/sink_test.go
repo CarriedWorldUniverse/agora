@@ -14,7 +14,7 @@ import (
 func emitAndCollect(t *testing.T, e bridle.Event) []contracts.Event {
 	t.Helper()
 	out := make(chan contracts.Event, 8)
-	s := newTurnSink("th", "tu", out, context.Background())
+	s := newTurnSink("th", "tu", out, context.Background(), nil)
 	s.Emit(e)
 	close(out)
 	var got []contracts.Event
