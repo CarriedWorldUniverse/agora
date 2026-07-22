@@ -597,3 +597,23 @@ func TestSlashClear_ClearsScreenAndReprintsHeader(t *testing.T) {
 		t.Fatalf("printed = %v; want the re-printed session header", printed)
 	}
 }
+
+// TestSlashCompact_SendsConfigInput: /compact rides the InConfig backend
+// seam (ctxmgr manual compaction) — and refuses while a turn is running
+// (context spec §2 contract 5: between turns only).
+func TestSlashCompact_SendsConfigInput(t *testing.T) {
+	backend := newFakeBackend()
+	m := testModelWithRegistry(backend, testRegistry())
+	m.composer.SetValue("/compact")
+	runCmd(m.submitComposer())
+	if len(backend.Sent) != 1 || backend.Sent[0].Type != contracts.InConfig || backend.Sent[0].Key != "compact" {
+		t.Fatalf("Sent = %+v, want one InConfig{Key:compact}", backend.Sent)
+	}
+
+	m.running = true
+	m.composer.SetValue("/compact")
+	runCmd(m.submitComposer())
+	if len(backend.Sent) != 1 {
+		t.Fatalf("/compact while running must not send; Sent = %+v", backend.Sent)
+	}
+}

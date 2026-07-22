@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CarriedWorldUniverse/agora/contracts"
+
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -66,6 +68,7 @@ func slashCommandTable() []slashCommand {
 		{name: "fork", desc: "branch the thread at the current point", run: runSlashFork},
 		{name: "copy", desc: "copy the last agent message to the clipboard", run: runSlashCopy},
 		{name: "clear", desc: "clear the screen and start a new active cell", run: runSlashClear},
+		{name: "compact", desc: "compact the thread context (between turns)", run: runSlashCompact},
 		{name: "new", desc: "print the command to start a fresh thread", run: runSlashNew},
 		{name: "mcp", desc: "list configured MCP servers", run: runSlashMCP},
 		{name: "init", desc: "create AGENTS.md", run: runSlashInit},
@@ -105,6 +108,7 @@ var helpOrder = []struct{ name, fallbackDesc string }{
 	{"diff", "show git diff"},
 	{"copy", "copy the last agent message to the clipboard"},
 	{"clear", "clear the screen"},
+	{"compact", "compact the thread context"},
 	{"new", "start a fresh thread"},
 	{"init", "create AGENTS.md"},
 	{"mcp", "list configured MCP servers"},
@@ -220,6 +224,21 @@ func runSlashCopy(m *Model, _ string) tea.Cmd {
 	return tea.Batch(
 		m.cfg.Printer(osc52),
 		m.cfg.Printer(fmt.Sprintf("copied %d chars", len(m.lastAgentMessage))),
+	)
+}
+
+// runSlashCompact asks the engine to run a manual compaction episode
+// (context spec §2 contract 5: between turns only — the engine skips the
+// request if a turn is in flight; retry once it ends). The request rides
+// the InConfig{Key:"compact"} backend seam; results surface as the
+// thread.compaction.started/.completed events + a persisted marker item.
+func runSlashCompact(m *Model, _ string) tea.Cmd {
+	if m.running {
+		return m.cfg.Printer("a turn is running — /compact only works between turns")
+	}
+	return tea.Batch(
+		m.send(contracts.Input{Type: contracts.InConfig, Key: "compact"}),
+		m.cfg.Printer("compaction requested"),
 	)
 }
 
