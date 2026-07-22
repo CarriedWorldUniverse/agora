@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -67,6 +68,8 @@ func slashCommandTable() []slashCommand {
 		{name: "clear", desc: "clear the screen and start a new active cell", run: runSlashClear},
 		{name: "new", desc: "print the command to start a fresh thread", run: runSlashNew},
 		{name: "mcp", desc: "list configured MCP servers", run: runSlashMCP},
+		{name: "init", desc: "create AGENTS.md", run: runSlashInit},
+		{name: "diff", desc: "show git diff", run: runSlashDiff},
 		{name: "help", desc: "list available commands", run: runSlashHelp},
 	}
 }
@@ -99,9 +102,11 @@ var helpOrder = []struct{ name, fallbackDesc string }{
 	{"status", "show session status"},
 	{"resume", "list persisted threads for this dir"},
 	{"fork", "branch the thread at the current point"},
+	{"diff", "show git diff"},
 	{"copy", "copy the last agent message to the clipboard"},
 	{"clear", "clear the screen"},
 	{"new", "start a fresh thread"},
+	{"init", "create AGENTS.md"},
 	{"mcp", "list configured MCP servers"},
 	{"help", "list available commands"},
 }
@@ -255,6 +260,59 @@ func runSlashFork(m *Model, _ string) tea.Cmd {
 func runSlashNew(m *Model, _ string) tea.Cmd {
 	id := freshThreadID(cwdOrDot(), m.cfg.Now())
 	return m.cfg.Printer("start fresh: agora -thread " + id)
+}
+
+// runSlashInit creates a starter AGENTS.md in the process cwd (§6: "/init —
+// create AGENTS.md"). AGENTS.md is project-layer CONTEXT, not authority
+// (agora-spec-prompt.md §5/§index): it's read back in via
+// internal/skills' discovery/merge (agora-spec-subagents.md §6) and injected
+// as user-role prose — build/test commands, conventions, gotchas are exactly
+// the kind of project-specific detail that context is for, so the template
+// below is shaped as those three sections. An existing AGENTS.md is never
+// overwritten (that would silently destroy operator edits); file-system
+// errors (permission denied, read-only fs, …) print instead of panicking —
+// this is a local convenience command, not something that should ever take
+// the TUI down.
+func runSlashInit(m *Model, _ string) tea.Cmd {
+	dir := cwdOrDot()
+	path := filepath.Join(dir, "AGENTS.md")
+	if _, err := os.Stat(path); err == nil {
+		return m.cfg.Printer("AGENTS.md already exists")
+	} else if !os.IsNotExist(err) {
+		return m.cfg.Printer("AGENTS.md: " + err.Error())
+	}
+	if err := os.WriteFile(path, []byte(agentsMDTemplate(filepath.Base(dir))), 0o644); err != nil {
+		return m.cfg.Printer("AGENTS.md: " + err.Error())
+	}
+	return m.cfg.Printer("created AGENTS.md — edit it, then /new or restart to pick it up")
+}
+
+// agentsMDTemplate builds the starter AGENTS.md body. name is the project
+// dir's basename (cwdOrDot's "." maps to "this project" so the placeholder
+// heading never reads literally as "# AGENTS.md — .").
+func agentsMDTemplate(name string) string {
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		name = "this project"
+	}
+	return fmt.Sprintf(`# AGENTS.md — %s
+
+Project-specific instructions for agents working in this repository.
+This file is discovered automatically and injected as context for every
+agent session rooted in this directory tree — see
+agora-spec-subagents.md §6.
+
+## Build & test
+
+<!-- how to build this project, how to run its test suite -->
+
+## Conventions
+
+<!-- code style, file layout, naming, anything a newcomer would need told -->
+
+## Gotchas
+
+<!-- known traps: things that look right but aren't, footguns, sharp edges -->
+`, name)
 }
 
 // freshThreadID generates a thread id in the SAME SHAPE cmd/agora's
