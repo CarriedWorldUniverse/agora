@@ -186,6 +186,86 @@ new `Manager.clock`/`WithClock` seam exists for test determinism, but the
 authoritative ts values come from the sink's live event capture, not from
 calling the clock repeatedly at persist time.
 
+## 13. Lifecycle hooks (internal/hooks) wired into the live turn path — v1 scope narrowed on several axes
+`internal/hooks` (the 10-event engine, built fully tested but unconsumed) is
+now wired into `internal/turnengine` (`hookrunner.go` — discovery/trust/
+dispatch — and `hooks_wire.go` — WHERE each event fires) and the in-process
+launch path (`cmd/agora/inprocess.go`'s `DiscoverHooks`/`WithHooks`). Fired:
+`PreToolUse`/`PermissionRequest` (`approval.go`'s `beforeToolCall`, before
+and inside the approval decision respectively), `PostToolUse`
+(`RegisterAfterToolCall` on every harness), `SessionStart` (once per
+`Manager.Run`), `UserPromptSubmit` (once per turn-starting `user_message`),
+`Stop` (once per successfully-completed turn). NOT fired (spec scope note,
+unchanged): `PreCompact`/`PostCompact` (no compaction engine yet),
+`SubagentStart`/`SubagentStop` (no subagent turn path wired to this
+Manager). `internal/hooks` itself is UNCHANGED — every deviation below is in
+the NEW wiring code, not the engine package.
+
+- **Trust/enable state has no home in a real config file yet.** Spec §4.4
+  says state is read from "the User(+session) layer" of the main TOML
+  config — but no central agora TOML config loader exists in this codebase.
+  This unit persists the same information as a JSON sidecar,
+  `~/.agora/hooks-state.json` (`hookrunner.go`'s `hookStateEntry`/
+  `loadHookState`), keyed by the SAME `PositionalKey()` scheme the spec
+  defines. No `/hooks` TUI verb exists yet to WRITE this file (that's a
+  separate, explicitly out-of-scope unit) — until one exists, trusting a
+  hook is a manual JSON edit. A fresh install with no hooks-state.json
+  means every discovered handler resolves `Untrusted` and never runs
+  (`trust.go`'s existing fail-closed default, unmodified) — this is
+  intentional, not a bug: "clone a repo, hooks don't silently execute."
+- **Discovery covers User + Project layers only.** Managed (broker-pushed)
+  and Plugin layers are reserved slots per spec §4.3/§0 — no broker-push
+  mechanism or plugin-source discovery exists to populate them. Git
+  worktree hook-discovery redirection (§4.2's "codex nicety") is not built.
+- **Hook process lifetime is detached from the turn/session `context.Context`**
+  (`hooks_wire.go`'s `fire`, dispatches on `context.Background()` rather
+  than the caller's turn-scoped ctx). A hook's ONLY lifetime bound is its
+  own configured `Timeout` (spec §1.4, default 600s/floor 1s) — a turn
+  ending (and cancelling its `turnCtx`) does not kill an in-flight hook
+  process. This matters most for `async: true` handlers: tying them to
+  `turnCtx` would kill an async hook the instant `Manager.Run` reaps the
+  turn's terminal event, silently downgrading "doesn't block the turn" to
+  "doesn't survive the turn either" — defeating async for anything slower
+  than the turn itself (a notification, an audit upload...). Sync handlers
+  are affected too (no longer cut short by an unrelated turn interrupt),
+  which is judged the more honest reading of "a hook is an external,
+  timeout-bound process," not a turn-lifetime-bound one.
+- **`permission_mode` on hook stdin is a stub, always `"default"`.**
+  `agora-spec-approvals.md` §3 documents this field as derived from a
+  profile/preset resolution (`never-escalate`/`acceptEdits`/etc.) this
+  engine doesn't have yet (`defaultPolicy()` is the only `PolicySet` wired
+  in) and explicitly report-only ("hooks never *configure* via this
+  field") — nothing in this engine reads it back, so the stub cannot
+  silently loosen or tighten any decision. A real profile/preset unit
+  should replace `HookRunner.common`'s hardcoded value.
+- **`SessionStart`/`UserPromptSubmit` `continue:false`/block is logged, not
+  enforced**, beyond what each event's OWN wiring point can naturally do:
+  `UserPromptSubmit` CAN refuse to start the turn (`Run`'s `InUserMessage`
+  case — implemented) but `SessionStart`'s block/stop has no session-abort
+  mechanism to hook into (`Manager.Run` always proceeds once started) — a
+  stderr warning fires instead of silently doing nothing.
+  `additionalContext` from both folds into the nearest existing injection
+  point this engine has (`m.appendSystemPrompt` for SessionStart, a
+  `"\n\n[hook context]\n"`-prefixed suffix on the turn's prompt for
+  UserPromptSubmit) rather than a dedicated "developer message" channel,
+  which doesn't exist in this engine yet.
+- **`Stop` fires only on a genuinely successful turn**
+  (`StopReasonModelDone`/`StopReasonMaxSteps`), never on an aborted or
+  errored turn — spec's Stop/`stop_hook_active` continuation-loop machinery
+  (§2.9/2.10) presumes a real model response happened, which an interrupted
+  or errored turn never produced. A `Looped` (continuation-requested)
+  outcome is logged, not honored: `runOneTurn` has already returned its
+  terminal result by the point `fireStop` runs, and re-entering `RunTurn`
+  for a continuation round is out of this unit's scope.
+- **`PostToolUse` block feedback folds into the tool_result's `Err` field**
+  (`bridle.AfterToolCallCtx.Result.Err`, which `bridle`'s `run.go` already
+  uses verbatim to build the model-facing `tool_result` message) rather
+  than a separate feedback channel — the closest existing mutable surface
+  this hook point has. `continue:false` maps to `bridle.HookAbort`, which
+  ends the turn the same way an interrupt does (`StopReasonAborted` ->
+  `turn.failed{interrupted:true}`); the hook's own stop reason isn't
+  separately surfaced past that.
+
 ## Open follow-up tickets
 - **NEX-764** — nexus-side dispatch `needs_input` consumer (pod `blocked:
   needs-input` route to context/operator + re-dispatch; a nexus change, not agora).

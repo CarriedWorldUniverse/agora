@@ -156,6 +156,13 @@ type Manager struct {
 	// tests inject a deterministic/stepping clock to assert per-item ts
 	// ordering without relying on real sleeps.
 	clock func() time.Time
+
+	// hookRunner is the lifecycle-hooks engine (hooks_wire.go/hookrunner.go
+	// — internal/hooks wired to this turn path). nil (the default) means
+	// hooks are disabled: every Fire* call site checks this first, so a
+	// Manager built without WithHooks behaves exactly as it did before this
+	// existed. See WithHooks and hooks_wire.go's file-level doc comment.
+	hookRunner *HookRunner
 }
 
 // now returns the Manager's item-creation-time clock (WithClock override)
@@ -286,6 +293,16 @@ func WithContextExtraction(enabled bool) Option {
 	return func(m *Manager) { m.ctxExtractEnabled = enabled }
 }
 
+// WithHooks gives the Manager a *HookRunner (DiscoverHooks' return value)
+// so the 10-event lifecycle hooks engine (internal/hooks) actually fires
+// for this thread's turns — see hooks_wire.go for exactly where each event
+// fires. nil (the default, and what DiscoverHooks returns for an operator
+// with no hooks.json) means hooks stay fully disabled, matching every
+// existing Manager's behavior unchanged.
+func WithHooks(hr *HookRunner) Option {
+	return func(m *Manager) { m.hookRunner = hr }
+}
+
 // NewManager builds a Manager for one thread over provider. provider is
 // the injection seam: production callers pass provider/claudesdk.New()
 // (funnel mode, per the blueprint's locked decision #2/#3); tests pass
@@ -339,6 +356,13 @@ func NewManager(threadID string, provider bridle.Provider, opts ...Option) *Mana
 	// during setup" convention) and reused for every turn this Manager
 	// drives — see approval.go's beforeToolCall doc comment.
 	m.harness.RegisterBeforeToolCall(m.beforeToolCall)
+	// Lifecycle hooks' PostToolUse (spec §2.3) fires after a tool call
+	// resolves — bridle runs AfterToolCall on both the executed AND the
+	// Deny-shortcircuited path, so registering here covers every call the
+	// approval gate above lets through OR denies. nil-guarded inside
+	// afterToolCallHook (hooks_wire.go) — a Manager with no WithHooks pays
+	// nothing extra here.
+	m.harness.RegisterAfterToolCall(m.afterToolCallHook)
 	// U-D1: attach the ctxmap context engine AFTER the approval hook above
 	// — bridle runs BeforeToolCall hooks in registration order (hooks.go's
 	// runHooks), so m.beforeToolCall always sees every tool call FIRST.
@@ -511,6 +535,11 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 		defer m.eng.Close()
 	}
 
+	// Lifecycle hooks' SessionStart (spec §2.6) fires once per Run start —
+	// nil-guarded inside (hooks_wire.go), so a Manager with no WithHooks
+	// pays nothing here.
+	m.fireSessionStart(ctx)
+
 	var turnCancel context.CancelFunc
 	// turnDone carries the in-flight turn's TERMINAL event (turn.completed
 	// or turn.failed), not just a bare "done" signal. runOneTurn computes
@@ -646,6 +675,27 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 				// single-threaded loop, in the SAME synchronized step as
 				// the rest of that turn's bookkeeping reset/set.
 				turnID := m.idGen.NextTurnID()
+				// Lifecycle hooks' UserPromptSubmit (spec §2.7) fires here,
+				// before the turn actually starts — turnCtx/turnCancel/done
+				// already exist (set above) so a BLOCKED prompt must undo
+				// that bookkeeping (cancel + nil both back out) rather than
+				// leave a turnDone nobody will ever send on, which would
+				// wedge every later reap point in this loop.
+				if m.hookRunner != nil {
+					if blocked, reason, text := m.fireUserPromptSubmit(ctx, turnID, input.Text); blocked {
+						cancel()
+						turnCancel, turnDone = nil, nil
+						forward(contracts.Event{
+							Type:     contracts.EvError,
+							ThreadID: m.threadID,
+							TurnID:   turnID,
+							Payload:  mustMarshal(errorPayload{Message: "blocked by UserPromptSubmit hook: " + reason}),
+						})
+						continue
+					} else {
+						input.Text = text
+					}
+				}
 				m.setHookTurn(&turnHookCtx{threadID: m.threadID, turnID: turnID, out: out, sendCtx: ctx})
 				go m.runOneTurn(ctx, turnCtx, turnID, input, out, done)
 
@@ -819,6 +869,7 @@ func (m *Manager) harnessFor(spec *contracts.ProviderSpec) (providerHarness, err
 	// Same hooks as the default harness so the approval gate and working-state
 	// context apply to every provider, not just the subscription one.
 	h.RegisterBeforeToolCall(m.beforeToolCall)
+	h.RegisterAfterToolCall(m.afterToolCallHook) // PostToolUse — see NewManager's identical registration.
 	directAPI := prov.Capabilities().Category == bridle.CategoryDirectAPI
 	// ctxmap injection is direct-api only — same rule (and same shadowing
 	// hazard) as the default-harness attach in attachContextEngine.
@@ -967,6 +1018,11 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 
 	switch result.StopReason {
 	case bridle.StopReasonModelDone, bridle.StopReasonMaxSteps:
+		// Lifecycle hooks' Stop (spec §2.9/§2.10) fires here — the model
+		// finished responding, which is the one runOneTurn outcome that
+		// actually matches Stop's semantics (see fireStop's doc comment for
+		// why the aborted/error branches below do NOT fire it).
+		m.fireStop(turnCtx, turnID, model, result.FinalText)
 		// U-C6: persist the transcript core for a SUCCEEDED turn — the
 		// turn's content already streamed to `out` above (sink/emit), so
 		// a store failure here must not turn a real success into a

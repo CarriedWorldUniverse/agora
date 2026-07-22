@@ -32,6 +32,16 @@ import (
 // inprocess.go, and pipe.go all call through here instead of each building
 // their own turnengine.NewManager call.
 func newTurnEngineManager(threadID string, provider bridle.Provider, store contracts.ThreadStore, roots toolrunner.Roots) *turnengine.Manager {
+	// Lifecycle hooks (internal/hooks via turnengine's HookRunner): discover
+	// the operator's hooks.json (user + project layers) per engine
+	// construction — here in the ONE shared seam so the TUI, pipe, and
+	// daemon lanes all fire the same hooks. nil (no hooks.json anywhere,
+	// the common case) costs nothing; discovery warnings are non-fatal
+	// (stderr, never block a session).
+	hookRunner, hookWarnings := turnengine.DiscoverHooks(roots.WorkingDir)
+	for _, w := range hookWarnings {
+		fmt.Fprintln(os.Stderr, w)
+	}
 	return turnengine.NewManager(threadID, provider,
 		turnengine.WithRoots(roots),
 		turnengine.WithStore(store),
@@ -39,6 +49,7 @@ func newTurnEngineManager(threadID string, provider bridle.Provider, store contr
 		// active model itself (ctxmap fact extraction) — off by default in the
 		// engine, on here, for every lane that runs a real turn.
 		turnengine.WithContextExtraction(true),
+		turnengine.WithHooks(hookRunner),
 	)
 }
 

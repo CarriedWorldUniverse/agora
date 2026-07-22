@@ -45,6 +45,14 @@
 //	             TurnDone/TurnError/Warning).
 //	ids.go      — IDGen: injectable turn-id minting (deterministic for
 //	             tests, mirrors ctxmgr's Clock injection pattern).
+//	hookrunner.go — HookRunner: discovers hooks.json (user+project layers),
+//	             resolves trust/enable state, and dispatches handlers over a
+//	             real shell-exec RunFunc (internal/hooks itself never spawns
+//	             a process — this is that seam's production implementation).
+//	hooks_wire.go — WHERE each of the 10 lifecycle-hooks events fires on the
+//	             live turn path (PreToolUse/PermissionRequest/PostToolUse/
+//	             SessionStart/UserPromptSubmit/Stop) — see its file-level
+//	             doc comment, and DEVIATIONS.md #13 for this unit's scope.
 //
 // Provider injection: production callers construct a Manager over
 // provider/claudesdk.New() (funnel mode); tests construct one over
