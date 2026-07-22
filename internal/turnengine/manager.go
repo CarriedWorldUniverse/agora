@@ -14,6 +14,7 @@ import (
 	"github.com/CarriedWorldUniverse/agora/contracts"
 	"github.com/CarriedWorldUniverse/agora/internal/approval"
 	agoraio "github.com/CarriedWorldUniverse/agora/internal/io"
+	"github.com/CarriedWorldUniverse/agora/internal/subagent"
 	"github.com/CarriedWorldUniverse/agora/internal/toolrunner"
 	bridle "github.com/CarriedWorldUniverse/bridle"
 	bridleadapter "github.com/CarriedWorldUniverse/bridle/ctxmap/adapter"
@@ -85,6 +86,19 @@ type Manager struct {
 	maxSteps           int
 	roots              toolrunner.Roots
 	idGen              IDGen
+
+	// subagents wires the agent() tool onto this Manager's Surface (U-agent-
+	// runner) — nil (the default) means no agent() tool at all. This is the
+	// depth guard for subagents-spawning-subagents (agora-spec-subagents.md
+	// §2 "Depth cap (default 1)"): internal/subagent/enginerunner builds
+	// EVERY child Manager without WithSubagents, so a spawned agent's own
+	// Manager never gets this field set and therefore never carries the
+	// agent tool — no recursive spawning is possible structurally, without
+	// needing this package to know anything about subagent.Manager's own
+	// depthCap bookkeeping (belt-and-suspenders: the depth cap still
+	// applies too, for a caller that DOES wire WithSubagents onto a child
+	// against this doc comment's advice).
+	subagents *subagent.Manager
 
 	// U-C3: the BeforeToolCall approval gate. policy/scopeStore feed
 	// approval.Decide (reused verbatim); hookMu/hookTurn and waiterMu/
@@ -238,6 +252,18 @@ func WithClock(fn func() time.Time) Option { return func(m *Manager) { m.clock =
 // zero-config choice for a Manager built without one.
 func WithRoots(roots toolrunner.Roots) Option { return func(m *Manager) { m.roots = roots } }
 
+// WithSubagents adds the agent() tool to this Manager's Surface, backed by
+// mgr — every agent() call a turn on this Manager makes spawns through mgr
+// with THIS Manager's threadID as the parent (agora-spec-subagents.md §2).
+// Unset (the default) means no agent() tool at all — a Manager built
+// without this Option behaves exactly as it did before this Option
+// existed, matching this package's existing "explicit opt-in" convention
+// (c.f. WithStore's doc comment). See the subagents field's doc comment
+// for why this Option is also the depth guard against subagent recursion:
+// internal/subagent/enginerunner (the AgentRunner this Manager type is
+// built to back) never sets this Option on a CHILD Manager it constructs.
+func WithSubagents(mgr *subagent.Manager) Option { return func(m *Manager) { m.subagents = mgr } }
+
 // WithStore gives the Manager a contracts.ThreadStore for durability
 // (U-C6/U-C7): each turn's ThreadItems are Appended at the turn boundary
 // (see runOneTurn's persistTurn call), and the FIRST turn's Session.New
@@ -349,7 +375,14 @@ func NewManager(threadID string, provider bridle.Provider, opts ...Option) *Mana
 	// unit's scope (real MCP wiring is a later ticket; TurnRequest.MCP
 	// also stays unset in runOneTurn, per the blueprint's claudesdk
 	// SupportsMCP=false note — MCP tools ride in Tools, not MCP).
-	m.surface = toolrunner.NewSurface(nil, toolrunner.NewFSFamily(m.roots), toolrunner.NewExecFamily(m.roots))
+	families := []toolrunner.Family{toolrunner.NewFSFamily(m.roots), toolrunner.NewExecFamily(m.roots)}
+	// WithSubagents adds the agent() tool — see that Option's doc comment
+	// for why leaving it unset (nil m.subagents, the default) is also this
+	// package's half of the subagent depth guard.
+	if m.subagents != nil {
+		families = append(families, toolrunner.NewAgentFamily(m.subagents, m.threadID))
+	}
+	m.surface = toolrunner.NewSurface(nil, families...)
 	// U-C3: gate every tool call through the approval pipeline. Registered
 	// ONCE here (bridle's Hook registration is documented not-safe to call
 	// concurrently with RunTurn, matching this package's existing "wired
