@@ -4,6 +4,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -331,6 +334,244 @@ func TestSlashNew_PrintsRelaunchCommand(t *testing.T) {
 	runCmd(m.submitComposer())
 	if len(printed) != 1 || !strings.Contains(printed[0], "start fresh: agora -thread ") {
 		t.Fatalf("printed = %v; want the relaunch hint", printed)
+	}
+}
+
+// TestSlashInit_CreatesAGENTSmd: /init writes a starter AGENTS.md with the
+// three expected section headers, and does not touch the backend.
+func TestSlashInit_CreatesAGENTSmd(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	backend := newFakeBackend()
+	m := testModelWithRegistry(backend, testRegistry())
+	var printed []string
+	m.cfg.Printer = capturingPrinter(&printed)
+
+	m.composer.SetValue("/init")
+	runCmd(m.submitComposer())
+
+	if len(backend.Sent) != 0 {
+		t.Fatalf("/init sent %v to the model, want nothing", backend.Sent)
+	}
+	if len(printed) != 1 || !strings.Contains(printed[0], "created AGENTS.md") {
+		t.Fatalf("printed = %v; want a created-AGENTS.md confirmation", printed)
+	}
+
+	path := filepath.Join(dir, "AGENTS.md")
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("AGENTS.md not written: %v", err)
+	}
+	for _, want := range []string{"# AGENTS.md", "## Build & test", "## Conventions", "## Gotchas"} {
+		if !strings.Contains(string(got), want) {
+			t.Errorf("AGENTS.md missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestSlashInit_AlreadyExists: a second /init leaves the file byte-identical
+// and reports it already exists instead of overwriting.
+func TestSlashInit_AlreadyExists(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	path := filepath.Join(dir, "AGENTS.md")
+	original := []byte("operator's own AGENTS.md content\n")
+	if err := os.WriteFile(path, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	backend := newFakeBackend()
+	m := testModelWithRegistry(backend, testRegistry())
+	var printed []string
+	m.cfg.Printer = capturingPrinter(&printed)
+
+	m.composer.SetValue("/init")
+	runCmd(m.submitComposer())
+
+	if len(backend.Sent) != 0 {
+		t.Fatalf("/init sent %v to the model, want nothing", backend.Sent)
+	}
+	if len(printed) != 1 || printed[0] != "AGENTS.md already exists" {
+		t.Fatalf("printed = %v; want [\"AGENTS.md already exists\"]", printed)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("AGENTS.md was modified: got %q, want unchanged %q", got, original)
+	}
+}
+
+// TestDiffArgsDisallowed_RejectsShellMetacharacters pins the validator
+// slash.go's runSlashDiff checks before ever building an argv/exec.Cmd — the
+// exec path itself (never invoking a shell, exec.CommandContext splits argv
+// directly) is exercised by the non-git-repo and real-repo tests below.
+func TestDiffArgsDisallowed_RejectsShellMetacharacters(t *testing.T) {
+	bad := []string{";rm -rf", "a && b", "a | b", "a & b", "$HOME", "a > b", "a < b", "a `b`", "a\nb"}
+	for _, args := range bad {
+		if !diffArgsDisallowed.MatchString(args) {
+			t.Errorf("diffArgsDisallowed(%q) = false, want true (rejected)", args)
+		}
+	}
+	good := []string{"", "--staged", "-- path/to/file.go", "HEAD~1"}
+	for _, args := range good {
+		if diffArgsDisallowed.MatchString(args) {
+			t.Errorf("diffArgsDisallowed(%q) = true, want false (allowed)", args)
+		}
+	}
+}
+
+// TestSlashDiff_RejectsUnsupportedArgument: end-to-end through submitComposer
+// — a shell-metacharacter argument never reaches exec.Command (if it did,
+// this test's temp cwd has no git repo and no `;rm -rf` target to prove it
+// against, but the validator test above pins that no exec happens at all)
+// and nothing reaches the model.
+func TestSlashDiff_RejectsUnsupportedArgument(t *testing.T) {
+	backend := newFakeBackend()
+	m := testModelWithRegistry(backend, testRegistry())
+	var printed []string
+	m.cfg.Printer = capturingPrinter(&printed)
+
+	m.composer.SetValue("/diff ;rm -rf")
+	runCmd(m.submitComposer())
+
+	if len(backend.Sent) != 0 {
+		t.Fatalf("/diff sent %v to the model, want nothing", backend.Sent)
+	}
+	if len(printed) != 1 || printed[0] != "unsupported /diff argument" {
+		t.Fatalf("printed = %v; want [\"unsupported /diff argument\"]", printed)
+	}
+}
+
+// TestSlashDiff_NonGitRepo_FriendlyError: no crash, no model send, a
+// friendly one-liner when the cwd isn't a git repo at all.
+func TestSlashDiff_NonGitRepo_FriendlyError(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	t.Chdir(t.TempDir())
+
+	backend := newFakeBackend()
+	m := testModelWithRegistry(backend, testRegistry())
+	var printed []string
+	m.cfg.Printer = capturingPrinter(&printed)
+
+	m.composer.SetValue("/diff")
+	runCmd(m.submitComposer())
+
+	if len(backend.Sent) != 0 {
+		t.Fatalf("/diff sent %v to the model, want nothing", backend.Sent)
+	}
+	if len(printed) != 1 || printed[0] != "not a git repository" {
+		t.Fatalf("printed = %v; want [\"not a git repository\"]", printed)
+	}
+}
+
+// TestSlashDiff_EmptyRepo_NoChanges: an initialized git repo with nothing
+// staged/modified reports the friendly "no changes" line, no crash.
+func TestSlashDiff_EmptyRepo_NoChanges(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	t.Chdir(dir)
+
+	backend := newFakeBackend()
+	m := testModelWithRegistry(backend, testRegistry())
+	var printed []string
+	m.cfg.Printer = capturingPrinter(&printed)
+
+	m.composer.SetValue("/diff")
+	runCmd(m.submitComposer())
+
+	if len(backend.Sent) != 0 {
+		t.Fatalf("/diff sent %v to the model, want nothing", backend.Sent)
+	}
+	if len(printed) != 1 || printed[0] != "no changes" {
+		t.Fatalf("printed = %v; want [\"no changes\"]", printed)
+	}
+}
+
+// TestSlashDiff_RendersModifiedFile: a real git repo with one tracked file
+// modified — /diff renders it through DiffCell's own gutter/line-number
+// shape and reaches neither an error path nor the model.
+func TestSlashDiff_RendersModifiedFile(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	if err := os.WriteFile(filepath.Join(dir, "hello.go"), []byte("package hello\n\nfunc old() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "hello.go")
+	run("commit", "-q", "-m", "init")
+	if err := os.WriteFile(filepath.Join(dir, "hello.go"), []byte("package hello\n\nfunc newer() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	backend := newFakeBackend()
+	m := testModelWithRegistry(backend, testRegistry())
+	m.width = 120 // wide enough that the gutter/content doesn't hard-wrap the asserted text
+	var printed []string
+	m.cfg.Printer = capturingPrinter(&printed)
+
+	m.composer.SetValue("/diff")
+	runCmd(m.submitComposer())
+
+	if len(backend.Sent) != 0 {
+		t.Fatalf("/diff sent %v to the model, want nothing", backend.Sent)
+	}
+	if len(printed) != 1 {
+		t.Fatalf("printed = %v; want one block", printed)
+	}
+	out := printed[0]
+	for _, want := range []string{"hello.go", "func old() {}", "func newer() {}"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("/diff output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestParseUnifiedDiff_FallsBackWhenNoFileHeader: input with no recognizable
+// "diff --git" header at all can't be placed into a DiffCell (no path, no
+// line numbers to anchor to) — parseUnifiedDiff reports ok=false so
+// renderDiffOutput falls back to plain text instead of silently dropping it.
+func TestParseUnifiedDiff_FallsBackWhenNoFileHeader(t *testing.T) {
+	_, ok := parseUnifiedDiff("some output with no diff --git header at all\n")
+	if ok {
+		t.Fatal("parseUnifiedDiff ok=true for input with no file header; want false (fallback)")
+	}
+}
+
+// TestRenderDiffOutput_PlainFallback_Sanitized: the plain-text fallback path
+// still sanitizes (finding #3's boundary rule applies here too, since this
+// content is a subprocess's own stdout — not agent content today, but the
+// same rule keeps the invariant "nothing unsanitized reaches the terminal"
+// simple and unconditional).
+func TestRenderDiffOutput_PlainFallback_Sanitized(t *testing.T) {
+	out := renderDiffOutput("no diff --git header here\x1b[31mred\x1b[0m\n", 60, PlainTheme())
+	if strings.Contains(out, "\x1b") {
+		t.Fatalf("plain fallback did not sanitize: %q", out)
+	}
+	if !strings.Contains(out, "red") {
+		t.Fatalf("plain fallback dropped content: %q", out)
 	}
 }
 
