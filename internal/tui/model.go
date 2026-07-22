@@ -62,6 +62,17 @@ type ThreadLister interface {
 	ThreadSummaries(wd string) ([]contracts.ThreadMeta, error)
 }
 
+// ThreadForker is the OPTIONAL backend seam behind `/fork`: mirrors
+// ThreadLister's pattern. seq is the persisted item Seq to fork at (the
+// TUI tracks the highest Seq it has seen on the wire, m.lastItemSeq — see
+// handleEvent); the in-process backend implements it over the LocalStore's
+// Fork (internal/persistence, no copying: the child thread reads through
+// the parent up to seq). Daemon/ws backends that don't implement it
+// degrade to a "not available" message, same as /resume.
+type ThreadForker interface {
+	ForkThread(threadID string, seq int64) (newID string, err error)
+}
+
 // approvalEntry is one queued approval/question/plan request (§3: "Requests
 // queue and interleave with streaming; shown in order").
 type approvalEntry struct {
@@ -122,6 +133,19 @@ type Model struct {
 	sessCost                               float64
 	haveUsage                              bool
 	turnModelID                            string
+
+	// lastAgentMessage is the most recently FINALIZED agent reply's raw text
+	// (markdown, as streamed) — the source `/copy` puts on the clipboard.
+	// Set from stream.Raw() at turn.completed, before the stream is dropped
+	// (interrupted/failed turns leave it unchanged: a partial reply isn't
+	// "the last response").
+	lastAgentMessage string
+	// lastItemSeq is the highest persisted item Seq seen on the wire so far
+	// (every item.* event carries one in its ItemRef — sink.go assigns it
+	// from the same store.Append call that makes it durable). `/fork` forks
+	// the thread at this Seq: "the current latest point" without a second
+	// round-trip to ask the store what its own last item is.
+	lastItemSeq int64
 
 	// quitting is set when an exit command arrives while a turn is running
 	// (NEX-798): the turn is interrupted first (so the engine winds down and
@@ -517,6 +541,14 @@ func unresolvedIDs(qs []contracts.QuestionAsked) []string {
 // tea.Cmds (Printer calls for finalized content). Kept separate from
 // Update's tea.Msg switch so it's directly unit-testable.
 func (m *Model) handleEvent(ev contracts.Event) []tea.Cmd {
+	// §"the current latest point" for /fork: every item-carrying event names
+	// the persisted Seq the store just assigned it (sink.go). Track the max
+	// seen so far regardless of event/item type — cheaper than a round-trip
+	// to the store when /fork runs, and always current since the last thing
+	// this attachment saw.
+	if ev.Item != nil && ev.Item.Seq > m.lastItemSeq {
+		m.lastItemSeq = ev.Item.Seq
+	}
 	var cmds []tea.Cmd
 	switch ev.Type {
 	case contracts.EvThreadStarted:
@@ -561,6 +593,11 @@ func (m *Model) handleEvent(ev contracts.Event) []tea.Cmd {
 	case contracts.EvTurnCompleted, contracts.EvTurnFailed:
 		if ev.Type == contracts.EvTurnCompleted {
 			m.recordUsage(ev.Payload)
+			if m.stream != nil {
+				if raw := strings.TrimSpace(m.stream.Raw()); raw != "" {
+					m.lastAgentMessage = raw
+				}
+			}
 		}
 		if m.stream != nil {
 			for _, line := range m.stream.Finalize() {
@@ -1071,6 +1108,23 @@ func (m *Model) submitComposer() tea.Cmd {
 	}
 	if c, args, ok := slashDispatch(text); ok {
 		return c.run(m, args)
+	}
+	// §6a containment (NEX-795): from here on, "text" starting with "/" is
+	// EITHER the escape hatch (backslash-slash — stripped, sent verbatim) OR
+	// blocked locally (registry-name sugar dispatches as /model <name>;
+	// anything else known-unknown gets a local error, never the model). A
+	// leading SPACE is the other escape hatch, and needs no handling here:
+	// text starting with " " already fails HasPrefix(text, "/") below and
+	// falls straight through to the ordinary message path, verbatim,
+	// leading space and all.
+	switch {
+	case strings.HasPrefix(text, `\/`):
+		text = "/" + strings.TrimPrefix(text, `\/`)
+	case strings.HasPrefix(text, "/"):
+		if cmd, ok := m.dispatchRegistrySugar(text); ok {
+			return cmd
+		}
+		return m.cfg.Printer(m.unknownSlashMessage(text))
 	}
 	model, effort, rest, isOverride, err := ParseOverride(text, m.cfg.KnownAlias)
 	var in contracts.Input
