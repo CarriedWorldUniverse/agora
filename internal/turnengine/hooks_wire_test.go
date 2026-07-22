@@ -36,6 +36,9 @@ func newHooksTestEnv(t *testing.T) *hooksTestEnv {
 		homeDir:    t.TempDir(),
 	}
 	t.Setenv("HOME", env.homeDir)
+	// Windows resolves os.UserHomeDir from USERPROFILE, not HOME —
+	// without this the isolation silently fails on Windows CI.
+	t.Setenv("USERPROFILE", env.homeDir)
 	t.Setenv("USERPROFILE", env.homeDir) // windows equivalent, harmless on unix
 	if err := os.MkdirAll(filepath.Join(env.projectDir, ".agora"), 0o700); err != nil {
 		t.Fatalf("mkdir .agora: %v", err)

@@ -23,6 +23,9 @@ func isolateMemoryHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	// Windows resolves os.UserHomeDir from USERPROFILE, not HOME —
+	// without this the isolation silently fails on Windows CI.
+	t.Setenv("USERPROFILE", home)
 	return filepath.Join(home, ".agora", "memory", "default")
 }
 
