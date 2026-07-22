@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -107,6 +108,20 @@ func (e *hooksTestEnv) discover() *HookRunner {
 // catCommand is a portable "write my stdin to outPath" command — every
 // fixture handler in this file is built from this, so assertions can
 // decode the EXACT stdin JSON the engine sent, per event's spec §2 shape.
+
+// skipWithoutPOSIXTools skips fixture tests whose command handlers are
+// POSIX-shell one-liners (`cat > file`) — Windows CI has no sh/cat for the
+// hooks engine's command handler to run. The engine's own cross-platform
+// dispatch coverage lives in internal/hooks; these are integration
+// fixtures for the turnengine wiring, and the wiring itself is
+// OS-independent Go.
+func skipWithoutPOSIXTools(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-shell hook fixtures; wiring is covered on unix CI")
+	}
+}
+
 func catCommand(outPath string) string {
 	return fmt.Sprintf("cat > %q", outPath)
 }
@@ -145,6 +160,7 @@ func waitForFile(t *testing.T, path string, d time.Duration) {
 // and that the write_file call actually landed on disk (hooks observing a
 // call must never themselves block a policy-allowed call).
 func TestHooks_PreAndPostToolUse_FireWithSpecShapeAndToolStillExecutes(t *testing.T) {
+	skipWithoutPOSIXTools(t)
 	env := newHooksTestEnv(t)
 	preOut := filepath.Join(env.projectDir, "pre.stdin.json")
 	postOut := filepath.Join(env.projectDir, "post.stdin.json")
@@ -224,6 +240,7 @@ func TestHooks_PreAndPostToolUse_FireWithSpecShapeAndToolStillExecutes(t *testin
 // TestManager_Approval_AskDenyIsToolResultNotAbort) — the turn still
 // completes normally.
 func TestHooks_PreToolUseDeny_BlocksToolCall(t *testing.T) {
+	skipWithoutPOSIXTools(t)
 	env := newHooksTestEnv(t)
 	denyHandler := hooks.Handler{
 		Type: hooks.HandlerCommand,
@@ -278,6 +295,7 @@ EOF`,
 // HookContinue-with-Deny-false past the real policy decision that runs
 // after it.
 func TestHooks_PreToolUseAllow_CannotOverridePolicyDeny(t *testing.T) {
+	skipWithoutPOSIXTools(t)
 	env := newHooksTestEnv(t)
 	echoOut := filepath.Join(env.projectDir, "pre-allow.stdin.json")
 	// Bare allow is Failed per §2.1 (codex-strict) — a valid allow REQUIRES
@@ -335,6 +353,7 @@ func TestHooks_PreToolUseAllow_CannotOverridePolicyDeny(t *testing.T) {
 // policy would have auto-allowed. Spec §2.2 + agora-spec-approvals.md §4
 // invariant 1 ("hooks... can only be more restrictive than policy").
 func TestHooks_PermissionRequestDeny_TightensAnAutoAllowedCall(t *testing.T) {
+	skipWithoutPOSIXTools(t)
 	env := newHooksTestEnv(t)
 	denyHandler := hooks.Handler{
 		Type: hooks.HandlerCommand,
@@ -435,6 +454,7 @@ func TestHooks_UntrustedHandler_DoesNotRun(t *testing.T) {
 // is the proof; a bounded poll afterward (timing-tolerant, no fixed sleep
 // in the assertion path) confirms the async handler eventually did run.
 func TestHooks_AsyncPostToolUse_DoesNotBlockTheTurn(t *testing.T) {
+	skipWithoutPOSIXTools(t)
 	env := newHooksTestEnv(t)
 	sideEffect := filepath.Join(env.projectDir, "async.ran")
 	asyncHandler := hooks.Handler{
@@ -490,6 +510,7 @@ func TestHooks_AsyncPostToolUse_DoesNotBlockTheTurn(t *testing.T) {
 // stdin to a distinct file, asserted for the event-specific shape spec §2.6/
 // §2.7/§2.9-10 define.
 func TestHooks_SessionStart_UserPromptSubmit_Stop_AllFire(t *testing.T) {
+	skipWithoutPOSIXTools(t)
 	env := newHooksTestEnv(t)
 	sessionOut := filepath.Join(env.projectDir, "session-start.json")
 	promptOut := filepath.Join(env.projectDir, "prompt-submit.json")
