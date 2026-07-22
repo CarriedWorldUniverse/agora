@@ -14,12 +14,15 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
 	"github.com/CarriedWorldUniverse/agora/internal/daemon"
 	agoraio "github.com/CarriedWorldUniverse/agora/internal/io"
+	"github.com/CarriedWorldUniverse/agora/internal/subagent"
+	"github.com/CarriedWorldUniverse/agora/internal/subagent/enginerunner"
 	"github.com/CarriedWorldUniverse/agora/internal/toolrunner"
 	"github.com/CarriedWorldUniverse/agora/internal/turnengine"
 )
@@ -50,7 +53,33 @@ func newTurnEngineManager(threadID string, provider bridle.Provider, store contr
 		// engine, on here, for every lane that runs a real turn.
 		turnengine.WithContextExtraction(true),
 		turnengine.WithHooks(hookRunner),
+		// agent() delegation (subagents spec §2): the PARENT Manager gets the
+		// tool; enginerunner never re-wires it onto children (structural
+		// depth guard — see turnengine.Manager.subagents' doc comment).
+		turnengine.WithSubagents(newSubagentManager(provider, store)),
 	)
+}
+
+// newSubagentManager composes the subagent delegation stack every parent
+// engine shares: the enginerunner (one child turnengine.Manager per spawn,
+// same provider/store as the parent) over the JSONL-persisted agent graph
+// (~/.agora/agent-graph.jsonl — edges must survive restarts like the child
+// threads they describe; spec §3) and the builtin agent-def registry
+// (general-purpose/explore; on-disk .agora/agents/*.md discovery is a later
+// unit). A graph-store open failure degrades to the in-memory store with a
+// stderr warning — delegation still works, the graph just won't survive
+// the process (same never-fail-the-session posture as hooks/prompt).
+func newSubagentManager(provider bridle.Provider, store contracts.ThreadStore) *subagent.Manager {
+	var graph subagent.GraphStore
+	fg, err := subagent.OpenFileGraphStore(filepath.Join(userHomeOrDot(), ".agora", "agent-graph.jsonl"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agora: open agent graph store: %v (agent graph will not persist this session)\n", err)
+		graph = subagent.NewMemGraphStore()
+	} else {
+		graph = fg
+	}
+	return subagent.NewManager(store, graph, subagent.NewRegistry(nil),
+		enginerunner.New(provider, store))
 }
 
 // newEngineFactory builds a daemon.EngineFactory: the per-thread seam
