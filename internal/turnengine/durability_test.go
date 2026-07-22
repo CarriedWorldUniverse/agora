@@ -189,11 +189,11 @@ func TestManager_Persist_UserToolAgent_Order(t *testing.T) {
 		t.Fatalf("iterator Close: %v", err)
 	}
 
-	if len(items) != 4 {
-		t.Fatalf("got %d items after turn 1; want 4 (user_message, tool_call, tool_result, agent_message): %+v", len(items), items)
+	if len(items) != 5 {
+		t.Fatalf("got %d items after turn 1; want 5 (user_message, tool_call, tool_result, agent_message, turn_usage): %+v", len(items), items)
 	}
 	wantTypes := []contracts.ThreadItemType{
-		contracts.TIUserMessage, contracts.TIToolCall, contracts.TIToolResult, contracts.TIAgentMessage,
+		contracts.TIUserMessage, contracts.TIToolCall, contracts.TIToolResult, contracts.TIAgentMessage, contracts.TITurnUsage,
 	}
 	for i, wt := range wantTypes {
 		if items[i].Type != wt {
@@ -256,11 +256,11 @@ func TestManager_Persist_UserToolAgent_Order(t *testing.T) {
 	if err := it2.Close(); err != nil {
 		t.Fatalf("iterator Close: %v", err)
 	}
-	if len(items2) != 6 {
-		t.Fatalf("got %d items after turn 2; want 6 (4 + user_message + agent_message): %+v", len(items2), items2)
+	if len(items2) != 8 {
+		t.Fatalf("got %d items after turn 2; want 8 (5 + user_message + agent_message + turn_usage): %+v", len(items2), items2)
 	}
-	if items2[4].Type != contracts.TIUserMessage || items2[5].Type != contracts.TIAgentMessage {
-		t.Fatalf("turn 2's items = %+v; want [user_message, agent_message]", items2[4:])
+	if items2[5].Type != contracts.TIUserMessage || items2[6].Type != contracts.TIAgentMessage || items2[7].Type != contracts.TITurnUsage {
+		t.Fatalf("turn 2's items = %+v; want [user_message, agent_message, turn_usage]", items2[5:])
 	}
 
 	endAndClose(t, in, out, runErr)
@@ -305,10 +305,10 @@ func TestManager_Persist_NoFinalText_NoAgentMessage(t *testing.T) {
 		}
 		items = append(items, item)
 	}
-	if len(items) != 3 {
-		t.Fatalf("got %d items; want 3 (user_message, tool_call, tool_result, NO agent_message): %+v", len(items), items)
+	if len(items) != 4 {
+		t.Fatalf("got %d items; want 4 (user_message, tool_call, tool_result, turn_usage, NO agent_message): %+v", len(items), items)
 	}
-	wantTypes := []contracts.ThreadItemType{contracts.TIUserMessage, contracts.TIToolCall, contracts.TIToolResult}
+	wantTypes := []contracts.ThreadItemType{contracts.TIUserMessage, contracts.TIToolCall, contracts.TIToolResult, contracts.TITurnUsage}
 	for i, wt := range wantTypes {
 		if items[i].Type != wt {
 			t.Fatalf("item[%d].Type = %q; want %q", i, items[i].Type, wt)

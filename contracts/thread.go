@@ -50,6 +50,12 @@ const (
 	TICompactionMarker ThreadItemType = "compaction_marker"
 	TIWDChanged        ThreadItemType = "wd_changed"
 	TIProvisioning     ThreadItemType = "provisioning"
+	// TITurnUsage records a turn's closing usage payload (input/output/
+	// cached/cache_write/reasoning tokens + cost — the Usage shape below)
+	// as the turn's final Append-batch item, so ccusage-style session/cost
+	// history is reconstructable from the JSONL alone.
+	// Spec: agora-spec-persistence.md §1 ("Per-turn usage persists").
+	TITurnUsage ThreadItemType = "turn_usage"
 )
 
 // ThreadItem is one append-only line. Never rewritten: compaction adds a

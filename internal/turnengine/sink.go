@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
 	"github.com/CarriedWorldUniverse/agora/internal/toolrunner"
@@ -108,6 +109,17 @@ type toolCallState struct {
 	seq      int64
 	itemType contracts.ItemType
 	summary  string
+}
+
+// toolCallTiming records the EVENT time (NEX-796) a tool call's Start and
+// Result were actually observed by this sink — the real wall time a
+// multi-step turn's tool calls happened, not the turn-boundary batch
+// stamp persistTurn used to apply uniformly to every item. Result stays
+// the zero Time until emitToolResult fires (never, for a tool call an
+// interrupted turn never got a result for).
+type toolCallTiming struct {
+	Start  time.Time
+	Result time.Time
 }
 
 // mcpToolPrefix mirrors internal/mcp.ToolNamePrefix ("mcp__") without
@@ -243,6 +255,10 @@ type turnSink struct {
 	turnID   string
 	out      chan<- contracts.Event
 	ctx      context.Context // gates delivery; the OUTER Run-level ctx, not the interrupt-scoped turn ctx — see manager.go's runOneTurn doc comment for why.
+	// clock is the item-creation-time source (NEX-796): nil means
+	// time.Now().UTC() (see now()); Manager passes its own m.now so
+	// WithClock(...) test overrides reach the sink too.
+	clock func() time.Time
 
 	mu       sync.Mutex
 	seq      int64
@@ -256,10 +272,58 @@ type turnSink struct {
 	// own) can build the matching item.completed. Lazily initialized —
 	// most turns never call a tool.
 	toolSeq map[string]toolCallState
+	// toolTimes records each tool call's real Start/Result event time
+	// (NEX-796), keyed by the same correlation ID as toolSeq — but never
+	// deleted (unlike toolSeq, which is one-shot), since persistTurn reads
+	// this AFTER the turn completes, once bridle.TurnResult.ToolCalls is
+	// available to loop over by ID.
+	toolTimes map[string]*toolCallTiming
+	// doneAt is the event time emitDone observed for bridle.TurnDone — the
+	// real moment the turn's closing text became available, used as the
+	// closing TIAgentMessage/TITurnUsage item's ts. Zero until emitDone
+	// fires (never, for an aborted/errored turn — see emitDone's doc
+	// comment on TurnDone not being a reliable turn-boundary signal).
+	doneAt time.Time
 }
 
-func newTurnSink(threadID, turnID string, out chan<- contracts.Event, ctx context.Context) *turnSink {
-	return &turnSink{threadID: threadID, turnID: turnID, out: out, ctx: ctx}
+func newTurnSink(threadID, turnID string, out chan<- contracts.Event, ctx context.Context, clock func() time.Time) *turnSink {
+	return &turnSink{threadID: threadID, turnID: turnID, out: out, ctx: ctx, clock: clock}
+}
+
+// now returns the sink's item-creation-time source: the injected clock
+// (Manager.now, itself WithClock-overridable) when set, time.Now().UTC()
+// for direct-construction call sites (e.g. sink_test.go) that pass nil.
+func (s *turnSink) now() time.Time {
+	if s.clock != nil {
+		return s.clock()
+	}
+	return time.Now().UTC()
+}
+
+// toolCallEventTimes returns the recorded (start, result) event times for
+// a tool call ID (NEX-796), or the zero values and ok=false if this sink
+// never observed a ToolCallStart for id — bridle always emits Start before
+// Result for the same ID (see emitToolResult's doc comment), so persistTurn
+// should never hit the not-ok case for an ID present in TurnResult.ToolCalls;
+// it's handled defensively rather than assumed. Result is the zero Time
+// (separately, ok stays true) when Start fired but no matching Result ever
+// did — an interrupted turn's in-flight tool call.
+func (s *turnSink) toolCallEventTimes(id string) (start, result time.Time, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.toolTimes[id]
+	if !ok {
+		return time.Time{}, time.Time{}, false
+	}
+	return t.Start, t.Result, true
+}
+
+// turnDoneEventTime returns the event time emitDone recorded for this
+// turn's TurnDone (NEX-796), or the zero Time if TurnDone never fired.
+func (s *turnSink) turnDoneEventTime() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.doneAt
 }
 
 var _ bridle.EventSink = (*turnSink)(nil)
@@ -360,6 +424,10 @@ func (s *turnSink) emitToolStart(ev bridle.ToolCallStart) {
 		s.toolSeq = make(map[string]toolCallState)
 	}
 	s.toolSeq[ev.ID] = toolCallState{seq: seq, itemType: itemType, summary: summary}
+	if s.toolTimes == nil {
+		s.toolTimes = make(map[string]*toolCallTiming)
+	}
+	s.toolTimes[ev.ID] = &toolCallTiming{Start: s.now()}
 	s.mu.Unlock()
 
 	s.send(contracts.Event{
@@ -383,6 +451,9 @@ func (s *turnSink) emitToolResult(ev bridle.ToolCallResult) {
 	state, ok := s.toolSeq[ev.ID]
 	if ok {
 		delete(s.toolSeq, ev.ID) // one-shot: a replayed/duplicate Result for the same ID must not reuse stale state
+	}
+	if t, tok := s.toolTimes[ev.ID]; tok {
+		t.Result = s.now()
 	}
 	s.mu.Unlock()
 	if !ok {
@@ -444,6 +515,7 @@ func (s *turnSink) emitChunk(text string, itemSeq *int64, buf *strings.Builder, 
 // fallback for providers/tests that never populate FinalText).
 func (s *turnSink) emitDone(ev bridle.TurnDone) {
 	s.mu.Lock()
+	s.doneAt = s.now()
 	agentSeq, reasSeq := s.agentSeq, s.reasSeq
 	agentText, reasText := s.agentBuf.String(), s.reasBuf.String()
 	s.mu.Unlock()
