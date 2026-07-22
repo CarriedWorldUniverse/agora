@@ -1,6 +1,7 @@
 package turnengine
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -9,10 +10,16 @@ import (
 	"github.com/CarriedWorldUniverse/bridle/fake"
 )
 
-// TestManager_ResumeSeedsDirectAPITail (NEX-798): a fresh Manager over a
-// thread WITH persisted history must seed the direct-API SessionTail from the
-// store — without this a resumed kimi/glm session has amnesia despite a
-// complete JSONL. Tool items are skipped; only user/agent text seeds.
+// TestManager_ResumeSeedsDirectAPITail (NEX-798, updated by the ctxmgr
+// curation wiring): a fresh Manager over a thread WITH persisted history
+// must seed the direct-API SessionTail from the store — without this a
+// resumed kimi/glm session has amnesia despite a complete JSONL. Since the
+// ctxmgr curation wiring (context spec/context-curation spec), the tail
+// comes from ctxmgr.Manager.Assemble's curated projection rather than the
+// old raw-replay-skips-tool-items seeding: run_command is unkeyed (not in
+// the default [context.keys] table), so it renders as a plain
+// "tool_call run_command …" / result-text pair in tier 4 (the recent
+// window) instead of being dropped — see assembledMessagesToSessionTail.
 func TestManager_ResumeSeedsDirectAPITail(t *testing.T) {
 	store := persistence.NewMemStore()
 	if err := store.Create(contracts.ThreadMeta{ThreadID: "th_seed", CreatedAt: time.Now().UTC()}); err != nil {
@@ -37,22 +44,29 @@ func TestManager_ResumeSeedsDirectAPITail(t *testing.T) {
 	}
 
 	msgs := provider.LastRequest().Messages
-	// Expect: seeded [user, assistant] + this turn's user (+ trailing ctxmap
-	// memory message, stripped if present).
+	// Expect: the curated tail (user, tool_call text, tool result text,
+	// assistant) + this turn's user (+ trailing ctxmap memory message,
+	// stripped if present).
 	if n := len(msgs); n > 0 && msgs[n-1].Role == "user" && len(msgs[n-1].Content) > 0 && msgs[n-1].Content[0] == '#' {
 		msgs = msgs[:n-1]
 	}
-	if len(msgs) != 3 {
-		t.Fatalf("messages = %d (%+v), want seeded user+assistant + new user", len(msgs), msgs)
+	if len(msgs) != 5 {
+		t.Fatalf("messages = %d (%+v), want seeded user+tool_call+tool_result+assistant + new user", len(msgs), msgs)
 	}
 	if msgs[0].Role != "user" || msgs[0].Content != "the pack size is 32MiB" {
 		t.Fatalf("msgs[0] = %+v, want the persisted user message", msgs[0])
 	}
-	if msgs[1].Role != "assistant" || msgs[1].Content != "noted, 32MiB" {
-		t.Fatalf("msgs[1] = %+v, want the persisted agent reply (tool items skipped)", msgs[1])
+	if msgs[1].Role != "assistant" || !strings.Contains(msgs[1].Content, "run_command") {
+		t.Fatalf("msgs[1] = %+v, want the persisted tool_call (unkeyed -> rendered text)", msgs[1])
 	}
-	if msgs[2].Role != "user" || msgs[2].Content != "what size?" {
-		t.Fatalf("msgs[2] = %+v, want this turn's message", msgs[2])
+	if msgs[2].Role != "user" || msgs[2].Content != "ok" {
+		t.Fatalf("msgs[2] = %+v, want the persisted tool_result", msgs[2])
+	}
+	if msgs[3].Role != "assistant" || msgs[3].Content != "noted, 32MiB" {
+		t.Fatalf("msgs[3] = %+v, want the persisted agent reply", msgs[3])
+	}
+	if msgs[4].Role != "user" || msgs[4].Content != "what size?" {
+		t.Fatalf("msgs[4] = %+v, want this turn's message", msgs[4])
 	}
 	endAndClose(t, in, out, runErr)
 }

@@ -166,6 +166,28 @@ type Manager struct {
 	lastDirectProv  bridle.Provider
 	lastDirectModel string
 
+	// ctxCurationEnabled/ctxMgr/ctxItems/ctxSeq/ctxItemsSeeded (NEX-ctxmgr
+	// wiring): the internal/ctxmgr curation seam for DIRECT-API turns only —
+	// see ctxcuration.go's package doc comment for the full scope/design
+	// notes. ctxCurationEnabled defaults true (WithContextCuration(false)
+	// opts out); ctxMgr is lazily built (ensureCtxManager); ctxItems is this
+	// Manager's own accumulated, ctxmgr-shaped ThreadItem history (seeded
+	// once from m.store via seedCtxItemsFromStore, extended every turn by
+	// appendTurnToCtxItems); ctxSeq is the monotonic Seq counter items in
+	// ctxItems are minted from (independent of the store's own Seq
+	// assignment, since ctxItems never round-trips through Append).
+	ctxCurationEnabled bool
+	// ctxMgr is typed as the contracts.ContextManager INTERFACE, not the
+	// concrete *ctxmgr.Manager, deliberately: ctxcuration_test.go injects a
+	// scripted failing implementation (via the unexported
+	// withContextManager test option) to exercise the fallback-on-error
+	// path genuinely, since the real ctxmgr.Manager's Assemble never
+	// actually returns an error in its current reference implementation.
+	ctxMgr         contracts.ContextManager
+	ctxItems       []contracts.ThreadItem
+	ctxSeq         int64
+	ctxItemsSeeded bool
+
 	// clock is the Manager's item-creation-time source (NEX-796: ThreadItem
 	// ts must be EVENT time, not persist-time batch stamp). nil (the
 	// default) means now() falls back to time.Now().UTC(); WithClock lets
@@ -388,6 +410,7 @@ func NewManager(threadID string, provider bridle.Provider, opts ...Option) *Mana
 		scopeStore:         profile.ScopeStore,
 		waiters:            make(map[string]chan approvalOutcome),
 		ctxEngineEnabled:   true, // U-D1: default ON for the dev profile — see WithContextEngine
+		ctxCurationEnabled: true, // default ON — see WithContextCuration (ctxcuration.go)
 	}
 	for _, o := range opts {
 		o(m)
@@ -821,8 +844,18 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 				}
 				m.resolveQuestionWaiter(input.ID, questionOutcome{Answer: ans})
 
+			case contracts.InConfig:
+				// InConfig{Key:"compact"} is the /compact backend seam (C):
+				// manual compaction only runs BETWEEN turns (context spec
+				// §2 contract 5) — a turn genuinely in flight (turnCancel
+				// != nil) skips this input rather than queuing it; the
+				// operator can retry /compact once the turn ends.
+				if input.Key == "compact" && turnCancel == nil {
+					m.runManualCompact(ctx, out)
+				}
+
 			default:
-				// steer/config/provision: no tool loop resume, no context
+				// steer/provision: no tool loop resume, no context
 				// assembly this slice — nothing to apply yet.
 			}
 		}
@@ -1090,12 +1123,34 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 	if ph.directAPI {
 		m.seedTailFromStore(ph)
 		req.SessionTail = m.sessionTails[ph.key]
+		// A: curated assembly replaces the raw replay tail when enabled —
+		// ctxcuration.go's assembleCuratedTail; on ANY ctxmgr error this
+		// falls back to the raw tail set above (never fail the turn over a
+		// curation error). m.sessionTails[ph.key] keeps accumulating below
+		// regardless of which path a given turn used, so the fallback stays
+		// live for a LATER turn even after several curated ones.
+		if m.ctxCurationEnabled {
+			if curated, ok := m.assembleCuratedTail(ph); ok {
+				req.SessionTail = curated
+			}
+		}
 	}
 	// Record a direct-api turn's provider+model as the extraction target so
 	// ctxmap's async fact extraction (when enabled) has a model to distill with.
 	m.setActiveModel(ph.provider, model, ph.directAPI)
 
 	result, err := ph.harness.RunTurn(turnCtx, req, newSurfaceRunner(m.surface), sink)
+
+	// C: context_length retry (context spec §2 contract 7) — one forced
+	// compaction episode, then ONE retry of the exact same request. Direct-
+	// api only (curation/compaction has nothing to do on the claudesdk
+	// lane, which owns its own server-side session). See
+	// isContextLengthError's doc comment for why this is provider-error
+	// string matching rather than a typed ErrorClass check.
+	if err != nil && ph.directAPI && m.ctxCurationEnabled && isContextLengthError(err) {
+		m.runCompactionEpisode(contracts.CompactAuto, turnID, turnStartTS, emit)
+		result, err = ph.harness.RunTurn(turnCtx, req, newSurfaceRunner(m.surface), sink)
+	}
 
 	// Normalize interruption: a provider whose in-flight HTTP call is killed by
 	// turnCtx cancellation (InInterrupt, or Run teardown) surfaces an ERROR with
@@ -1125,6 +1180,7 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 		if m.store != nil {
 			m.persistTurn(input, result, turnStartTS, sink)
 		}
+		m.appendTurnToCtxItems(input, result, turnStartTS, sink)
 		// Extend this provider's replay tail with the turn just completed: the
 		// user message (bridle lowers SessionTail then appends the NEXT turn's
 		// UserMessage, so the user turn must live in the tail) followed by the
@@ -1161,6 +1217,7 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 		if m.store != nil {
 			m.persistTurn(input, result, turnStartTS, sink)
 		}
+		m.appendTurnToCtxItems(input, result, turnStartTS, sink)
 		// Keep the in-memory replay tail consistent with what was persisted,
 		// so an in-session continuation after Esc-interrupt remembers the
 		// interrupted exchange the same way a resumed session would read it.
