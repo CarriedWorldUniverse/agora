@@ -272,8 +272,17 @@ func TestManager_ContextEngine_WithContextEngineFalseDisables(t *testing.T) {
 	if strings.Contains(sys, "Working state") {
 		t.Fatalf("WithContextEngine(false): AppendSystemPrompt still carries a working-state block; got:\n%s", sys)
 	}
-	if sys != devSystemPrompt {
-		t.Fatalf("AppendSystemPrompt = %q; want exactly DevProfile's own note (no ctxmap addition)", sys)
+	// Prompt-assembly unit: AppendSystemPrompt is now the FULL composed
+	// prompt (core contract + devSystemPrompt's profile block + environment,
+	// see profile.go's composeDevSystemPrompt), not just the bare
+	// devSystemPrompt note — so the "no ctxmap addition" expectation
+	// compares against a freshly-composed DevProfile() rather than the
+	// literal devSystemPrompt constant. Two independently-composed calls in
+	// the same test run are byte-identical (same wd/date/model), so this
+	// still pins "WithContextEngine(false) added nothing".
+	dev := DevProfile()
+	if sys != dev.AppendSystemPrompt {
+		t.Fatalf("AppendSystemPrompt = %q; want exactly DevProfile's own composed prompt (no ctxmap addition):\n%s", sys, dev.AppendSystemPrompt)
 	}
 }
 
