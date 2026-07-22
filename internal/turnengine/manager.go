@@ -375,10 +375,18 @@ func NewManager(threadID string, provider bridle.Provider, opts ...Option) *Mana
 	// unit's scope (real MCP wiring is a later ticket; TurnRequest.MCP
 	// also stays unset in runOneTurn, per the blueprint's claudesdk
 	// SupportsMCP=false note — MCP tools ride in Tools, not MCP).
-	families := []toolrunner.Family{toolrunner.NewFSFamily(m.roots), toolrunner.NewExecFamily(m.roots)}
-	// WithSubagents adds the agent() tool — see that Option's doc comment
-	// for why leaving it unset (nil m.subagents, the default) is also this
-	// package's half of the subagent depth guard.
+	// Families: fs + exec (sandboxed by m.roots), memory.* (rooted at the
+	// dev identity's memory dir, NOT m.roots — it carries its own grant
+	// outside the fs sandbox, see MemoryFamily's doc comment;
+	// defaultMemoryDir() only computes a path and never touches disk), and
+	// — only when WithSubagents was wired — the agent() spawn tool (nil
+	// m.subagents, the default, is this package's half of the subagent
+	// depth guard; see that Option's doc comment).
+	families := []toolrunner.Family{
+		toolrunner.NewFSFamily(m.roots),
+		toolrunner.NewExecFamily(m.roots),
+		toolrunner.NewMemoryFamily(defaultMemoryDir()),
+	}
 	if m.subagents != nil {
 		families = append(families, toolrunner.NewAgentFamily(m.subagents, m.threadID))
 	}

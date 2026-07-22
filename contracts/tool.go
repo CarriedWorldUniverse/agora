@@ -39,6 +39,12 @@ const (
 	// FamilyAgent exposes the agent() subagent-spawn tool.
 	// Spec: agora-spec-subagents.md §2.
 	FamilyAgent = "agent"
+	// FamilyMemory is the memory.* native tool family (agora-spec-memory.md
+	// §3): read/write/list/delete over one identity's memory store. Unlike
+	// the profile-gated families above it is always available in the dev
+	// profile (no per-profile toggle wired yet), but it shares the same
+	// toolrunner.Family plumbing.
+	FamilyMemory = "memory"
 )
 
 // Harness-intrinsic core tools: engine-registered, always core, present in

@@ -203,9 +203,11 @@ func composeBaseSystemPrompt(model, wd string) (string, error) {
 }
 
 // composeSkillsAndAgentsFragments discovers the skills catalog
-// (agora-spec-skills.md §3.1, developer-role) and AGENTS.md project context
-// (§6, user-role) from wd outward, and renders whatever is found for
-// appending onto the composed system prompt.
+// (agora-spec-skills.md §3.1, developer-role), the MEMORY.md index
+// (agora-spec-memory.md §2, developer-role — composeMemoryIndexFragment in
+// memory.go), and AGENTS.md project context (§6, user-role) from wd
+// outward, and renders whatever is found for appending onto the composed
+// system prompt.
 //
 // Fold point: DevProfile's render target is the claudesdk/append lane
 // (composeBaseSystemPrompt's Model.Capabilities.SystemPromptMode above) —
@@ -258,6 +260,17 @@ func composeSkillsAndAgentsFragments(wd string) string {
 			fmt.Fprintf(os.Stderr, "turnengine: %s\n", w)
 		}
 		parts = append(parts, cat.Text)
+	}
+
+	// Memory index (agora-spec-memory.md §2): same developer-role class as
+	// the skills catalog above (internal/prompt.RoleMap[FragMemoryIndex] ==
+	// RoleDeveloper), so it folds in right after the catalog and before
+	// AGENTS.md's user-role prose below, preserving §1a's authority order
+	// (system > developer > user) the same way the catalog does. Absent/
+	// empty memory dir yields "" (see composeMemoryIndexFragment's doc
+	// comment) — nothing appended, the common case.
+	if mem := composeMemoryIndexFragment(home); mem != "" {
+		parts = append(parts, mem)
 	}
 
 	docs := skills.DiscoverAGENTSMD(wd, nil, nil, skills.DefaultAGENTSBudgetBytes)

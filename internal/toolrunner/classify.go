@@ -169,6 +169,44 @@ func Classify(call Call, roots Roots) (contracts.ApprovalKind, any) {
 		}
 		return contracts.KindRead, ReadPayload{Detail: a.Pattern}
 
+	case call.Name == contracts.ToolMemoryRead:
+		var a memoryReadArgs
+		if err := json.Unmarshal(call.Args, &a); err != nil {
+			return contracts.KindEscalation, EscalationPayload{Detail: "malformed memory.read arguments: " + err.Error()}
+		}
+		return contracts.KindRead, ReadPayload{Detail: a.Name}
+
+	case call.Name == contracts.ToolMemoryList:
+		return contracts.KindRead, ReadPayload{Detail: "memory.list"}
+
+	case call.Name == contracts.ToolMemoryWrite:
+		var a memoryWriteArgs
+		if err := json.Unmarshal(call.Args, &a); err != nil {
+			return contracts.KindEscalation, EscalationPayload{Detail: "malformed memory.write arguments: " + err.Error()}
+		}
+		// Mirrors write_file's classification (mutating -> KindPatch), per
+		// spec §3's tool-family scope, but does NOT run classifyWriteTarget:
+		// the memory dir sits outside the session's fs Roots by design (§3
+		// "the family carries its own grant"), so the roots-based
+		// containment/protected-path checks write_file needs don't apply
+		// here — MemoryFamily/internal/memory.Store enforce the memory dir's
+		// own containment (validateSlug) unconditionally instead.
+		return contracts.KindPatch, PatchPayload{
+			Path:  a.Name + ".md",
+			Lines: linesAsAdd(a.Body),
+		}
+
+	case call.Name == contracts.ToolMemoryDelete:
+		var a memoryDeleteArgs
+		if err := json.Unmarshal(call.Args, &a); err != nil {
+			return contracts.KindEscalation, EscalationPayload{Detail: "malformed memory.delete arguments: " + err.Error()}
+		}
+		// Same mutating-kind mirror as memory.write above; Classify does no
+		// I/O (package doc), so there is no prior on-disk content available
+		// here to render as removed lines — Lines is left empty, the path
+		// alone identifies what's being deleted.
+		return contracts.KindPatch, PatchPayload{Path: a.Name + ".md"}
+
 	case call.Name == ToolWriteFile:
 		var a writeFileArgs
 		if err := json.Unmarshal(call.Args, &a); err != nil {
