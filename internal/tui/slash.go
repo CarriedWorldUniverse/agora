@@ -1,8 +1,13 @@
 package tui
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
+	"path/filepath"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -10,10 +15,20 @@ import (
 // This file is the slash-command dispatch (agora-spec-tui.md §6's v1 set
 // grows here verb by verb). The composer hands submitted text to
 // slashDispatch BEFORE it falls through to a user_message: an exact,
-// case-insensitive match on the first token intercepts; EVERYTHING else
-// starting with "/" — unknown verbs, near-misses like "/quitter", absolute
-// paths like "/usr/bin" — still goes to the model as an ordinary message,
-// preserving the documented isExitCommand near-miss behavior (exit_test.go).
+// case-insensitive match on the first token intercepts.
+//
+// §6a containment (NEX-795): unlike the near-miss behavior this file used
+// to document, EVERYTHING starting with "/" is now intercepted one way or
+// another — slashDispatch itself still only matches known verbs (that
+// contract is unchanged, and pinned by TestSlashDispatch_MatchesKnownVerbsOnly),
+// but submitComposer (model.go) never lets an unmatched "/word" fall through
+// to the model as an ordinary message anymore. A near-miss like "/quitter"
+// or an absolute path like "/usr/bin/gcc" now prints a local "unknown
+// command" error (with a nearest-match suggestion) instead of being
+// role-played by the model as a fake CLI. See model.go's containment block
+// right after the slashDispatch call for the registry-name-sugar and
+// escape-hatch (leading space / "\/") handling that sits around it.
+//
 // The richer affordances §4/§6 spec (leading-/ opens a filtered menu,
 // completed command becomes an atomic token, per-command metadata) are the
 // later UI pass this table is designed to grow into.
@@ -46,8 +61,13 @@ type slashCommand struct {
 // wired.
 func slashCommandTable() []slashCommand {
 	return []slashCommand{
-		{name: "help", desc: "list available commands", run: runSlashHelp},
+		{name: "status", desc: "show agent, model, thread, dir, backend, usage", run: runSlashStatus},
+		{name: "fork", desc: "branch the thread at the current point", run: runSlashFork},
+		{name: "copy", desc: "copy the last agent message to the clipboard", run: runSlashCopy},
+		{name: "clear", desc: "clear the screen and start a new active cell", run: runSlashClear},
+		{name: "new", desc: "print the command to start a fresh thread", run: runSlashNew},
 		{name: "mcp", desc: "list configured MCP servers", run: runSlashMCP},
+		{name: "help", desc: "list available commands", run: runSlashHelp},
 	}
 }
 
@@ -69,16 +89,41 @@ func slashDispatch(text string) (cmd slashCommand, args string, ok bool) {
 	return slashCommand{}, "", false
 }
 
+// helpOrder is the §6 "menu order = frequency, not alphabetical" list.
+// /model and /resume aren't in slashCommandTable (they're special-cased in
+// submitComposer ahead of slashDispatch, since they parse multi-word forms
+// like "/model opus" and "/resume all") — this list carries their
+// descriptions directly so /help still shows them in the right spot.
+var helpOrder = []struct{ name, fallbackDesc string }{
+	{"model", "switch or list available models"},
+	{"status", "show session status"},
+	{"resume", "list persisted threads for this dir"},
+	{"fork", "branch the thread at the current point"},
+	{"copy", "copy the last agent message to the clipboard"},
+	{"clear", "clear the screen"},
+	{"new", "start a fresh thread"},
+	{"mcp", "list configured MCP servers"},
+	{"help", "list available commands"},
+}
+
 // runSlashHelp prints the available commands (including the exit verbs,
-// which live outside the table) as one transcript block.
+// which live outside the table) as one transcript block, in helpOrder.
 func runSlashHelp(m *Model, _ string) tea.Cmd {
 	var b strings.Builder
 	b.WriteString(m.cfg.Theme.Header.Render("commands"))
 	row := func(verb, desc string) {
 		b.WriteString(fmt.Sprintf("\n  %s  %s", m.cfg.Theme.Accent.Render(verb), m.cfg.Theme.Muted.Render(desc)))
 	}
+	descs := map[string]string{}
 	for _, c := range slashCommandTable() {
-		row("/"+c.name, c.desc)
+		descs[c.name] = c.desc
+	}
+	for _, o := range helpOrder {
+		desc := o.fallbackDesc
+		if d, ok := descs[o.name]; ok {
+			desc = d
+		}
+		row("/"+o.name, desc)
 	}
 	row("/quit, /exit, /q", "quit agora")
 	return m.cfg.Printer(b.String())
@@ -117,4 +162,264 @@ func renderMCPReport(list func() ([]ServerInfo, error), th Theme) []string {
 	}
 	out = append(out, th.Muted.Render("  configured only — live connection state is not exposed by the engine yet"))
 	return out
+}
+
+// runSlashStatus prints agent id, current model, thread id, working dir,
+// backend mode, and session usage as one block (§5: "context-remaining …
+// Show in footer and /status"; usage reuses the exact numbers the idle
+// status row shows via usageSegment).
+func runSlashStatus(m *Model, _ string) tea.Cmd {
+	var b strings.Builder
+	b.WriteString(m.cfg.Theme.Header.Render("status"))
+	row := func(label, val string) {
+		fmt.Fprintf(&b, "\n  %-8s %s", label+":", val)
+	}
+	row("agent", m.cfg.AgentID)
+	row("model", m.currentModel)
+	row("thread", m.cfg.ThreadID)
+	row("dir", cwdOrDot())
+	row("backend", backendMode(m.cfg.Backend))
+	usage := "no completed turns yet"
+	if m.haveUsage {
+		usage = strings.TrimPrefix(strings.TrimSpace(m.usageSegment()), "· ")
+	}
+	row("usage", usage)
+	return m.cfg.Printer(b.String())
+}
+
+// backendMode reports whether this connection speaks to a daemon over a
+// socket/websocket (*ioBackend, this package) or runs the engine in-process
+// (anything else — cmd/agora's inProcessBackend embeds tui.Backend by
+// interface, so it can't be named here; "in-process" is simply the default
+// when it isn't the known socket type). Test doubles (fakeBackend) report
+// "in-process" too, which is the honest answer: there is no socket.
+func backendMode(b Backend) string {
+	if _, ok := b.(*ioBackend); ok {
+		return "socket"
+	}
+	return "in-process"
+}
+
+// runSlashCopy puts the last finalized agent message (raw markdown) on the
+// terminal's clipboard via an OSC 52 escape sequence — the standard,
+// SSH-transparent "ask the terminal to set the clipboard" mechanism (no X11
+// clipboard needed, works through the same connection the session runs
+// over). An empty transcript (no agent reply yet this session) is a plain
+// message, not an error.
+func runSlashCopy(m *Model, _ string) tea.Cmd {
+	if m.lastAgentMessage == "" {
+		return m.cfg.Printer("nothing to copy")
+	}
+	payload := base64.StdEncoding.EncodeToString([]byte(m.lastAgentMessage))
+	osc52 := "\x1b]52;c;" + payload + "\x07"
+	return tea.Batch(
+		m.cfg.Printer(osc52),
+		m.cfg.Printer(fmt.Sprintf("copied %d chars", len(m.lastAgentMessage))),
+	)
+}
+
+// runSlashClear clears the terminal (tea.ClearScreen) and re-prints a fresh
+// session header so the operator isn't left looking at a blank screen with
+// no orientation — §0's architecture means the transcript itself lives in
+// the terminal's own scrollback, not in any widget/list this Model holds,
+// so there is no separate "transcript state" to reset here: an in-flight
+// active cell (m.stream), the composer, and session usage totals are all
+// untouched by /clear (a running turn keeps running; the session's
+// cumulative cost/token count is a running total, not scrollback).
+func runSlashClear(m *Model, _ string) tea.Cmd {
+	header := Cell{Kind: CellSessionHeader, AgentID: m.cfg.AgentID, Model: m.currentModel}.Render(m.width, m.cfg.Theme)[0]
+	return tea.Batch(tea.ClearScreen, m.cfg.Printer(header))
+}
+
+// runSlashFork forks the thread at the highest item Seq this attachment has
+// seen (m.lastItemSeq — see handleEvent), via the optional ThreadForker
+// backend seam. v1: no live thread switch (agora-spec-tui.md §6a's sibling
+// note under /fork) — the operator relaunches into the new thread, same as
+// /resume's listing hint.
+func runSlashFork(m *Model, _ string) tea.Cmd {
+	forker, ok := m.cfg.Backend.(ThreadForker)
+	if !ok {
+		return m.cfg.Printer("fork not supported here")
+	}
+	newID, err := forker.ForkThread(m.cfg.ThreadID, m.lastItemSeq)
+	if err != nil {
+		return m.cfg.Printer("fork failed: " + err.Error())
+	}
+	return m.cfg.Printer(fmt.Sprintf("forked → %s — open with: agora -thread %s", newID, newID))
+}
+
+// runSlashNew prints the command to start a fresh thread — v1 does NOT swap
+// the running engine in place (that needs a Manager-per-thread rebuild, the
+// same limitation /resume's listing already documents); it hands back a
+// ready-to-run relaunch command instead, with a freshly generated id.
+func runSlashNew(m *Model, _ string) tea.Cmd {
+	id := freshThreadID(cwdOrDot(), m.cfg.Now())
+	return m.cfg.Printer("start fresh: agora -thread " + id)
+}
+
+// freshThreadID generates a thread id in the SAME SHAPE cmd/agora's
+// cwdThreadID uses for the "default" thread ("<safe-dir-base>-<12 hex
+// chars>") — cmd/agora is a main package (not importable), so this is a
+// deliberate small duplication of that scheme, not a copy of its
+// determinism: cwdThreadID is intentionally stable per-directory (so bare
+// `agora` always reattaches to the same thread); /new needs the opposite —
+// a NEW id even when called twice in the same directory in the same
+// second — so the hash input is salted with now (nanosecond clock, via
+// cfg.Now so tests stay deterministic) instead of being cwd-only.
+func freshThreadID(cwd string, now time.Time) string {
+	sum := sha256.Sum256([]byte(cwd + "\x00" + now.Format(time.RFC3339Nano) + "\x00" + fmt.Sprint(now.Nanosecond())))
+	base := threadSafeChars(filepath.Base(cwd))
+	if base == "" {
+		base = "dir"
+	}
+	return base + "-" + hex.EncodeToString(sum[:])[:12]
+}
+
+// threadSafeChars keeps only [A-Za-z0-9-_], mirroring cmd/agora's
+// threadSafe (kept only alphanumerics/-/_ so the id is always a safe store
+// directory name).
+func threadSafeChars(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// dispatchRegistrySugar implements §6a's "/<registry-name> is sugar for
+// /model <name>" — the shortcut form the operator types instinctively
+// (e.g. "/kimi", "/glm"). Checked AFTER the known-verb table (so a real verb
+// always wins a name collision) and BEFORE the unknown-command error.
+func (m *Model) dispatchRegistrySugar(text string) (tea.Cmd, bool) {
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return nil, false
+	}
+	name := strings.TrimPrefix(fields[0], "/")
+	for _, n := range m.cfg.ModelRegistry.Names() {
+		if strings.EqualFold(n, name) {
+			cmd, _ := m.handleModelCommand("/model " + n)
+			return cmd, true
+		}
+	}
+	return nil, false
+}
+
+// unknownSlashMessage builds the §6a local error for a slash-prefixed input
+// that matched no known verb and no registry name: "unknown command: /word"
+// plus a nearest-match suggestion when one is close enough to be useful
+// (measured finding, agora-6dac2f837e54: the whole point of containment is
+// that the OPERATOR, not a model role-playing a CLI, sees this).
+func (m *Model) unknownSlashMessage(text string) string {
+	fields := strings.Fields(text)
+	typed := "/"
+	if len(fields) > 0 {
+		typed = fields[0]
+	}
+	name := strings.ToLower(strings.TrimPrefix(typed, "/"))
+	if suggestion := nearestCommand(name, m.slashSuggestionCandidates()); suggestion != "" {
+		return fmt.Sprintf("unknown command: %s — did you mean /%s?", typed, suggestion)
+	}
+	return fmt.Sprintf("unknown command: %s", typed)
+}
+
+// slashSuggestionCandidates is every name a "did you mean" can point at:
+// the dispatch table's verbs, the special-cased verbs that live outside it
+// (/model, /resume — handled ahead of slashDispatch in submitComposer) and
+// the two spellings of quit, plus every registry name (so "/glm" typo'd as
+// "/glmm" still gets a useful suggestion, not just a generic error).
+func (m *Model) slashSuggestionCandidates() []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(s string) {
+		s = strings.ToLower(s)
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	for _, c := range slashCommandTable() {
+		add(c.name)
+	}
+	add("model")
+	add("resume")
+	add("exit")
+	add("quit")
+	for _, n := range m.cfg.ModelRegistry.Names() {
+		add(n)
+	}
+	return out
+}
+
+// nearestCommand returns the candidate closest to name by Levenshtein
+// distance, or "" when nothing is close enough to be a useful guess (a
+// wrong suggestion is worse than none — e.g. "/xyz" shouldn't confidently
+// point at some unrelated three-letter command).
+func nearestCommand(name string, candidates []string) string {
+	best := ""
+	bestDist := -1
+	for _, c := range candidates {
+		d := levenshtein(name, c)
+		if bestDist == -1 || d < bestDist {
+			bestDist, best = d, c
+		}
+	}
+	// Half the typed name's length (floor 1, so a 1-2 char typo like "/eit"
+	// -> "exit" still matches) keeps the suggestion honest: a wildly
+	// different word doesn't get dressed up as "did you mean".
+	maxDist := len(name) / 2
+	if maxDist < 1 {
+		maxDist = 1
+	}
+	if maxDist > 3 {
+		maxDist = 3
+	}
+	if best == "" || bestDist > maxDist {
+		return ""
+	}
+	return best
+}
+
+// levenshtein computes single-character-edit distance between a and b
+// (insert/delete/substitute, cost 1 each) — the standard DP table, no
+// dependency pulled in for something this small.
+func levenshtein(a, b string) int {
+	ar, br := []rune(a), []rune(b)
+	if len(ar) == 0 {
+		return len(br)
+	}
+	if len(br) == 0 {
+		return len(ar)
+	}
+	prev := make([]int, len(br)+1)
+	curr := make([]int, len(br)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ar); i++ {
+		curr[0] = i
+		for j := 1; j <= len(br); j++ {
+			cost := 1
+			if ar[i-1] == br[j-1] {
+				cost = 0
+			}
+			del := prev[j] + 1
+			ins := curr[j-1] + 1
+			sub := prev[j-1] + cost
+			m := del
+			if ins < m {
+				m = ins
+			}
+			if sub < m {
+				m = sub
+			}
+			curr[j] = m
+		}
+		prev, curr = curr, prev
+	}
+	return prev[len(br)]
 }

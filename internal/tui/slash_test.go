@@ -1,10 +1,14 @@
 package tui
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/CarriedWorldUniverse/agora/contracts"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -53,19 +57,89 @@ func TestSubmitComposer_SlashMCP_PrintsReport(t *testing.T) {
 	}
 }
 
-// TestSubmitComposer_UnknownSlash_StillSent: the near-miss contract — an
-// unrecognized /word is an ordinary message for the model, not an error
-// and not swallowed (same rule isExitCommand pins for "/quitter").
-func TestSubmitComposer_UnknownSlash_StillSent(t *testing.T) {
+// TestSubmitComposer_UnknownSlash_Contained: the §6a (NEX-795) contract —
+// an unrecognized /word NEVER reaches the model. It prints a local error
+// (with a nearest-match suggestion when one is close enough) instead.
+func TestSubmitComposer_UnknownSlash_Contained(t *testing.T) {
 	backend := newFakeBackend()
-	m := testModel(backend)
-	m.composer.InsertText("/quitter")
-	// submitComposer returns an echo+send batch since #72 — drain it so the
-	// send actually fires (kimi's branch predated the batch).
+	m := testModelWithRegistry(backend, testRegistry())
+	var printed []string
+	m.cfg.Printer = capturingPrinter(&printed)
+	m.composer.InsertText("/modek")
 	_, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
 	runCmd(cmd)
-	if len(backend.Sent) != 1 || backend.Sent[0].Text != "/quitter" {
-		t.Fatalf("Sent = %+v; want one user message with text /quitter", backend.Sent)
+	if len(backend.Sent) != 0 {
+		t.Fatalf("backend got %d inputs; unknown /modek must never reach the model: %+v", len(backend.Sent), backend.Sent)
+	}
+	if len(printed) != 1 || !strings.Contains(printed[0], "unknown command: /modek") {
+		t.Fatalf("printed = %v; want a local unknown-command error", printed)
+	}
+	if !strings.Contains(printed[0], "did you mean /model?") {
+		t.Fatalf("printed = %q; want a nearest-match suggestion for /model", printed[0])
+	}
+}
+
+// TestSubmitComposer_UnknownSlash_NoCloseMatch: a typo too far from any
+// known verb gets the plain error, no confident-but-wrong guess.
+func TestSubmitComposer_UnknownSlash_NoCloseMatch(t *testing.T) {
+	backend := newFakeBackend()
+	m := testModelWithRegistry(backend, testRegistry())
+	var printed []string
+	m.cfg.Printer = capturingPrinter(&printed)
+	m.composer.InsertText("/qqqqqqqqqq")
+	runCmd(m.submitComposer())
+	if len(backend.Sent) != 0 {
+		t.Fatalf("backend got %d inputs; want none", len(backend.Sent))
+	}
+	if len(printed) != 1 || !strings.Contains(printed[0], "unknown command: /qqqqqqqqqq") || strings.Contains(printed[0], "did you mean") {
+		t.Fatalf("printed = %v; want a bare unknown-command error, no suggestion", printed)
+	}
+}
+
+// TestSubmitComposer_EscapeHatch_BackslashSlash: "\/literal" sends to the
+// model verbatim with the backslash stripped (§6a's documented escape
+// hatch for a message that must literally start with "/").
+func TestSubmitComposer_EscapeHatch_BackslashSlash(t *testing.T) {
+	backend := newFakeBackend()
+	m := testModelWithRegistry(backend, testRegistry())
+	m.composer.InsertText(`\/literal command`)
+	runCmd(m.submitComposer())
+	if len(backend.Sent) != 1 || backend.Sent[0].Text != "/literal command" {
+		t.Fatalf("Sent = %+v; want one user message with text \"/literal command\"", backend.Sent)
+	}
+}
+
+// TestSubmitComposer_EscapeHatch_LeadingSpace: a leading space also opts a
+// literal "/"-starting message out of containment, unmodified.
+func TestSubmitComposer_EscapeHatch_LeadingSpace(t *testing.T) {
+	backend := newFakeBackend()
+	m := testModelWithRegistry(backend, testRegistry())
+	m.composer.InsertText(" /literal command")
+	runCmd(m.submitComposer())
+	if len(backend.Sent) != 1 || backend.Sent[0].Text != " /literal command" {
+		t.Fatalf("Sent = %+v; want one user message with text \" /literal command\"", backend.Sent)
+	}
+}
+
+// TestSubmitComposer_RegistryNameSugar: "/<registry-name>" (e.g. "/kimi")
+// dispatches exactly like "/model kimi" — the shortcut form the operator
+// types instinctively (§6a) — and does not reach the model.
+func TestSubmitComposer_RegistryNameSugar(t *testing.T) {
+	backend := newFakeBackend()
+	reg := ModelRegistry{"kimi": {Model: "kimi-k3", BaseURL: "http://x:4000/v1"}}
+	m := testModelWithRegistry(backend, reg)
+	var printed []string
+	m.cfg.Printer = capturingPrinter(&printed)
+	m.composer.InsertText("/kimi")
+	runCmd(m.submitComposer())
+	if len(backend.Sent) != 0 {
+		t.Fatalf("backend got %d inputs; /kimi sugar must not reach the model", len(backend.Sent))
+	}
+	if m.currentModel != "kimi-k3" {
+		t.Fatalf("currentModel = %q, want kimi-k3 (as /model kimi would set)", m.currentModel)
+	}
+	if len(printed) != 1 || !strings.Contains(printed[0], "model set to kimi") {
+		t.Fatalf("printed = %v; want the same confirmation /model kimi prints", printed)
 	}
 }
 
@@ -120,4 +194,165 @@ func TestRenderMCPReport_Golden(t *testing.T) {
 		}, nil
 	}, PlainTheme())
 	assertGolden(t, "slash_mcp", out)
+}
+
+// TestSlashStatus_ContainsCoreFields: model + thread id + usage are present
+// after at least one completed turn.
+func TestSlashStatus_ContainsCoreFields(t *testing.T) {
+	backend := newFakeBackend()
+	m := NewModel(Config{Backend: backend, AgentID: "anvil-builder", Theme: PlainTheme(), ThreadID: "agora-abc123",
+		Now: func() time.Time { return time.Unix(0, 0).UTC() }, ModelRegistry: testRegistry()})
+	var printed []string
+	m.cfg.Printer = capturingPrinter(&printed)
+
+	m.handleEvent(contracts.Event{Type: contracts.EvTurnStarted, TurnID: "t1"})
+	usagePayload, err := json.Marshal(map[string]any{"usage": map[string]any{"input": 100, "output": 20}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.handleEvent(contracts.Event{Type: contracts.EvTurnCompleted, TurnID: "t1", Payload: usagePayload})
+
+	m.composer.SetValue("/status")
+	runCmd(m.submitComposer())
+	if len(backend.Sent) != 0 {
+		t.Fatalf("/status sent %v to the model, want nothing", backend.Sent)
+	}
+	if len(printed) != 1 {
+		t.Fatalf("printed = %v; want one block", printed)
+	}
+	out := printed[0]
+	for _, want := range []string{"anvil-builder", "claude-sonnet-5", "agora-abc123", "in-process"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("/status output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "no completed turns yet") {
+		t.Errorf("/status shows no-usage placeholder after a completed turn:\n%s", out)
+	}
+}
+
+// TestSlashCopy_OSC52AndEmpty covers both branches: a finalized agent
+// message emits a correctly-encoded OSC 52 sequence, and an empty
+// transcript reports "nothing to copy" rather than an escape sequence.
+func TestSlashCopy_OSC52AndEmpty(t *testing.T) {
+	backend := newFakeBackend()
+	m := testModelWithRegistry(backend, testRegistry())
+	var printed []string
+	m.cfg.Printer = capturingPrinter(&printed)
+
+	m.composer.SetValue("/copy")
+	runCmd(m.submitComposer())
+	if len(printed) != 1 || printed[0] != "nothing to copy" {
+		t.Fatalf("printed = %v; want [\"nothing to copy\"] before any reply", printed)
+	}
+
+	printed = nil
+	m.handleEvent(contracts.Event{Type: contracts.EvTurnStarted, TurnID: "t1"})
+	m.handleEvent(contracts.Event{Type: contracts.EvAgentMessageDelta, Payload: deltaPayload(t, "hello there\n")})
+	m.handleEvent(contracts.Event{Type: contracts.EvTurnCompleted, TurnID: "t1"})
+	printed = nil // drop the streamed/finalized transcript prints, isolate /copy's own output
+	m.composer.SetValue("/copy")
+	runCmd(m.submitComposer())
+	if len(printed) != 2 {
+		t.Fatalf("printed = %v; want [osc52, \"copied N chars\"]", printed)
+	}
+	wantB64 := base64.StdEncoding.EncodeToString([]byte("hello there"))
+	wantOSC := "\x1b]52;c;" + wantB64 + "\x07"
+	if printed[0] != wantOSC {
+		t.Fatalf("osc52 = %q, want %q", printed[0], wantOSC)
+	}
+	if printed[1] != "copied 11 chars" {
+		t.Fatalf("count line = %q, want \"copied 11 chars\"", printed[1])
+	}
+}
+
+// forkBackend is a fakeBackend that also implements ThreadForker.
+type forkBackend struct {
+	*fakeBackend
+	gotThread string
+	gotSeq    int64
+	newID     string
+	err       error
+}
+
+func (f *forkBackend) ForkThread(threadID string, seq int64) (string, error) {
+	f.gotThread, f.gotSeq = threadID, seq
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.newID, nil
+}
+
+// TestSlashFork_ForksAtLatestSeq: /fork calls the seam with the thread id
+// and the highest item Seq this attachment has observed, and prints the
+// relaunch hint.
+func TestSlashFork_ForksAtLatestSeq(t *testing.T) {
+	backend := &forkBackend{fakeBackend: newFakeBackend(), newID: "th_abc123"}
+	m := NewModel(Config{Backend: backend, Theme: PlainTheme(), ThreadID: "agora-parent",
+		Now: func() time.Time { return time.Unix(0, 0).UTC() }, ModelRegistry: testRegistry()})
+	var printed []string
+	m.cfg.Printer = capturingPrinter(&printed)
+
+	m.handleEvent(contracts.Event{Type: contracts.EvItemCompleted, Item: &contracts.ItemRef{Seq: 7, Type: contracts.ItemAgentMessage}})
+
+	m.composer.SetValue("/fork")
+	runCmd(m.submitComposer())
+	if backend.gotThread != "agora-parent" || backend.gotSeq != 7 {
+		t.Fatalf("ForkThread called with (%q, %d); want (agora-parent, 7)", backend.gotThread, backend.gotSeq)
+	}
+	if len(printed) != 1 || !strings.Contains(printed[0], "th_abc123") || !strings.Contains(printed[0], "agora -thread th_abc123") {
+		t.Fatalf("printed = %v; want the forked id + relaunch hint", printed)
+	}
+	if len(backend.Sent) != 0 {
+		t.Fatalf("/fork sent %v to the model, want nothing", backend.Sent)
+	}
+}
+
+// TestSlashFork_UnsupportedBackend: a backend without the ThreadForker seam
+// degrades to a plain message, same pattern as /resume.
+func TestSlashFork_UnsupportedBackend(t *testing.T) {
+	m := testModelWithRegistry(newFakeBackend(), testRegistry()) // plain fake: no ThreadForker
+	var printed []string
+	m.cfg.Printer = capturingPrinter(&printed)
+	m.composer.SetValue("/fork")
+	runCmd(m.submitComposer())
+	if len(printed) != 1 || !strings.Contains(printed[0], "not supported") {
+		t.Fatalf("printed = %v; want a not-supported message", printed)
+	}
+}
+
+// TestSlashNew_PrintsRelaunchCommand: v1 doesn't swap threads in place — it
+// prints the relaunch command with a freshly generated id.
+func TestSlashNew_PrintsRelaunchCommand(t *testing.T) {
+	m := testModelWithRegistry(newFakeBackend(), testRegistry())
+	var printed []string
+	m.cfg.Printer = capturingPrinter(&printed)
+	m.composer.SetValue("/new")
+	runCmd(m.submitComposer())
+	if len(printed) != 1 || !strings.Contains(printed[0], "start fresh: agora -thread ") {
+		t.Fatalf("printed = %v; want the relaunch hint", printed)
+	}
+}
+
+// TestSlashClear_ClearsScreenAndReprintsHeader.
+func TestSlashClear_ClearsScreenAndReprintsHeader(t *testing.T) {
+	m := testModelWithRegistry(newFakeBackend(), testRegistry())
+	var printed []string
+	m.cfg.Printer = capturingPrinter(&printed)
+	m.composer.SetValue("/clear")
+	cmd := m.submitComposer()
+	if cmd == nil {
+		t.Fatal("submitComposer(/clear) returned nil cmd")
+	}
+	// The header is printed synchronously (m.cfg.Printer(header) is built
+	// eagerly as one of tea.Batch's arguments); the returned cmd, when run,
+	// carries the tea.ClearScreen message (compactCmds collapses a batch
+	// with one non-nil member — capturingPrinter's nil — down to the single
+	// remaining cmd, so this is NOT a BatchMsg here).
+	if msg := cmd(); msg == nil {
+		t.Fatal("/clear cmd produced no message")
+	}
+	if len(printed) != 1 {
+		t.Fatalf("printed = %v; want the re-printed session header", printed)
+	}
 }

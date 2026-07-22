@@ -158,6 +158,17 @@ func (b *inProcessBackend) ThreadSummaries(wd string) ([]contracts.ThreadMeta, e
 	return b.store.List(contracts.ListFilter{WorkingDir: wd})
 }
 
+// ForkThread implements tui.ThreadForker (/fork): a thin pass-through to the
+// store's Fork (internal/persistence — no copying, the child reads through
+// the parent up to seq). Mirrors ThreadSummaries' shape one seam over.
+func (b *inProcessBackend) ForkThread(threadID string, seq int64) (string, error) {
+	meta, err := b.store.Fork(threadID, seq)
+	if err != nil {
+		return "", err
+	}
+	return meta.ThreadID, nil
+}
+
 // newInProcessStore opens (creating if absent) the operator's persistent,
 // on-disk ThreadStore under ~/.agora/threads (agora-spec-persistence.md
 // §1's LocalStore, rooted at the same state dir bare `agora`'s -state-dir
