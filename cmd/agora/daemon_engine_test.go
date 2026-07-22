@@ -9,6 +9,7 @@ import (
 	"github.com/CarriedWorldUniverse/agora/internal/daemon"
 	agoraio "github.com/CarriedWorldUniverse/agora/internal/io"
 	"github.com/CarriedWorldUniverse/agora/internal/persistence"
+	"github.com/CarriedWorldUniverse/agora/internal/subagent"
 	bridle "github.com/CarriedWorldUniverse/bridle"
 	"github.com/CarriedWorldUniverse/bridle/fake"
 )
@@ -41,7 +42,7 @@ func TestNewEngineFactory_ServesARealTurn(t *testing.T) {
 
 	d := daemon.NewDaemon(ctx, daemon.Config{
 		Store:         store,
-		EngineFactory: newEngineFactory(provider, store),
+		EngineFactory: newEngineFactory(provider, store, subagent.NewMemGraphStore()),
 	})
 	defer d.Close()
 

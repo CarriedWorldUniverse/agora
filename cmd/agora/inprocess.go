@@ -36,7 +36,7 @@ import (
 // creds resolve BEFORE the first turn is a separate, later follow-on
 // (blueprint Phase 0 U-A2) — noted, not built here.
 func newInProcessBackend(ctx context.Context, threadID string, attach agoraio.AttachRequest) (tui.Backend, error) {
-	mgr, store, err := newInProcessManager(threadID, claudesdk.New())
+	mgr, store, closeGraph, err := newInProcessManager(threadID, claudesdk.New())
 	if err != nil {
 		return nil, err
 	}
@@ -48,7 +48,7 @@ func newInProcessBackend(ctx context.Context, threadID string, attach agoraio.At
 		Capabilities: attach.Capabilities,
 	}, attach.Replay)
 
-	return &inProcessBackend{Backend: tui.NewLocalBackend(sess, att), store: store}, nil
+	return &inProcessBackend{Backend: tui.NewLocalBackend(sess, att), store: store, closeGraph: closeGraph}, nil
 }
 
 // inProcessBackend wraps the localBackend so the in-process ThreadStore's
@@ -64,6 +64,10 @@ type inProcessBackend struct {
 	store     contracts.ThreadStore
 	closeOnce sync.Once
 	closeErr  error
+	// closeGraph releases the process-wide agent-graph file handle
+	// newInProcessManager opened (engine.go openAgentGraph) — leaked, it
+	// keeps ~/.agora/agent-graph.jsonl locked on Windows.
+	closeGraph func()
 }
 
 func (b *inProcessBackend) Close() error {
@@ -73,6 +77,9 @@ func (b *inProcessBackend) Close() error {
 			if cerr := c.Close(); cerr != nil && b.closeErr == nil {
 				b.closeErr = cerr
 			}
+		}
+		if b.closeGraph != nil {
+			b.closeGraph()
 		}
 	})
 	return b.closeErr

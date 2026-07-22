@@ -61,10 +61,11 @@ func runPipe(args []string) {
 // (newInProcessManager) for threadID and drives it via agoraio.RunPipe,
 // closing the store afterward exactly like inProcessBackend.Close does.
 func runPipeWithProvider(ctx context.Context, threadID string, provider bridle.Provider, r stdio.Reader, w, stderr stdio.Writer, opts agoraio.PipeOptions) (int, error) {
-	mgr, store, err := newInProcessManager(threadID, provider)
+	mgr, store, closeGraph, err := newInProcessManager(threadID, provider)
 	if err != nil {
 		return agoraio.ExitFailed, err
 	}
+	defer closeGraph()
 	defer func() {
 		if c, ok := store.(stdio.Closer); ok {
 			_ = c.Close()
