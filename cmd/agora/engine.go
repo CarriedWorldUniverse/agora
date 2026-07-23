@@ -45,9 +45,16 @@ func newTurnEngineManager(threadID string, provider bridle.Provider, store contr
 	for _, w := range hookWarnings {
 		fmt.Fprintln(os.Stderr, w)
 	}
+	// Operator-configurable reasoning-effort default (.agora/config.json's
+	// default_effort — see turnengine.LoadDefaultEffort): loaded here in the
+	// same shared seam as hooks, so every lane picks up the SAME configured
+	// default rather than just the TUI. "" (no config anywhere) leaves
+	// Manager's own contracts.EffortHigh fallback in place.
+	defaultEffort := turnengine.LoadDefaultEffort(userHomeOrDot(), roots.WorkingDir)
 	return turnengine.NewManager(threadID, provider,
 		turnengine.WithRoots(roots),
 		turnengine.WithStore(store),
+		turnengine.WithDefaultEffort(defaultEffort),
 		// Interactive sessions distill each turn into durable facts using the
 		// active model itself (ctxmap fact extraction) — off by default in the
 		// engine, on here, for every lane that runs a real turn.
