@@ -173,8 +173,28 @@ func (s *Source) Call(ctx context.Context, name string, args json.RawMessage) (t
 }
 
 // Close stops all servers (subprocess teardown). Best-effort.
+//
+// Client(name) BEFORE Cancel(name), never the reverse: Cancel deletes the
+// future entry unconditionally (manager.go), so calling it first makes
+// Client(name) find nothing and skip a server whose subprocess is very
+// much still running — the original form of this method did exactly that
+// and never actually killed a single READY server's process (adversarial
+// review of PR #94, finding 3's live-server re-verification: the fix that
+// wires this into Manager.Run's teardown was correct, but this method's
+// own body was not — a nexus-jira-mcp subprocess measurably survived
+// Run() returning). Client(name) only blocks if a connect for that name
+// is still in flight — for the ordinary case (Close called after Run's
+// turn loop has fully stopped, so no concurrent Tools()/Call() is
+// spawning anything new) ensureStarted has already settled every
+// configured server before this ever runs, so the read never blocks; a
+// truly concurrent Close (a caller misusing a Source across goroutines
+// mid-startup) is the one case Cancel's abort-the-connect behavior still
+// helps with, which is why it stays as the second, best-effort step.
 func (s *Source) Close() {
 	for _, cfg := range s.cfgs {
+		if client, ok := s.mgr.Client(cfg.Name); ok {
+			_ = client.Close()
+		}
 		s.mgr.Cancel(cfg.Name)
 	}
 }

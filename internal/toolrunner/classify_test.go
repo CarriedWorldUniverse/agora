@@ -2,6 +2,8 @@ package toolrunner
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
@@ -45,12 +47,76 @@ func TestClassifyExec_SandboxEscapes(t *testing.T) {
 		"cat " + roots.WorkingDir + "/notes.txt",
 		"curl https://example.com/api",
 		"grep -rn TODO internal/",
+		// PATH-style VAR=a:b:c is a LIST, not one path (adversarial review
+		// of PR #94, finding 4) — every segment here is sandbox-relative
+		// or a bare name, so this must stay exec, not false-positive as
+		// escalation on the colon-joined blob.
+		"PATH=bin:vendor/bin:$PATH make build",
 	}
 	for _, cmd := range inside {
 		kind, _ := Classify(Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: cmd})}, roots)
 		if kind != contracts.KindExec {
 			t.Errorf("Classify(%q) = %v, want exec (sandbox-contained)", cmd, kind)
 		}
+	}
+}
+
+// TestClassifyExec_PathStyleAssignment_StillCatchesAnEscapingSegment:
+// finding 4's fix must not weaken finding-4-adjacent coverage — a REAL
+// escape hidden in one segment of a colon-joined PATH-style assignment
+// still classifies as escalation.
+func TestClassifyExec_PathStyleAssignment_StillCatchesAnEscapingSegment(t *testing.T) {
+	roots := newTestRoots(t)
+	kind, _ := Classify(Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: "PATH=/tmp/evil:/usr/bin make build"})}, roots)
+	if kind != contracts.KindEscalation {
+		t.Fatalf("Classify(PATH with an escaping segment) = %v, want escalation", kind)
+	}
+}
+
+// TestClassifyExec_SymlinkEscape: adversarial review of PR #94, finding 1
+// — a relative-looking token that is actually a symlink resolving OUTSIDE
+// the sandbox must classify as escalation, not auto-run as exec. The
+// companion case proves a symlink that stays INSIDE (or points at a
+// nonexistent target) is unaffected — this must not become a blanket
+// "no symlinks ever" false-positive generator.
+func TestClassifyExec_SymlinkEscape(t *testing.T) {
+	roots := newTestRoots(t)
+	wd := roots.WorkingDir
+
+	outsideDir := t.TempDir()
+	secret := filepath.Join(outsideDir, "secret.txt")
+	if err := os.WriteFile(secret, []byte("s"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	escapingLink := filepath.Join(wd, "innocuous")
+	if err := os.Symlink(secret, escapingLink); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	kind, _ := Classify(Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: "cat innocuous"})}, roots)
+	if kind != contracts.KindEscalation {
+		t.Fatalf("Classify(cat innocuous) with an escaping symlink = %v, want escalation", kind)
+	}
+
+	// A symlink that resolves INSIDE the sandbox is a normal in-sandbox
+	// reference — must stay exec.
+	insideTarget := filepath.Join(wd, "real.txt")
+	if err := os.WriteFile(insideTarget, []byte("s"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sameDirLink := filepath.Join(wd, "alias")
+	if err := os.Symlink(insideTarget, sameDirLink); err != nil {
+		t.Fatal(err)
+	}
+	kind, _ = Classify(Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: "cat alias"})}, roots)
+	if kind != contracts.KindExec {
+		t.Fatalf("Classify(cat alias) with an in-sandbox symlink = %v, want exec", kind)
+	}
+
+	// A token that doesn't exist on disk (nothing to leak) stays exec —
+	// resolution failure is not treated as an escape.
+	kind, _ = Classify(Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: "cat does-not-exist.txt"})}, roots)
+	if kind != contracts.KindExec {
+		t.Fatalf("Classify(cat does-not-exist.txt) = %v, want exec (nonexistent target is not a leak)", kind)
 	}
 }
 

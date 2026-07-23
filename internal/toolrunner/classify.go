@@ -254,39 +254,86 @@ func Classify(call Call, roots Roots) (contracts.ApprovalKind, any) {
 
 // commandNamesOutsidePath scans a shell command's tokens for filesystem
 // paths that leave the WorkingDir subtree: absolute paths, ~-prefixed
-// paths, and ..-relative escapes. It is a POLICY-layer heuristic (which
-// approval kind the call classifies as), not containment — the exec
-// family still runs with cwd=WorkingDir and the fs family still enforces
-// roots regardless of what this misses (env-var indirection, subshells).
-// Conservative choices: ~ counts as outside without resolving $HOME
-// (Classify stays pure/no-I/O; a false prompt is recoverable, a false
-// auto-run is not), URLs (scheme://) are skipped, bare relative tokens
-// are anchored inside the sandbox by construction.
+// paths, ..-relative escapes, and — unlike the rest of this file's
+// classify-time checks — a SYMLINK-AWARE resolution of every candidate
+// that looks lexically inside. It is a POLICY-layer heuristic (which
+// approval kind the call classifies as), not full containment: the exec
+// family still runs with cwd=WorkingDir and this only judges tokens that
+// look like paths at all (env-var indirection, subshells still evade it).
+//
+// The symlink resolution is the one deliberate exception to this file's
+// "Classify does no I/O" convention (finding, adversarial review of
+// PR #94): for a WRITE, that convention is safe because fs.go's
+// execution-time resolveContained is a REAL symlink-aware backstop no
+// matter what classify-time decided — an auto-approved write to a symlink
+// escaping the sandbox still gets refused when it actually runs. Exec has
+// no equivalent backstop (exec.go only sets cmd.Dir=cwd; validating
+// arbitrary shell-command path arguments at execution time is not
+// generally possible), so classify-time IS the only boundary here — a
+// purely lexical check would auto-run `cat innocuous` where `innocuous`
+// is a symlink to anything on the host, with no prompt. A resolution
+// failure (token doesn't exist, permission denied, ...) stays inside:
+// nothing on disk means nothing to leak, and matches the file's existing
+// "a false prompt is recoverable, a false auto-run is not" rule — it's
+// only ever the RESOLVED existing target landing outside that flips this.
 func commandNamesOutsidePath(command string, roots Roots) (offending string, outside bool) {
 	wd := roots.WorkingDir
 	sep := string(filepath.Separator)
-	for _, raw := range strings.Fields(command) {
-		tok := strings.Trim(raw, "\"'`(),;&|<>")
-		// --flag=/path and VAR=/path forms: judge the value part.
-		if eq := strings.IndexByte(tok, '='); eq >= 0 && eq+1 < len(tok) {
-			tok = strings.Trim(tok[eq+1:], "\"'`")
-		}
+	outsideOf := func(p string) bool { return p != wd && !strings.HasPrefix(p+sep, wd+sep) }
+
+	// isCandidateOutside judges ONE path candidate (already stripped of any
+	// VAR=/--flag= prefix): the lexical check, then — for anything that
+	// looks inside — the symlink-aware resolution (see the function doc).
+	isCandidateOutside := func(tok string) bool {
 		if tok == "" || strings.Contains(tok, "://") {
-			continue
+			return false
 		}
 		var p string
 		switch {
 		case tok == "~" || strings.HasPrefix(tok, "~/"):
-			return raw, true
+			return true
 		case strings.HasPrefix(tok, "/"):
 			p = filepath.Clean(tok)
 		case tok == ".." || strings.HasPrefix(tok, "../") || strings.Contains(tok, "/../") || strings.HasSuffix(tok, "/.."):
 			p = filepath.Clean(filepath.Join(wd, tok))
 		default:
+			// A bare relative token: lexically inside by construction, but
+			// may be a symlink whose target escapes — still a candidate
+			// for the resolution check below, not skipped outright.
+			p = filepath.Join(wd, tok)
+		}
+		if outsideOf(p) {
+			return true
+		}
+		resolved, err := filepath.EvalSymlinks(p)
+		return err == nil && outsideOf(resolved)
+	}
+
+	for _, raw := range strings.Fields(command) {
+		tok := strings.Trim(raw, "\"'`(),;&|<>")
+		value := tok
+		isAssignment := false
+		// --flag=/path and VAR=/path forms: judge the value part.
+		if eq := strings.IndexByte(tok, '='); eq >= 0 && eq+1 < len(tok) {
+			value = strings.Trim(tok[eq+1:], "\"'`")
+			isAssignment = true
+		}
+		if !isAssignment {
+			if isCandidateOutside(value) {
+				return raw, true
+			}
 			continue
 		}
-		if p != wd && !strings.HasPrefix(p+sep, wd+sep) {
-			return raw, true
+		// PATH-style assignments (VAR=a:b:c, e.g. `PATH=/usr/local/go/bin:$PATH
+		// make build`) are a list, not one path — judging the whole
+		// colon-joined blob as a single candidate made this a common false
+		// positive (adversarial review of PR #94, finding 4). Judge each
+		// ':'-separated segment on its own; an empty segment (leading/
+		// trailing/doubled ':') is not a path and is skipped.
+		for _, seg := range strings.Split(value, ":") {
+			if seg != "" && isCandidateOutside(seg) {
+				return raw, true
+			}
 		}
 	}
 	return "", false
