@@ -152,3 +152,31 @@ func TestManager_EffortLowering(t *testing.T) {
 	}
 	endAndClose(t, in, out, runErr)
 }
+
+// TestManager_WithDefaultEffort_OverridesHardcodedFallback: an operator-
+// configured default (WithDefaultEffort, normally wired from
+// .agora/config.json via LoadDefaultEffort) must apply to an input with no
+// Effort at all, in place of the hardcoded "high" fallback — not every
+// operator wants high as their standing default. A %-override still wins
+// over it regardless.
+func TestManager_WithDefaultEffort_OverridesHardcodedFallback(t *testing.T) {
+	provider := fake.NewProvider(fake.Step{Text: "a"}, fake.Step{Text: "b"})
+	_, in, out, runErr := newTestManagerWithStore(t, "th_effort_cfg", nil, provider, WithDefaultEffort("medium"))
+
+	in <- contracts.Input{Type: contracts.InUserMessage, Text: "hi"}
+	if !drainToTurnCompleted(t, out, testTimeout) {
+		t.Fatal("turn 1 never completed")
+	}
+	if got := provider.LastRequest().Effort; got != "medium" {
+		t.Fatalf("turn 1 effort = %q, want the configured default %q", got, "medium")
+	}
+
+	in <- contracts.Input{Type: contracts.InUserMessage, Text: "again", Effort: contracts.EffortLow}
+	if !drainToTurnCompleted(t, out, testTimeout) {
+		t.Fatal("turn 2 never completed")
+	}
+	if got := provider.LastRequest().Effort; got != "low" {
+		t.Fatalf("turn 2 effort = %q, want the %%-override %q to still win", got, "low")
+	}
+	endAndClose(t, in, out, runErr)
+}
