@@ -65,6 +65,7 @@ type slashCommand struct {
 func slashCommandTable() []slashCommand {
 	return []slashCommand{
 		{name: "status", desc: "show agent, model, thread, dir, backend, usage", run: runSlashStatus},
+		{name: "effort", desc: "show or set this session's reasoning-effort tier", run: runSlashEffort},
 		{name: "fork", desc: "branch the thread at the current point", run: runSlashFork},
 		{name: "copy", desc: "copy the last agent message to the clipboard", run: runSlashCopy},
 		{name: "clear", desc: "clear the screen and start a new active cell", run: runSlashClear},
@@ -102,6 +103,7 @@ func slashDispatch(text string) (cmd slashCommand, args string, ok bool) {
 // descriptions directly so /help still shows them in the right spot.
 var helpOrder = []struct{ name, fallbackDesc string }{
 	{"model", "switch or list available models"},
+	{"effort", "show or set this session's reasoning-effort tier"},
 	{"status", "show session status"},
 	{"resume", "list persisted threads for this dir"},
 	{"fork", "branch the thread at the current point"},
@@ -134,6 +136,7 @@ func runSlashHelp(m *Model, _ string) tea.Cmd {
 		}
 		row("/"+o.name, desc)
 	}
+	row("%model[:effort]", "one-shot override for THIS message only, e.g. %:xhigh or %sonnet:high")
 	row("/quit, /exit, /q", "quit agora")
 	return m.cfg.Printer(b.String())
 }
@@ -185,6 +188,11 @@ func runSlashStatus(m *Model, _ string) tea.Cmd {
 	}
 	row("agent", m.cfg.AgentID)
 	row("model", m.currentModel)
+	effort := "default (engine-configured)"
+	if m.currentEffort != "" {
+		effort = string(m.currentEffort)
+	}
+	row("effort", effort)
 	row("thread", m.cfg.ThreadID)
 	row("dir", cwdOrDot())
 	row("backend", backendMode(m.cfg.Backend))
@@ -194,6 +202,38 @@ func runSlashStatus(m *Model, _ string) tea.Cmd {
 	}
 	row("usage", usage)
 	return m.cfg.Printer(b.String())
+}
+
+// effortTierOrder is the display order for the reasoning-effort ladder —
+// map iteration in Go is unordered, and /effort's listing should read
+// low-to-high, not shuffle between calls.
+var effortTierOrder = []string{"low", "medium", "high", "xhigh", "max"}
+
+// runSlashEffort shows or sets this session's reasoning-effort tier: bare
+// `/effort` reports the current pin, `/effort <tier>` sets it (applied to
+// every plain user_message until changed — see submitComposer), and
+// `/effort default` clears it back to the engine's configured/hardcoded
+// default. Unknown input lists the valid tiers rather than silently
+// no-op'ing, same shape as handleModelCommand's unknown-name handling.
+func runSlashEffort(m *Model, args string) tea.Cmd {
+	args = strings.ToLower(strings.TrimSpace(args))
+	if args == "" {
+		current := "default (engine-configured)"
+		if m.currentEffort != "" {
+			current = string(m.currentEffort)
+		}
+		return m.cfg.Printer(fmt.Sprintf("effort: %s — tiers: %s (or \"default\" to clear)", current, strings.Join(effortTierOrder, ", ")))
+	}
+	if args == "default" {
+		m.currentEffort = ""
+		return m.cfg.Printer("effort reset to default (engine-configured)")
+	}
+	tier, known := effortLadder[args]
+	if !known {
+		return m.cfg.Printer(fmt.Sprintf("unknown effort tier %q — tiers: %s", args, strings.Join(effortTierOrder, ", ")))
+	}
+	m.currentEffort = tier
+	return m.cfg.Printer("effort set to " + string(tier))
 }
 
 // backendMode reports whether this connection speaks to a daemon over a

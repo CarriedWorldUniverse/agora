@@ -122,6 +122,14 @@ type Model struct {
 	// currentModel.
 	currentProvider *contracts.ProviderSpec
 
+	// currentEffort is the session-level reasoning-effort pin set via
+	// `/effort <tier>` (slash.go's runSlashEffort). Empty (the default)
+	// means no pin: submitComposer sends no Effort at all on a plain
+	// message, and the engine's own configured/hardcoded default applies.
+	// A %-override on a single message still wins over this pin, same as
+	// it wins over currentModel.
+	currentEffort contracts.Effort
+
 	// Session usage totals, accumulated from each turn.completed's usage
 	// payload and shown on the idle status row (NEX-794). sessCost prefers the
 	// provider-reported per-turn cost (exact, e.g. OpenRouter) and falls back
@@ -319,14 +327,25 @@ func (m *Model) renderStatusRow() string {
 		if m.statusErr != "" {
 			return m.cfg.Theme.Danger.Render("error: " + m.statusErr)
 		}
-		return m.cfg.Theme.Accent.Render(m.cfg.AgentID) + m.cfg.Theme.Muted.Render(fmt.Sprintf(" · %s%s · Esc to quit", m.currentModel, m.usageSegment()))
+		return m.cfg.Theme.Accent.Render(m.cfg.AgentID) + m.cfg.Theme.Muted.Render(fmt.Sprintf(" · %s%s%s · Esc to quit", m.currentModel, m.effortSegment(), m.usageSegment()))
 	}
 	if m.quitting {
 		return m.cfg.Theme.Muted.Render("⣾ interrupting turn · exiting…")
 	}
 	frame := spinnerFrames[m.spinnerFrame%len(spinnerFrames)]
 	elapsed := m.cfg.Now().Sub(m.turnStart).Round(time.Second)
-	return m.cfg.Theme.Warning.Render(frame) + m.cfg.Theme.Muted.Render(fmt.Sprintf(" running · %s · %s%s · Esc to interrupt", m.currentModel, elapsed, m.usageSegment()))
+	return m.cfg.Theme.Warning.Render(frame) + m.cfg.Theme.Muted.Render(fmt.Sprintf(" running · %s%s · %s%s · Esc to interrupt", m.currentModel, m.effortSegment(), elapsed, m.usageSegment()))
+}
+
+// effortSegment renders " · <tier>" when a session-level /effort pin
+// (m.currentEffort) is active, or "" when unset — an unset pin stays
+// invisible on the status row rather than printing "default" on every
+// idle line.
+func (m *Model) effortSegment() string {
+	if m.currentEffort == "" {
+		return ""
+	}
+	return " · " + string(m.currentEffort)
 }
 
 // usageSegment renders the session's cumulative usage for the status row —
@@ -1142,7 +1161,7 @@ func (m *Model) submitComposer() tea.Cmd {
 		}
 		in = contracts.Input{Type: contracts.InUserMessage, Text: rest, Model: modelID, Effort: effort, Provider: pspec}
 	} else {
-		in = contracts.Input{Type: contracts.InUserMessage, Text: text, Model: m.currentModel, Provider: m.currentProvider}
+		in = contracts.Input{Type: contracts.InUserMessage, Text: text, Model: m.currentModel, Effort: m.currentEffort, Provider: m.currentProvider}
 	}
 	// Remember which model this turn runs on so recordUsage can price it from
 	// the right table when the provider reports no cost.

@@ -89,6 +89,13 @@ type Manager struct {
 	roots              toolrunner.Roots
 	idGen              IDGen
 
+	// defaultEffort is the configured reasoning-effort tier applied when a
+	// turn carries no input.Effort (no %-override, no /effort session pin —
+	// see WithDefaultEffort). Empty means no config was found; the turn
+	// resolution falls back to contracts.EffortHigh, same as before this
+	// was made configurable.
+	defaultEffort string
+
 	// subagents wires the agent() tool onto this Manager's Surface (U-agent-
 	// runner) — nil (the default) means no agent() tool at all. This is the
 	// depth guard for subagents-spawning-subagents (agora-spec-subagents.md
@@ -247,6 +254,15 @@ type Option func(*Manager)
 // WithProfile earlier in the Option list already changed it — see
 // NewManager's doc comment on option-application order).
 func WithModel(model string) Option { return func(m *Manager) { m.model = model } }
+
+// WithDefaultEffort sets the reasoning-effort tier applied to a turn that
+// carries no input.Effort (see LoadDefaultEffort for the .agora/config.json
+// source this is normally wired from). Empty (the default, e.g. no config
+// file anywhere) leaves the Manager's own contracts.EffortHigh fallback in
+// place — this Option only overrides that fallback, it never overrides a
+// %-override or an explicit /effort session pin, both of which arrive as
+// input.Effort and already win regardless.
+func WithDefaultEffort(effort string) Option { return func(m *Manager) { m.defaultEffort = effort } }
 
 // WithProfile overrides the Manager's BASE ProfileConfig (DevProfile() by
 // default — see NewManager) with cfg's Model/AppendSystemPrompt/Policy/
@@ -1094,13 +1110,19 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 		})
 		return
 	}
-	// Effort (agora-spec-bridle §3): agora's default is HIGH — the operator's
-	// standing preference (xhigh's token cost isn't worth the marginal gain);
-	// xhigh/max stay available per-turn via a %-override. A one-shot
-	// input.Effort (the %-override, contracts/event.go) wins over the default.
-	// Bridle translates per lane (claudesdk passes the ladder through verbatim;
+	// Effort (agora-spec-bridle §3): the operator-configurable default
+	// (WithDefaultEffort, from .agora/config.json's default_effort — see
+	// LoadDefaultEffort) applies when set; contracts.EffortHigh is the
+	// last-resort fallback when no config exists anywhere (not every
+	// operator wants HIGH as their standing default). A one-shot
+	// input.Effort — a %-override, or a session's /effort pin threaded
+	// through as Input.Effort by the TUI — wins over either. Bridle
+	// translates per lane (claudesdk passes the ladder through verbatim;
 	// openai clamps xhigh/max→high; lanes with no knob drop it silently).
-	effort := string(contracts.EffortHigh)
+	effort := m.defaultEffort
+	if effort == "" {
+		effort = string(contracts.EffortHigh)
+	}
 	if input.Effort != "" {
 		effort = string(input.Effort)
 	}
