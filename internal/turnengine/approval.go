@@ -13,37 +13,38 @@ import (
 	bridle "github.com/CarriedWorldUniverse/bridle"
 )
 
-// defaultPolicy is the Manager's zero-config approval policy: every known
-// kind Classify can actually emit from the fs/exec surface (exec, patch,
-// escalation, mcp_tool) resolves to contracts.PolicyPrompt — i.e. ask,
-// absent a prior scoped allow (approval.Decide's PolicyPrompt case) —
-// EXCEPT KindRead (NEX-782), which resolves to contracts.PolicyAuto: a
-// coding agent must not prompt for approval on every read_file/list_dir/
-// glob/grep call. This does not weaken the envelope — read-only fs tools
-// are still containment-bounded and protected-dir-excluded in the fs
-// family itself (fs.go), unconditionally, regardless of the approval
-// outcome; auto-allowing KindRead only skips the approval PROMPT.
+// defaultPolicy is the Manager's zero-config approval policy — SANDBOX-
+// FIRST (operator decree): everything the classifier proves stays inside
+// the working-dir subtree auto-runs, everything that leaves it prompts.
+// Concretely:
+//   - KindRead auto (NEX-782, unchanged): reads are containment-bounded
+//     in the fs family regardless.
+//   - KindPatch auto: Classify only emits patch for writes INSIDE the
+//     writable roots and outside protected dirs — an outside/protected
+//     write is already KindEscalation, which prompts.
+//   - KindExec auto: Classify emits exec ONLY for commands whose named
+//     paths stay inside the sandbox (classify.go's
+//     commandNamesOutsidePath); a command naming an outside path (or ~,
+//     or an AddDir — added folders are reachable, not implicitly
+//     trusted) classifies as KindEscalation and prompts.
+//   - Everything that leaves the sandbox — escalation, mcp_tool (network
+//     side effects), question/plan — stays PolicyPrompt.
 //
-// This is deliberately built explicitly rather than reused from
-// contracts.BuiltinPresets()[contracts.PresetPrompt]: that preset sets
-// KindPatch to contracts.PolicyAuto (writes-inside-wd are "the sandbox's
-// job" per its own doc comment), but the brief's cited spec text for the
-// dev profile is "exec/patch/escalation → Ask" — nothing else auto-runs by
-// default in this unit. A future profile-config unit (U-C4/U-E2) is where
-// BuiltinPresets()/a real dev-profile PolicySet gets wired in; until then,
-// fail-closed-to-ask for every kind but read is the only zero-config
-// choice that can't silently auto-execute a write or a shell command.
+// The enforcement story is unchanged: this only decides PROMPTING. The
+// fs family's containment and the exec family's cwd remain hard bounds
+// whatever this table says; the exec heuristic is conservative (a false
+// positive prompts — recoverable; it cannot false-negative a write, and
+// an exec that touches outside without naming a path still runs inside
+// the sandbox cwd with roots-contained fs tools).
 //
 // KindQuestion and KindPlan are included for completeness (approval.Decide
-// reads the PolicySet for them too) even though Classify's fs/exec surface
-// never emits either — plan/question special-casing is explicitly OUT of
-// this unit's scope (no plan/question tools exist on this surface yet; see
-// doc.go). KindGate is omitted: approval.Decide always routes it to Ask
-// regardless of the PolicySet (spec: gate is preset-ungoverned).
+// reads the PolicySet for them too). KindGate is omitted: approval.Decide
+// always routes it to Ask regardless of the PolicySet (spec: gate is
+// preset-ungoverned).
 func defaultPolicy() contracts.PolicySet {
 	return contracts.PolicySet{
-		contracts.KindExec:       contracts.PolicyPrompt,
-		contracts.KindPatch:      contracts.PolicyPrompt,
+		contracts.KindExec:       contracts.PolicyAuto,
+		contracts.KindPatch:      contracts.PolicyAuto,
 		contracts.KindEscalation: contracts.PolicyPrompt,
 		contracts.KindMCPTool:    contracts.PolicyPrompt,
 		contracts.KindQuestion:   contracts.PolicyPrompt,
@@ -53,7 +54,8 @@ func defaultPolicy() contracts.PolicySet {
 }
 
 // WithPolicy overrides the Manager's approval.Decide policy set. Unset (the
-// default) is defaultPolicy() — ask on every known kind, nothing auto-runs.
+// default) is defaultPolicy() — sandbox-auto: in-sandbox exec/patch/read
+// run, anything classified outside the sandbox asks.
 func WithPolicy(p contracts.PolicySet) Option { return func(m *Manager) { m.policy = p } }
 
 // WithScopeStore overrides the Manager's approval.ScopeStore. Unset (the

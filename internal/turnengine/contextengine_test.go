@@ -136,7 +136,7 @@ func TestManager_ContextEngine_SurfaceToolsStillGated(t *testing.T) {
 		fake.Step{ToolCalls: []bridle.ToolInvocation{writeFileCall("1", "note.txt", "should ask")}},
 		fake.Step{Text: "done"},
 	)
-	m := NewManager("th_ctxmap_gate_write", provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
+	m := NewManager("th_ctxmap_gate_write", provider, WithRoots(roots), WithPolicy(promptAllPolicy()), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
 	if m.eng == nil {
 		t.Fatal("NewManager: context engine did not construct (m.eng nil)")
 	}
@@ -178,7 +178,7 @@ func TestManager_ContextEngine_RunCommandStillGated(t *testing.T) {
 		fake.Step{ToolCalls: []bridle.ToolInvocation{{ID: "1", Name: toolrunner.ToolRunCommand, Args: args}}},
 		fake.Step{Text: "done"},
 	)
-	m := NewManager("th_ctxmap_gate_exec", provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
+	m := NewManager("th_ctxmap_gate_exec", provider, WithRoots(roots), WithPolicy(promptAllPolicy()), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
 
 	in := make(chan contracts.Input, 1)
 	out := make(chan contracts.Event, 32)

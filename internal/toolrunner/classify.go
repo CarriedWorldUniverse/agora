@@ -2,6 +2,8 @@ package toolrunner
 
 import (
 	"encoding/json"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
@@ -136,6 +138,18 @@ func Classify(call Call, roots Roots) (contracts.ApprovalKind, any) {
 		if err := json.Unmarshal(call.Args, &a); err != nil {
 			return contracts.KindEscalation, EscalationPayload{Detail: "malformed run_command arguments: " + err.Error()}
 		}
+		// Sandbox-first exec (operator decree): a command that NAMES a path
+		// outside the working-dir subtree classifies as escalation (prompts
+		// under every preset), so the sandbox-auto default only auto-runs
+		// commands whose named paths stay inside. AddDirs deliberately
+		// count as OUTSIDE here — an added folder is reachable, not
+		// implicitly trusted; the operator grants it via the prompt
+		// (allow-always persists in the scope store).
+		if off, outside := commandNamesOutsidePath(a.Command, roots); outside {
+			return contracts.KindEscalation, EscalationPayload{
+				Detail: "command references " + strconv.Quote(off) + " outside the sandbox: " + a.Command,
+			}
+		}
 		return contracts.KindExec, ExecPayload{Command: a.Command}
 
 	case strings.HasPrefix(call.Name, mcpPrefix):
@@ -236,6 +250,46 @@ func Classify(call Call, roots Roots) (contracts.ApprovalKind, any) {
 	default:
 		return contracts.KindEscalation, EscalationPayload{Detail: "unrecognized tool call: " + call.Name}
 	}
+}
+
+// commandNamesOutsidePath scans a shell command's tokens for filesystem
+// paths that leave the WorkingDir subtree: absolute paths, ~-prefixed
+// paths, and ..-relative escapes. It is a POLICY-layer heuristic (which
+// approval kind the call classifies as), not containment — the exec
+// family still runs with cwd=WorkingDir and the fs family still enforces
+// roots regardless of what this misses (env-var indirection, subshells).
+// Conservative choices: ~ counts as outside without resolving $HOME
+// (Classify stays pure/no-I/O; a false prompt is recoverable, a false
+// auto-run is not), URLs (scheme://) are skipped, bare relative tokens
+// are anchored inside the sandbox by construction.
+func commandNamesOutsidePath(command string, roots Roots) (offending string, outside bool) {
+	wd := roots.WorkingDir
+	sep := string(filepath.Separator)
+	for _, raw := range strings.Fields(command) {
+		tok := strings.Trim(raw, "\"'`(),;&|<>")
+		// --flag=/path and VAR=/path forms: judge the value part.
+		if eq := strings.IndexByte(tok, '='); eq >= 0 && eq+1 < len(tok) {
+			tok = strings.Trim(tok[eq+1:], "\"'`")
+		}
+		if tok == "" || strings.Contains(tok, "://") {
+			continue
+		}
+		var p string
+		switch {
+		case tok == "~" || strings.HasPrefix(tok, "~/"):
+			return raw, true
+		case strings.HasPrefix(tok, "/"):
+			p = filepath.Clean(tok)
+		case tok == ".." || strings.HasPrefix(tok, "../") || strings.Contains(tok, "/../") || strings.HasSuffix(tok, "/.."):
+			p = filepath.Clean(filepath.Join(wd, tok))
+		default:
+			continue
+		}
+		if p != wd && !strings.HasPrefix(p+sep, wd+sep) {
+			return raw, true
+		}
+	}
+	return "", false
 }
 
 // classifyWriteTarget checks path against roots' containment/protection

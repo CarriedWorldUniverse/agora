@@ -109,6 +109,11 @@ type Manager struct {
 	// against this doc comment's advice).
 	subagents *subagent.Manager
 
+	// mcpSource folds configured MCP servers' tools into the surface
+	// (WithMCPSource) — nil (default) means no MCP, matching NewSurface's
+	// own "no MCP servers configured" no-op contract.
+	mcpSource toolrunner.MCPSource
+
 	// U-C3: the BeforeToolCall approval gate. policy/scopeStore feed
 	// approval.Decide (reused verbatim); hookMu/hookTurn and waiterMu/
 	// waiters are the two pieces of cross-goroutine state the gate's
@@ -327,6 +332,13 @@ func WithRoots(roots toolrunner.Roots) Option { return func(m *Manager) { m.root
 // built to back) never sets this Option on a CHILD Manager it constructs.
 func WithSubagents(mgr *subagent.Manager) Option { return func(m *Manager) { m.subagents = mgr } }
 
+// WithMCPSource folds a configured MCP tool source into the turn surface —
+// its tools appear as mcp__<server>__<tool> and route through it on a
+// call. Nil (default, unset) means no MCP, unchanged behavior.
+func WithMCPSource(src toolrunner.MCPSource) Option {
+	return func(m *Manager) { m.mcpSource = src }
+}
+
 // WithStore gives the Manager a contracts.ThreadStore for durability
 // (U-C6/U-C7): each turn's ThreadItems are Appended at the turn boundary
 // (see runOneTurn's persistTurn call), and the FIRST turn's Session.New
@@ -456,7 +468,7 @@ func NewManager(threadID string, provider bridle.Provider, opts ...Option) *Mana
 	if m.subagents != nil {
 		families = append(families, toolrunner.NewAgentFamily(m.subagents, m.threadID))
 	}
-	m.surface = toolrunner.NewSurface(nil, families...)
+	m.surface = toolrunner.NewSurface(m.mcpSource, families...)
 
 	// Planning/questions (agora-spec-planning-questions.md) need somewhere
 	// to persist thread items even on a Manager built with no durability

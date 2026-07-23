@@ -9,11 +9,49 @@ import (
 
 func TestClassifyExec(t *testing.T) {
 	roots := newTestRoots(t)
-	kind, payload := Classify(Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: "rm -rf /tmp/x"})}, roots)
+	// In-sandbox command (no named path leaves the working dir) -> exec.
+	kind, payload := Classify(Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: "rm -rf tmp/x"})}, roots)
 	if kind != contracts.KindExec {
 		t.Fatalf("kind = %v, want %v", kind, contracts.KindExec)
 	}
-	assertJSONExact(t, payload, `{"command":"rm -rf /tmp/x"}`)
+	assertJSONExact(t, payload, `{"command":"rm -rf tmp/x"}`)
+}
+
+// TestClassifyExec_SandboxEscapes: sandbox-first exec (operator decree) —
+// a command NAMING a path outside the working-dir subtree classifies as
+// escalation (prompts), while sandbox-relative commands and in-sandbox
+// absolute paths stay exec (auto under the default policy).
+func TestClassifyExec_SandboxEscapes(t *testing.T) {
+	roots := newTestRoots(t)
+	outside := []string{
+		"rm -rf /tmp/x",
+		"cat /etc/passwd",
+		"cp bin/agora ~/.local/bin/agora",
+		"ls ~",
+		"cat ../sibling/secret",
+		"tar -C .. -xf a.tar",
+		"go build -o /usr/local/bin/x ./cmd",
+	}
+	for _, cmd := range outside {
+		kind, _ := Classify(Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: cmd})}, roots)
+		if kind != contracts.KindEscalation {
+			t.Errorf("Classify(%q) = %v, want escalation (names an outside path)", cmd, kind)
+		}
+	}
+	inside := []string{
+		"go test ./...",
+		"make build",
+		"git commit -m msg",
+		"cat " + roots.WorkingDir + "/notes.txt",
+		"curl https://example.com/api",
+		"grep -rn TODO internal/",
+	}
+	for _, cmd := range inside {
+		kind, _ := Classify(Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: cmd})}, roots)
+		if kind != contracts.KindExec {
+			t.Errorf("Classify(%q) = %v, want exec (sandbox-contained)", cmd, kind)
+		}
+	}
 }
 
 func TestClassifyMCPTool(t *testing.T) {

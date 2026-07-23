@@ -51,6 +51,20 @@ func writeFileCall(id, path, content string) bridle.ToolInvocation {
 	return bridle.ToolInvocation{ID: id, Name: toolrunner.ToolWriteFile, Args: args}
 }
 
+// promptAllPolicy is the pre-sandbox-first prompting policy the ASK/DENY/
+// SCOPE rendezvous tests opt into explicitly: they exercise the approval
+// modal's wait/resolve machinery, which needs a prompt to actually fire —
+// the sandbox-auto default (approval.go's defaultPolicy) no longer prompts
+// for in-sandbox exec/patch.
+func promptAllPolicy() contracts.PolicySet {
+	return contracts.PolicySet{
+		contracts.KindExec: contracts.PolicyPrompt, contracts.KindPatch: contracts.PolicyPrompt,
+		contracts.KindEscalation: contracts.PolicyPrompt, contracts.KindMCPTool: contracts.PolicyPrompt,
+		contracts.KindQuestion: contracts.PolicyPrompt, contracts.KindPlan: contracts.PolicyPrompt,
+		contracts.KindRead: contracts.PolicyAuto,
+	}
+}
+
 // recvApprovalRequested drains ch until it observes an approval.requested
 // event, failing the test if the turn ends or the deadline elapses first
 // (a missing ask when one was expected must not just hang forever).
@@ -108,7 +122,7 @@ func TestManager_Approval_AskApproveExecutes(t *testing.T) {
 		fake.Step{ToolCalls: []bridle.ToolInvocation{writeFileCall("1", "note.txt", "hello from the model")}},
 		fake.Step{Text: "done"},
 	)
-	m := NewManager("th_ask_approve", provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
+	m := NewManager("th_ask_approve", provider, WithRoots(roots), WithPolicy(promptAllPolicy()), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
 
 	in := make(chan contracts.Input, 1)
 	out := make(chan contracts.Event, 32)
@@ -164,7 +178,7 @@ func TestManager_Approval_AskDenyIsToolResultNotAbort(t *testing.T) {
 		fake.Step{ToolCalls: []bridle.ToolInvocation{writeFileCall("1", "note.txt", "should never land on disk")}},
 		fake.Step{Text: "ok, I won't"},
 	)
-	m := NewManager("th_ask_deny", provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
+	m := NewManager("th_ask_deny", provider, WithRoots(roots), WithPolicy(promptAllPolicy()), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
 
 	in := make(chan contracts.Input, 1)
 	out := make(chan contracts.Event, 32)
@@ -353,7 +367,7 @@ func TestManager_Approval_BackToBackTurns_NoHookTurnClobber(t *testing.T) {
 		// expensive enough under -race to blow this package's test
 		// timeout; opting out removes overhead orthogonal to what this
 		// test asserts.
-		m := NewManager(fmt.Sprintf("th_b2b_%d", i), provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_a", "tu_b"}}), WithContextEngine(false))
+		m := NewManager(fmt.Sprintf("th_b2b_%d", i), provider, WithRoots(roots), WithPolicy(promptAllPolicy()), WithIDGen(&FakeIDGen{IDs: []string{"tu_a", "tu_b"}}), WithContextEngine(false))
 
 		in := make(chan contracts.Input, 2)
 		out := make(chan contracts.Event, 32)
@@ -422,7 +436,7 @@ func TestManager_Approval_ScopeSessionShortCircuitsSecondCall(t *testing.T) {
 		}},
 		fake.Step{Text: "done"},
 	)
-	m := NewManager("th_scope", provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
+	m := NewManager("th_scope", provider, WithRoots(roots), WithPolicy(promptAllPolicy()), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
 
 	in := make(chan contracts.Input, 1)
 	out := make(chan contracts.Event, 32)
@@ -480,7 +494,7 @@ func TestManager_Approval_InterruptDuringPendingApproval(t *testing.T) {
 		fake.Step{ToolCalls: []bridle.ToolInvocation{writeFileCall("1", "note.txt", "never written")}},
 		fake.Step{Text: "unreachable"},
 	)
-	m := NewManager("th_interrupt", provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
+	m := NewManager("th_interrupt", provider, WithRoots(roots), WithPolicy(promptAllPolicy()), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
 
 	in := make(chan contracts.Input, 1)
 	out := make(chan contracts.Event, 32)
