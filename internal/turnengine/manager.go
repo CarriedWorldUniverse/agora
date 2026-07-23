@@ -89,6 +89,10 @@ type Manager struct {
 	roots              toolrunner.Roots
 	idGen              IDGen
 
+	// familiesOverride, when non-nil, replaces the default tool-family set
+	// in NewManager's surface construction — see WithToolFamilies.
+	familiesOverride []toolrunner.Family
+
 	// defaultEffort is the configured reasoning-effort tier applied when a
 	// turn carries no input.Effort (no %-override, no /effort session pin —
 	// see WithDefaultEffort). Empty means no config was found; the turn
@@ -315,6 +319,19 @@ func WithClock(fn func() time.Time) Option { return func(m *Manager) { m.clock =
 // zero-config choice for a Manager built without one.
 func WithRoots(roots toolrunner.Roots) Option { return func(m *Manager) { m.roots = roots } }
 
+// WithToolFamilies replaces the default tool-family set (fs + exec + memory +
+// planning) with exactly fams. Unset (the default, nil) keeps the defaults.
+// The agent() family from WithSubagents is still appended when wired — this
+// Option overrides what a Manager serves, not the subagent depth guard.
+// Motivating caller: headless benchmark agents (cmd/tbagent) that must ship a
+// minimal surface — and must exclude the memory family in particular, whose
+// dotted tool names ("memory.read") are rejected outright by some
+// OpenAI-compatible backends' tool-name pattern (^[a-zA-Z0-9_-]+$; DeepSeek
+// enforces this), which fails the whole request, not just the one tool.
+func WithToolFamilies(fams ...toolrunner.Family) Option {
+	return func(m *Manager) { m.familiesOverride = fams }
+}
+
 // WithSubagents adds the agent() tool to this Manager's Surface, backed by
 // mgr — every agent() call a turn on this Manager makes spawns through mgr
 // with THIS Manager's threadID as the parent (agora-spec-subagents.md §2).
@@ -452,6 +469,9 @@ func NewManager(threadID string, provider bridle.Provider, opts ...Option) *Mana
 		toolrunner.NewExecFamily(m.roots),
 		toolrunner.NewMemoryFamily(defaultMemoryDir()),
 		toolrunner.NewPlanningFamily(),
+	}
+	if m.familiesOverride != nil {
+		families = m.familiesOverride
 	}
 	if m.subagents != nil {
 		families = append(families, toolrunner.NewAgentFamily(m.subagents, m.threadID))
