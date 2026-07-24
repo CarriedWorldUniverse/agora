@@ -53,6 +53,13 @@ func newTurnEngineManager(threadID string, provider bridle.Provider, store contr
 	// default rather than just the TUI. "" (no config anywhere) leaves
 	// Manager's own contracts.EffortHigh fallback in place.
 	defaultEffort := turnengine.LoadDefaultEffort(userHomeOrDot(), roots.WorkingDir)
+	// Approval posture (approvals spec §2): permission_mode from the same
+	// config.json, overridable per-process by -mode (which permissionMode
+	// carries when set). Resolved in this shared seam so the TUI, pipe and
+	// daemon lanes all run the SAME posture — before this, nothing in
+	// cmd/agora ever passed WithPolicy, so every lane silently ran
+	// sandbox-auto no matter what the operator wanted.
+	mode := resolvePermissionMode(roots.WorkingDir)
 	// Custom subagent types (subagents spec §1): discover .agora/agents/*.md
 	// (plus the .claude/agents compat lane), project layer before user. Same
 	// shared seam again, so every lane sees the same agent types. Passing
@@ -90,6 +97,8 @@ func newTurnEngineManager(threadID string, provider bridle.Provider, store contr
 		// Interactive sessions distill each turn into durable facts using the
 		// active model itself (ctxmap fact extraction) — off by default in the
 		// engine, on here, for every lane that runs a real turn.
+		// active model itself (ctxmap fact extraction) — off by default in the
+		// engine, on here, for every lane that runs a real turn.
 		turnengine.WithContextExtraction(true),
 		turnengine.WithHooks(hookRunner),
 		// agent() delegation (subagents spec §2): the PARENT Manager gets the
@@ -97,6 +106,13 @@ func newTurnEngineManager(threadID string, provider bridle.Provider, store contr
 		// depth guard — see turnengine.Manager.subagents' doc comment).
 		turnengine.WithSubagents(subagent.NewManager(store, graph, subagent.NewRegistry(agentDefs),
 			enginerunner.New(provider, store))),
+	}
+	// Apply the resolved approval posture LAST among the policy-bearing
+	// options, so an explicit -mode/config choice wins over anything the
+	// base profile set. An unknown name never reaches here — main.go
+	// validates and exits — so this cannot silently loosen the posture.
+	if mode != "" {
+		opts = append(opts, turnengine.WithPermissionMode(mode))
 	}
 	// MCP (§1 spec): fold this working dir's .mcp.json servers, identity-
 	// interpolated, into the surface — same shared seam as hooks/effort so
@@ -196,4 +212,27 @@ type errEngine struct{ err error }
 func (e errEngine) Run(_ context.Context, _ <-chan contracts.Input, out chan<- contracts.Event) error {
 	close(out)
 	return e.err
+}
+
+// permissionModeOverride carries the -mode flag's value to
+// newTurnEngineManager. A package-level variable rather than a parameter
+// because every lane reaches the shared seam through a different call
+// chain (EngineFactory's signature is fixed by daemon.EngineFactory, and
+// newInProcessManager is called from three places) — threading it through
+// all of them would touch far more code than the one value warrants. It is
+// written exactly once, during flag parsing in main, before any engine is
+// constructed, and read-only thereafter.
+var permissionModeOverride string
+
+// resolvePermissionMode is the ONE place the session's approval posture is
+// decided: the -mode flag if given, else permission_mode from
+// .agora/config.json (project over user), else "" meaning the engine's own
+// default. Both the engine seam and the TUI's /mode call this, so what the
+// operator is TOLD they are running and what they are actually running
+// cannot drift.
+func resolvePermissionMode(workingDir string) string {
+	if permissionModeOverride != "" {
+		return permissionModeOverride
+	}
+	return turnengine.LoadPermissionMode(userHomeOrDot(), workingDir)
 }

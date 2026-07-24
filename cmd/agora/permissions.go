@@ -1,12 +1,15 @@
 package main
 
 import (
+	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/CarriedWorldUniverse/agora/internal/approval"
 	"github.com/CarriedWorldUniverse/agora/internal/skills"
 	"github.com/CarriedWorldUniverse/agora/internal/tui"
+	"github.com/CarriedWorldUniverse/agora/internal/turnengine"
 )
 
 // permissions.go adapts the durable scope store into the two callbacks the
@@ -80,4 +83,59 @@ func revokePermission(kind, scope, key string) (bool, error) {
 		return false, warn
 	}
 	return store.Revoke(kind, scope, key)
+}
+
+// modeCatalog adapts the turnengine mode list into the (name, description)
+// pairs /mode renders, keeping internal/tui free of a turnengine import.
+func modeCatalog() [][2]string {
+	names := turnengine.KnownModes()
+	out := make([][2]string, 0, len(names))
+	for _, n := range names {
+		out = append(out, [2]string{n, turnengine.DescribeMode(n)})
+	}
+	return out
+}
+
+// mustGetwd is the working dir for mode resolution; an unreadable cwd
+// falls back to "", which simply skips the project config layer rather
+// than failing the session.
+func mustGetwd() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return wd
+}
+
+// registerModeFlag adds -mode to fs and returns a function to call AFTER
+// fs.Parse to validate and apply it.
+//
+// Every lane needs this separately because `agora daemon|pipe|workflow`
+// dispatch and return BEFORE main's own flag.Parse, each with its own
+// FlagSet. Without registering it per-lane, `agora pipe -mode
+// never-escalate` would be silently ignored and the run would use a
+// different approval posture than the operator asked for — precisely the
+// failure this whole area must not have, and worst in exactly the
+// unattended lanes where never-escalate matters most.
+func registerModeFlag(fs *flag.FlagSet) func() {
+	mode := fs.String("mode", "", "approval posture for this run (overrides permission_mode in .agora/config.json)")
+	return func() { applyModeFlag(*mode) }
+}
+
+// applyModeFlag validates a -mode value and records it for the engine seam.
+// An unknown name exits non-zero rather than falling back: quietly running
+// a different posture than the one requested is not an acceptable
+// degradation.
+func applyModeFlag(mode string) {
+	if mode == "" {
+		return
+	}
+	if _, ok := turnengine.PolicyForMode(mode); !ok {
+		fmt.Fprintf(os.Stderr, "agora: unknown -mode %q\n\nknown modes:\n", mode)
+		for _, name := range turnengine.KnownModes() {
+			fmt.Fprintf(os.Stderr, "  %-16s %s\n", name, turnengine.DescribeMode(name))
+		}
+		os.Exit(2)
+	}
+	permissionModeOverride = mode
 }

@@ -86,6 +86,7 @@ func slashCommandTable() []slashCommand {
 		{name: "new", desc: "print the command to start a fresh thread", run: runSlashNew},
 		{name: "mcp", desc: "list configured MCP servers", run: runSlashMCP},
 		{name: "permissions", desc: "list or revoke saved approval grants", run: runSlashPermissions},
+		{name: "mode", desc: "show this session's approval posture", run: runSlashMode},
 		{name: "init", desc: "create AGENTS.md", run: runSlashInit},
 		{name: "diff", desc: "show git diff", run: runSlashDiff},
 		{name: "help", desc: "list available commands", run: runSlashHelp},
@@ -129,6 +130,7 @@ var helpOrder = []struct{ name, fallbackDesc string }{
 	{"init", "create AGENTS.md"},
 	{"mcp", "list configured MCP servers"},
 	{"permissions", "list or revoke saved approval grants"},
+	{"mode", "show this session's approval posture"},
 	{"help", "list available commands"},
 }
 
@@ -282,6 +284,33 @@ func (m *Model) revokePermission(rest []string, header string) tea.Cmd {
 		// would misrepresent what just happened.
 		th.Muted.Render("  takes effect in the next session; this one keeps the grant it already resolved against"),
 	}, "\n"))
+}
+
+// runSlashMode reports the approval posture in force.
+//
+// Deliberately READ-ONLY. Swapping the policy mid-session would need an
+// engine-side setter with defined semantics for approvals already in
+// flight, and a half-applied posture is worse than none — so this answers
+// "what am I running?" and points at the two places that decide it, rather
+// than pretending to a capability that is not wired.
+func runSlashMode(m *Model, _ string) tea.Cmd {
+	th := m.cfg.Theme
+	current := m.cfg.PermissionMode
+	if current == "" {
+		current = "sandbox-auto (engine default)"
+	}
+	out := []string{
+		th.Header.Render("Approval mode"),
+		"  " + current,
+	}
+	if m.cfg.ModeCatalog != nil {
+		out = append(out, "", th.Muted.Render("  available:"))
+		for _, e := range m.cfg.ModeCatalog() {
+			out = append(out, fmt.Sprintf("    %-16s %s", e[0], th.Muted.Render(e[1])))
+		}
+	}
+	out = append(out, "", th.Muted.Render("  set with: agora -mode <name>, or permission_mode in .agora/config.json"))
+	return m.cfg.Printer(strings.Join(out, "\n"))
 }
 
 // runSlashStatus prints agent id, current model, thread id, working dir,
@@ -589,8 +618,18 @@ func nearestCommand(name string, candidates []string) string {
 	bestDist := -1
 	for _, c := range candidates {
 		d := levenshtein(name, c)
-		if bestDist == -1 || d < bestDist {
+		switch {
+		case bestDist == -1 || d < bestDist:
 			bestDist, best = d, c
+		case d == bestDist && c < best:
+			// Ties resolve ALPHABETICALLY, not by candidate order. Order
+			// was the previous tie-break, which made suggestions depend on
+			// where a verb happened to sit in the command table: adding
+			// /mode silently changed "/modek" from suggesting /model to
+			// suggesting /mode, since both are distance 1. A deterministic
+			// rule means adding a command can never quietly reword an
+			// existing suggestion.
+			best = c
 		}
 	}
 	// Half the typed name's length (floor 1, so a 1-2 char typo like "/eit"
