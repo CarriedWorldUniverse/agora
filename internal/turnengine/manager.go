@@ -468,6 +468,10 @@ func NewManager(threadID string, provider bridle.Provider, opts ...Option) *Mana
 		// independently SSRF-guarded inside the family, so an approved
 		// fetch can still only reach a public address.
 		toolrunner.NewWebFamily(),
+		// task.write/task.read: the model's running task list for
+		// multi-step work. One family per Manager, so the list is
+		// per-thread and lives exactly as long as the session does.
+		toolrunner.NewTaskFamily(),
 	}
 	if m.subagents != nil {
 		families = append(families, toolrunner.NewAgentFamily(m.subagents, m.threadID))
