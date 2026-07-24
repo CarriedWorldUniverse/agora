@@ -29,7 +29,7 @@ func TestWebFetch_ReturnsReadableTextFromHTML(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	res, err := newWebFamilyAllowingPrivate().Execute(context.Background(), webCall(t, srv.URL))
+	res, err := newWebFamilyAllowingLoopback().Execute(context.Background(), webCall(t, srv.URL))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestWebFetch_NonHTMLPassesThroughVerbatim(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	res, _ := newWebFamilyAllowingPrivate().Execute(context.Background(), webCall(t, srv.URL))
+	res, _ := newWebFamilyAllowingLoopback().Execute(context.Background(), webCall(t, srv.URL))
 	if !strings.Contains(res.Content, body) {
 		t.Fatalf("JSON body not passed through verbatim; got:\n%s", res.Content)
 	}
@@ -105,7 +105,7 @@ func TestWebFetch_NonSuccessStatusIsAnErrorResult(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	res, _ := newWebFamilyAllowingPrivate().Execute(context.Background(), webCall(t, srv.URL))
+	res, _ := newWebFamilyAllowingLoopback().Execute(context.Background(), webCall(t, srv.URL))
 	if !res.IsError {
 		t.Fatal("404 did not produce an error result")
 	}
@@ -122,7 +122,7 @@ func TestWebFetch_TruncatesAndSaysSo(t *testing.T) {
 	defer srv.Close()
 
 	args, _ := json.Marshal(map[string]any{"url": srv.URL, "max_bytes": 100})
-	res, _ := newWebFamilyAllowingPrivate().Execute(context.Background(), Call{Name: ToolWebFetch, Args: args})
+	res, _ := newWebFamilyAllowingLoopback().Execute(context.Background(), Call{Name: ToolWebFetch, Args: args})
 	if !strings.Contains(res.Content, "truncated") {
 		t.Fatalf("truncation not reported — a clipped page must not look complete. got:\n%s", res.Content)
 	}
@@ -183,6 +183,112 @@ func TestWebFetch_HostnameResolvingToLoopbackIsBlocked(t *testing.T) {
 	}
 	if !res.IsError {
 		t.Fatalf("hostname-to-loopback fetch was not refused: %s", res.Content)
+	}
+}
+
+// --- the guard itself, over resolved addresses, with no network ---
+//
+// These are the tests the original structure made impossible. The guard
+// used to live in an inline closure reachable only by making a real
+// connection, so every test had to go through httptest — whose URLs are
+// literal 127.0.0.1 — and could therefore only ever exercise the one case
+// that already worked. Lifting it to a named method makes every address
+// class directly assertable.
+
+func TestGuardResolvedAddr_RefusesInternalAddresses(t *testing.T) {
+	w := NewWebFamily() // production: nothing relaxed
+	blocked := []struct{ addr, why string }{
+		{"127.0.0.1:80", "loopback"},
+		{"[::1]:80", "loopback v6"},
+		{"10.0.0.5:443", "private A"},
+		{"172.16.3.4:80", "private B"},
+		{"192.168.1.10:8080", "private C"},
+		{"169.254.169.254:80", "cloud metadata — the classic SSRF target"},
+		{"[fe80::1]:80", "link-local v6"},
+		{"100.91.185.71:443", "CGNAT / the personal cloud's own tailnet"},
+		{"0.0.0.0:80", "unspecified"},
+		{"224.0.0.1:80", "multicast"},
+	}
+	for _, tc := range blocked {
+		if err := w.guardResolvedAddr(tc.addr); err == nil {
+			t.Errorf("guardResolvedAddr(%q) allowed the connection; must be refused (%s)", tc.addr, tc.why)
+		}
+	}
+}
+
+func TestGuardResolvedAddr_AllowsPublicAddresses(t *testing.T) {
+	w := NewWebFamily()
+	for _, addr := range []string{
+		"8.8.8.8:53", "1.1.1.1:443", "93.184.216.34:80",
+		"[2606:2800:220:1:248:1893:25c8:1946]:443",
+	} {
+		if err := w.guardResolvedAddr(addr); err != nil {
+			t.Errorf("guardResolvedAddr(%q) refused a public address: %v", addr, err)
+		}
+	}
+}
+
+// The backstop that would have caught the original bug directly: if a
+// HOSTNAME ever reaches the guard (which is exactly what happened when the
+// check lived in DialContext), it must refuse rather than fall through as
+// allowed. This is the assertion whose absence let the bug ship.
+func TestGuardResolvedAddr_UnparseableHostRefusesRatherThanAllows(t *testing.T) {
+	w := NewWebFamily()
+	for _, addr := range []string{
+		"localhost:80",         // the exact shape DialContext used to pass
+		"evil.example.com:443", // an attacker-controlled name
+		"metadata.google.internal:80",
+	} {
+		if err := w.guardResolvedAddr(addr); err == nil {
+			t.Errorf("guardResolvedAddr(%q) ALLOWED a hostname — a non-IP must never fall through as public", addr)
+		}
+	}
+	if err := w.guardResolvedAddr("not-an-address"); err == nil {
+		t.Error("a malformed address was allowed")
+	}
+}
+
+// The test seam must be narrow: it may relax loopback and NOTHING else, so
+// tests using it still exercise the production rule for every other class.
+// A blanket "skip the guard" flag would make those tests prove nothing —
+// and would keep passing if it ever leaked into production.
+func TestGuardResolvedAddr_TestSeamRelaxesOnlyLoopback(t *testing.T) {
+	w := newWebFamilyAllowingLoopback()
+
+	if err := w.guardResolvedAddr("127.0.0.1:8080"); err != nil {
+		t.Fatalf("the test seam did not permit loopback: %v", err)
+	}
+	for _, addr := range []string{
+		"169.254.169.254:80", "10.0.0.5:80", "192.168.1.1:80", "100.91.185.71:443",
+	} {
+		if err := w.guardResolvedAddr(addr); err == nil {
+			t.Errorf("the test seam allowed %q; it must relax loopback only", addr)
+		}
+	}
+}
+
+// The production constructor must never relax anything.
+func TestNewWebFamily_ProductionNeverRelaxesLoopback(t *testing.T) {
+	if NewWebFamily().allowLoopback {
+		t.Fatal("the production constructor set allowLoopback")
+	}
+}
+
+// The guard must actually be INSTALLED on the dial path. Correct-but-
+// unwired is the other half of the original failure, and a unit test of
+// guardResolvedAddr alone would not notice if Control were removed.
+func TestNewWebFamily_GuardIsInstalledOnTheDialPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("INTERNAL"))
+	}))
+	defer srv.Close()
+
+	res, err := NewWebFamily().Execute(context.Background(), webCall(t, srv.URL))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !res.IsError || strings.Contains(res.Content, "INTERNAL") {
+		t.Fatal("production web_fetch reached a loopback server — the guard is not wired into the dialer")
 	}
 }
 
@@ -268,7 +374,7 @@ func TestWebFetch_RedirectLoopIsBounded(t *testing.T) {
 	defer srv.Close()
 
 	// Must terminate rather than hang; the test timing out IS the failure.
-	res, err := newWebFamilyAllowingPrivate().Execute(context.Background(), webCall(t, srv.URL))
+	res, err := newWebFamilyAllowingLoopback().Execute(context.Background(), webCall(t, srv.URL))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
