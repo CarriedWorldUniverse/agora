@@ -31,7 +31,9 @@ func runPipe(args []string) {
 	deltas := fs.Bool("deltas", false, "emit item.agent_message.delta streaming-text events (off by default per §1)")
 	lenient := fs.Bool("lenient", false, "accept a non-JSON stdin line as a user_message's text")
 	filter := fs.String("filter", "", `output filter: "" (all events) | "agent_message" (final agent-message items only) | "text" (bare text lines, no JSON envelope)`)
+	applyMode := registerModeFlag(fs)
 	_ = fs.Parse(args)
+	applyMode()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

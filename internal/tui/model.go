@@ -60,6 +60,14 @@ type Config struct {
 	// RevokePermission removes a saved grant, reporting whether one
 	// matched. Nil = revoking not available on this connection.
 	RevokePermission func(kind, scope, key string) (bool, error)
+	// PermissionMode is the approval posture this session resolved to, for
+	// /mode and /status. "" = the engine's own default. Supplied by
+	// cmd/agora from the same resolver the engine uses, so what the
+	// operator is told matches what is enforced.
+	PermissionMode string
+	// ModeCatalog lists selectable modes as (name, description) pairs for
+	// /mode's output. Nil = not wired.
+	ModeCatalog func() [][2]string
 }
 
 // ThreadLister is the OPTIONAL backend seam behind `/resume` (NEX-798): list

@@ -77,8 +77,13 @@ func TestSubmitComposer_UnknownSlash_Contained(t *testing.T) {
 	if len(printed) != 1 || !strings.Contains(printed[0], "unknown command: /modek") {
 		t.Fatalf("printed = %v; want a local unknown-command error", printed)
 	}
-	if !strings.Contains(printed[0], "did you mean /model?") {
-		t.Fatalf("printed = %q; want a nearest-match suggestion for /model", printed[0])
+	// "/modek" is distance 1 from BOTH /mode and /model, so the suggestion
+	// is decided by nearestCommand's alphabetical tie-break — /mode. Pinned
+	// deliberately: before /mode existed this asserted /model, and the
+	// change is a genuine consequence of adding a near-identical verb, not
+	// a regression in the matcher.
+	if !strings.Contains(printed[0], "did you mean /mode?") {
+		t.Fatalf("printed = %q; want a nearest-match suggestion", printed[0])
 	}
 }
 
