@@ -175,21 +175,20 @@ func (m *Manager) fireStop(ctx context.Context, turnID, model, lastAssistantMess
 // --- HookRunner.Fire* — event-specific stdin build + dispatch + aggregate ---
 
 // common builds the shared stdin fields (spec §2 top) for one event firing.
-// permissionMode is a deliberate v1 stub: "default" always. Spec §3 of
-// agora-spec-approvals.md documents this field as REPORT-ONLY ("hooks never
-// *configure* via this field") and its real derivation depends on a
-// profile/preset resolution this engine doesn't have yet (defaultPolicy is
-// the only PolicySet wired in — see approval.go). A hook reading this field
-// today sees "default" regardless of the Manager's actual policy; nothing
-// in this engine's OWN decision-making reads it back, so this cannot
-// silently loosen or tighten anything (see DEVIATIONS.md).
+// permission_mode reports the approval posture actually in force — the
+// builtin preset name, "sandbox-auto" for the engine's zero-config policy,
+// or "custom" for an operator-defined PolicySet (see permissionmode.go).
+// It remains REPORT-ONLY per agora-spec-approvals.md §3 ("hooks never
+// *configure* via this field"): nothing in this engine's own decision-
+// making reads it back, so what a hook is told cannot loosen or tighten
+// anything.
 func (hr *HookRunner) common(threadID, turnID, model, eventName string) hooks.CommonInput {
 	return hooks.CommonInput{
 		SessionID:      threadID,
 		Cwd:            hr.cwd,
 		HookEventName:  eventName,
 		Model:          model,
-		PermissionMode: "default",
+		PermissionMode: hr.reportedPermissionMode(),
 		TurnID:         turnID,
 	}
 }
@@ -344,7 +343,7 @@ func (hr *HookRunner) FireSessionStart(ctx context.Context, threadID, model, sou
 			Cwd:            hr.cwd,
 			HookEventName:  string(hooks.EventSessionStart),
 			Model:          model,
-			PermissionMode: "default",
+			PermissionMode: hr.reportedPermissionMode(),
 		},
 		Source: source,
 	}

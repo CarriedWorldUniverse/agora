@@ -4,35 +4,67 @@
 [![Release](https://img.shields.io/github/v/release/CarriedWorldUniverse/agora?include_prereleases&sort=semver&display_name=tag)](https://github.com/CarriedWorldUniverse/agora/releases)
 [![License](https://img.shields.io/github/license/CarriedWorldUniverse/agora)](LICENSE)
 
-An interactive operator-facing CLI for one-to-one conversations with always-on nexus agents.
+A terminal-resident agent harness — its own turn engine, tool surface, and approval model, over a pluggable model provider.
 
-`agora` opens a single full-screen DM thread with one agent. It holds a persistent operator WebSocket connection to nexus, loads chat history, renders pushed updates in real time, and sends operator messages using the same `dm:<agent>` convention as the dashboard.
-
-Run it with an agent name and, when the broker is not in auth-bypass mode, a pre-minted operator JWT:
+`agora` runs an agentic loop against your working directory: the model reads and edits files, runs commands, fetches pages, delegates to subagents, and calls MCP servers, with every side-effecting action gated by an approval policy you configure. Threads persist, context is curated and compacted as it grows, and the same engine drives an interactive TUI, a headless JSONL pipe, and a long-lived daemon.
 
 ```sh
-agora -agent maren -token "$AGORA_TOKEN"
+agora                      # interactive TUI in the current directory
+agora pipe                 # headless: JSONL in, JSONL out
+agora daemon               # long-lived host for attached sessions
+agora workflow run f.star  # scripted multi-agent orchestration
 ```
 
 ## Status
 
-Built and in use. The one-to-one conversation shape is live, with a client-side
-heartbeat and visible connection state (#31), a turn-rhythm chat feel (#32), an
-on-demand trace pane on `ctrl+t` (#33), and mouse-wheel scrolling of the session
-(#34). See [`docs/spec.md`](docs/spec.md) for the design.
+Built and in use, and used to build itself. The core loop is complete: turns with
+interrupt/resume, a native tool surface, scoped approvals, lifecycle hooks,
+subagent delegation, skills, workflows, MCP over stdio, and durable threads.
+Per-subsystem design docs live in [`docs/spec/`](docs/spec); the conformance
+suite in [`conformance/`](conformance) pins the golden flows.
+
+Known gaps are tracked as open issues.
 
 ## Architecture (one paragraph)
 
-agora is a Bubble Tea TUI over `internal/opclient`. The client probes broker auth mode, connects to `/connect`, subscribes to chat and observe pushes, loads `chat.list` history, sends `chat.send` DM messages, and persists a cursor under the state directory for reconnect catch-up.
+`internal/turnengine` owns the turn: it assembles the prompt, calls the provider through [`bridle`](https://github.com/CarriedWorldUniverse/bridle) (the provider abstraction — claudesdk in production, a fake in tests), routes each tool call through `internal/toolrunner`'s families (fs, exec, web, memory, planning, agent-spawn, plus folded-in MCP servers), and gates every call through `internal/approval` before it executes. `internal/ctxmgr` curates and compacts the thread as it grows; `internal/persistence` makes it durable. Front-ends — `internal/tui` (Bubble Tea), `agora pipe`, and `internal/daemon` — all construct the engine through one shared seam, so no lane drifts from another.
+
+## Capabilities
+
+| Area | What's there |
+|---|---|
+| Tools | `read_file` `write_file` `edit_file` `list_dir` `glob` `grep` `run_command` `web_fetch` `memory_*` `agent` `question` `plan` |
+| Approvals | Per-kind policy (exec/patch/read/escalation/mcp), scoped grants (once, session, command-prefix, host), builtin presets from prompt-everything to never-escalate |
+| Sandboxing | Working-dir containment on writes; exec classified sandbox-first, with symlink-aware escape detection; SSRF guard on network reads |
+| Context | Curation, compaction, fact extraction, skills catalog with a token budget, AGENTS.md discovery |
+| Extensibility | MCP servers over stdio (`.mcp.json`), lifecycle hooks (10 events), custom subagent types (`.agora/agents/*.md`), Starlark workflows |
+| Persistence | SQLite-backed threads, resume, fork, agent graph |
+
+## Configuration
+
+Read from `.agora/` (project layer) and `~/.agora/` (user layer), project winning:
+
+| File | Purpose |
+|---|---|
+| `config.json` | defaults (e.g. `default_effort`) |
+| `models.json` | model registry/aliases |
+| `hooks.json` | lifecycle hooks |
+| `agents/*.md` | custom subagent types |
+| `skills/*/SKILL.md` | skills |
+| `.mcp.json` | MCP servers |
+| `AGENTS.md` | project instructions |
+
+`.claude/agents` and `.claude/skills` are also read, for compatibility with existing setups.
 
 ## What this is not
 
-- **Not a replacement for claude-code.** claude-code stays the right tool for code-editing work. agora is the right tool for chat-driven coordination work. Side-by-side, not vs.
-- **Not a vessel.** [`vessel`](https://github.com/CarriedWorldUniverse/vessel) is the avatar-and-voice front-end. agora is the terminal-resident text front-end. Different shapes, same direction (operator interfaces to the cluster).
-- **Not an autonomous agent host.** Agents run elsewhere. agora is specifically for operator-attended conversations with those agents.
+- **Not a cluster client.** agora used to be a nexus DM front-end; that shape moved on. It talks to a model provider and your filesystem, not to the broker.
+- **Not a vessel.** [`vessel`](https://github.com/CarriedWorldUniverse/vessel) is the avatar-and-voice front-end. agora is the terminal-resident one.
+- **Not tied to one model vendor.** The provider seam is `bridle`; claudesdk is today's default, not a requirement of the design.
 
 ## Family
 
+- [`bridle`](https://github.com/CarriedWorldUniverse/bridle) — the provider abstraction agora runs on.
 - [`nexus`](https://github.com/CarriedWorldUniverse/nexus) — the cluster substrate: broker, Frame, dispatcher, knowledge, chat, roster.
 - [`cairn`](https://github.com/CarriedWorldUniverse/cairn) — repo hosting (native go-git).
 - [`vessel`](https://github.com/CarriedWorldUniverse/vessel) — Tauri avatar + voice front-end to the cluster.
