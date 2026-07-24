@@ -133,6 +133,15 @@ func Classify(call Call, roots Roots) (contracts.ApprovalKind, any) {
 		}
 		return contracts.KindExec, ExecPayload{Command: "agent(" + agentType + "): " + a.Prompt}
 
+	case taskToolNames[call.Name]:
+		// The task list is the model's own bookkeeping: it touches no file,
+		// no network, and no process — the state lives and dies inside the
+		// family. KindRead is the honest classification (auto-allowed in
+		// every preset but strict, where the operator has asked to see even
+		// read-only calls), and it means a model can still track its own
+		// work under the presets meant for headless runs.
+		return contracts.KindRead, ReadPayload{Detail: call.Name}
+
 	case call.Name == ToolWebFetch:
 		// Network egress. Classified as KindExec, not KindEscalation, for
 		// the same reason agent() is (see above): KindEscalation is DENIED

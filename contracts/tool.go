@@ -49,6 +49,11 @@ const (
 	// (agora-spec-planning-questions.md §1/§4) — present in every profile,
 	// not a profile-enabled family like the ones above.
 	FamilyPlanning = "planning"
+	// FamilyTask: the harness-intrinsic task-list tools. Like planning it
+	// is present in every profile rather than profile-gated — a model
+	// working a long task needs somewhere to hold its plan regardless of
+	// which tool families the profile enabled.
+	FamilyTask = "task"
 )
 
 // Harness-intrinsic core tools: engine-registered, always core, present in
@@ -63,6 +68,9 @@ const (
 	ToolMemoryWrite  = "memory.write"
 	ToolMemoryList   = "memory.list"
 	ToolMemoryDelete = "memory.delete"
+	// task.* family: the model's running task list for multi-step work.
+	ToolTaskWrite = "task.write"
+	ToolTaskRead  = "task.read"
 )
 
 // FSChange is the fs-watcher signal: path-keyed, content-hash-identified
