@@ -55,10 +55,17 @@ const (
 // builds the guarded http.Client.
 type WebFamily struct {
 	client *http.Client
-	// allowPrivate disables the private-IP guard. Tests set it (their
-	// httptest server is on 127.0.0.1, which the guard exists to block);
-	// production construction never does.
-	allowPrivate bool
+	// allowLoopback narrowly permits LOOPBACK addresses, and nothing else,
+	// so tests can reach their own httptest server. Production construction
+	// never sets it.
+	//
+	// It is deliberately not a blanket "skip the guard" flag. An escape
+	// hatch that disabled the whole check would mean every test using it
+	// proved nothing about SSRF — and would keep passing if the flag ever
+	// leaked into production. Scoped this way, link-local (cloud metadata),
+	// private ranges and CGNAT stay refused even under test, so those
+	// properties are covered by the SAME code path production runs.
+	allowLoopback bool
 }
 
 // NewWebFamily builds the web family with the SSRF-guarded client.
@@ -68,11 +75,11 @@ func NewWebFamily() *WebFamily {
 	return f
 }
 
-// newWebFamilyAllowingPrivate is the test constructor — it permits
-// loopback so an httptest server is reachable. Unexported on purpose:
-// production has no way to switch the guard off.
-func newWebFamilyAllowingPrivate() *WebFamily {
-	f := &WebFamily{allowPrivate: true}
+// newWebFamilyAllowingLoopback is the test constructor: it permits
+// loopback so an httptest server is reachable, and relaxes nothing else.
+// Unexported on purpose — production has no way to reach it.
+func newWebFamilyAllowingLoopback() *WebFamily {
+	f := &WebFamily{allowLoopback: true}
 	f.client = f.newClient()
 	return f
 }
@@ -93,24 +100,8 @@ func (w *WebFamily) newClient() *http.Client {
 	//   the address actually about to be used.
 	dialer := &net.Dialer{
 		Timeout: 10 * time.Second,
-		Control: func(network, address string, _ syscall.RawConn) error {
-			if w.allowPrivate {
-				return nil
-			}
-			host, _, err := net.SplitHostPort(address)
-			if err != nil {
-				return fmt.Errorf("web_fetch: malformed address %q", address)
-			}
-			ip := net.ParseIP(host)
-			if ip == nil {
-				// Control is documented to receive a resolved address; if we
-				// somehow cannot parse it, refuse rather than assume public.
-				return fmt.Errorf("web_fetch: could not parse resolved address %q", address)
-			}
-			if !isPublicIP(ip) {
-				return fmt.Errorf("web_fetch: refusing to connect to non-public address %s", ip)
-			}
-			return nil
+		Control: func(_ string, address string, _ syscall.RawConn) error {
+			return w.guardResolvedAddr(address)
 		},
 	}
 	transport := &http.Transport{DialContext: dialer.DialContext}
@@ -128,6 +119,36 @@ func (w *WebFamily) newClient() *http.Client {
 			return nil
 		},
 	}
+}
+
+// guardResolvedAddr is the SSRF check, applied to a RESOLVED "ip:port"
+// address. It is a named method rather than an inline closure so it can be
+// table-tested directly over every address class, with no network and no
+// DNS — the original bug survived review precisely because the only way to
+// reach the guard was through httptest, whose URLs are literal 127.0.0.1,
+// so the tests could only ever exercise the one case that already worked.
+func (w *WebFamily) guardResolvedAddr(address string) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("web_fetch: malformed address %q", address)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// Control is documented to receive a resolved address. If we cannot
+		// parse it, refuse rather than assume public — this is also the
+		// backstop that would have caught the original bug, where a
+		// hostname reached the check and fell through as allowed.
+		return fmt.Errorf("web_fetch: could not parse resolved address %q", address)
+	}
+	// The narrow test seam: loopback only, and only when explicitly built
+	// for tests. Everything else is judged by the production rule.
+	if ip.IsLoopback() && w.allowLoopback {
+		return nil
+	}
+	if !isPublicIP(ip) {
+		return fmt.Errorf("web_fetch: refusing to connect to non-public address %s", ip)
+	}
+	return nil
 }
 
 func (w *WebFamily) Name() string { return contracts.FamilyWeb }
