@@ -109,6 +109,11 @@ type Manager struct {
 	// against this doc comment's advice).
 	subagents *subagent.Manager
 
+	// mcpSource folds configured MCP servers' tools into the surface
+	// (WithMCPSource) — nil (default) means no MCP, matching NewSurface's
+	// own "no MCP servers configured" no-op contract.
+	mcpSource toolrunner.MCPSource
+
 	// U-C3: the BeforeToolCall approval gate. policy/scopeStore feed
 	// approval.Decide (reused verbatim); hookMu/hookTurn and waiterMu/
 	// waiters are the two pieces of cross-goroutine state the gate's
@@ -327,6 +332,13 @@ func WithRoots(roots toolrunner.Roots) Option { return func(m *Manager) { m.root
 // built to back) never sets this Option on a CHILD Manager it constructs.
 func WithSubagents(mgr *subagent.Manager) Option { return func(m *Manager) { m.subagents = mgr } }
 
+// WithMCPSource folds a configured MCP tool source into the turn surface —
+// its tools appear as mcp__<server>__<tool> and route through it on a
+// call. Nil (default, unset) means no MCP, unchanged behavior.
+func WithMCPSource(src toolrunner.MCPSource) Option {
+	return func(m *Manager) { m.mcpSource = src }
+}
+
 // WithStore gives the Manager a contracts.ThreadStore for durability
 // (U-C6/U-C7): each turn's ThreadItems are Appended at the turn boundary
 // (see runOneTurn's persistTurn call), and the FIRST turn's Session.New
@@ -456,7 +468,7 @@ func NewManager(threadID string, provider bridle.Provider, opts ...Option) *Mana
 	if m.subagents != nil {
 		families = append(families, toolrunner.NewAgentFamily(m.subagents, m.threadID))
 	}
-	m.surface = toolrunner.NewSurface(nil, families...)
+	m.surface = toolrunner.NewSurface(m.mcpSource, families...)
 
 	// Planning/questions (agora-spec-planning-questions.md) need somewhere
 	// to persist thread items even on a Manager built with no durability
@@ -644,6 +656,17 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 	// and degraded, has nothing to tear down here.
 	if m.detach != nil {
 		defer m.detach()
+	}
+	// Same one-thread-lifetime-scope rationale as m.detach above (fix for
+	// adversarial review of PR #94, finding 3): an MCP source's servers are
+	// subprocesses tied to THIS Manager's construction — nothing else in
+	// either lane (TUI/pipe's newInProcessManager, or the daemon's
+	// per-thread EngineFactory) has a hook to tear them down, and Run is
+	// the one call both lanes already drive to completion. Type-asserted
+	// (toolrunner.MCPSource has no Close in its own contract — only the
+	// production *mcp.Source does) so a test fake with no Close is a no-op.
+	if closer, ok := m.mcpSource.(interface{ Close() }); ok {
+		defer closer.Close()
 	}
 	// Alt-provider harnesses (built lazily by harnessFor for /model entries that
 	// route to a non-default provider) share m.eng but each Attach'd their own
@@ -1081,6 +1104,13 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 	// Tools, not MCP (blueprint: claudesdk SupportsMCP=false).
 	toolSpecs, err := m.surface.Specs(turnCtx)
 	if err != nil {
+		// Newly reachable in production since WithMCPSource (adversarial
+		// review of PR #94): a required MCP server failing to start makes
+		// this branch live. Emit the real reason before the terminal event
+		// — same two-step pattern as the provider-build error just below —
+		// so a misconfigured/unreachable required server reads as an
+		// actionable message, not a bare "turn failed".
+		emit(contracts.Event{Type: contracts.EvError, Payload: mustMarshal(errorPayload{Message: err.Error()})})
 		terminal(contracts.Event{
 			Type:    contracts.EvTurnFailed,
 			Payload: mustMarshal(turnFailedPayload{Interrupted: false}),
