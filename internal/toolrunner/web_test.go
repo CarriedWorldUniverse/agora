@@ -49,6 +49,37 @@ func TestWebFetch_ReturnsReadableTextFromHTML(t *testing.T) {
 	}
 }
 
+// The page title is usually the most useful single line of a fetched doc
+// page, and it lives in <head>. The first version skipped all of <head>
+// and threw it away.
+func TestHTMLToText_KeepsTitleAsTheFirstLine(t *testing.T) {
+	got := htmlToText([]byte(
+		`<html><head><title>Rate limits - API docs</title><style>x{}</style></head>` +
+			`<body><h1>Overview</h1></body></html>`))
+	if !strings.HasPrefix(got, "Rate limits - API docs") {
+		t.Fatalf("title is not the first line; got:\n%s", got)
+	}
+	if !strings.Contains(got, "Overview") {
+		t.Fatalf("body text lost while extracting the title; got:\n%s", got)
+	}
+	if strings.Contains(got, "x{}") {
+		t.Fatalf("style body leaked in via the head; got:\n%s", got)
+	}
+}
+
+// <br/> is a SelfClosingTagToken, not a StartTagToken. The first version
+// only handled StartTagToken, so self-closed breaks silently ran their
+// surrounding lines together.
+func TestHTMLToText_SelfClosingBreakSeparatesLines(t *testing.T) {
+	got := htmlToText([]byte(`<p>Line one.<br/>Line two.</p>`))
+	if strings.Contains(got, "Line one. Line two.") {
+		t.Fatalf("<br/> did not break the line; got:\n%s", got)
+	}
+	if !strings.Contains(got, "Line one.\nLine two.") {
+		t.Fatalf("want the two lines separated by a newline; got:\n%q", got)
+	}
+}
+
 // Non-HTML content types are already readable — JSON must come back
 // verbatim, not mangled by the HTML tokenizer.
 func TestWebFetch_NonHTMLPassesThroughVerbatim(t *testing.T) {
@@ -116,6 +147,42 @@ func TestWebFetch_ProductionRefusesLoopback(t *testing.T) {
 	}
 	if strings.Contains(res.Content, "internal service") {
 		t.Fatal("body of an internal service leaked through the guard")
+	}
+}
+
+// The bug this test exists for: the guard originally lived in
+// Transport.DialContext, which receives the address as written in the URL.
+// net.ParseIP of a HOSTNAME returns nil, so the check silently passed
+// every name-based URL and only ever caught literal-IP URLs — and every
+// other test here uses httptest, whose URLs are literal 127.0.0.1, so
+// they all passed while the guard was bypassable by any DNS name.
+//
+// "localhost" is the minimal reproduction: a name that resolves to
+// loopback. A real attack uses an attacker-controlled domain with an A
+// record pointing at 169.254.169.254; the mechanism is identical.
+func TestWebFetch_HostnameResolvingToLoopbackIsBlocked(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("SECRET INTERNAL BODY"))
+	}))
+	defer srv.Close()
+
+	// Same server, addressed by NAME rather than by literal IP.
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	if err != nil {
+		t.Fatalf("splitting test server address: %v", err)
+	}
+	byName := "http://localhost:" + port + "/"
+
+	res, err := NewWebFamily().Execute(context.Background(), webCall(t, byName))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if strings.Contains(res.Content, "SECRET INTERNAL BODY") {
+		t.Fatal("a hostname resolving to loopback reached an internal service — " +
+			"the IP guard is not running against the RESOLVED address")
+	}
+	if !res.IsError {
+		t.Fatalf("hostname-to-loopback fetch was not refused: %s", res.Content)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/html"
@@ -77,25 +78,42 @@ func newWebFamilyAllowingPrivate() *WebFamily {
 }
 
 func (w *WebFamily) newClient() *http.Client {
-	// DialContext is where the IP guard actually bites: checking the host
-	// before dialling would be a TOCTOU (DNS can return a different answer
-	// on the real dial). Validating the address the dialler is about to
-	// connect to closes that — it is the address actually used.
-	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			if !w.allowPrivate {
-				host, _, err := net.SplitHostPort(addr)
-				if err != nil {
-					return nil, fmt.Errorf("web_fetch: malformed address %q", addr)
-				}
-				if ip := net.ParseIP(host); ip != nil && !isPublicIP(ip) {
-					return nil, fmt.Errorf("web_fetch: refusing to connect to non-public address %s", ip)
-				}
+	// The IP guard lives in Dialer.Control, NOT in Transport.DialContext.
+	// This distinction is the whole security property:
+	//
+	//   DialContext receives the address as written in the URL —
+	//   "localhost:80", "evil.example.com:443". net.ParseIP of a HOSTNAME
+	//   returns nil, so a check there silently passes every name-based URL
+	//   and only ever catches literal-IP URLs. An attacker publishing an A
+	//   record pointing at 169.254.169.254 walks straight through.
+	//
+	//   Control runs after resolution, once per candidate address, with the
+	//   real IP ("127.0.0.1:80", "[::1]:80") — and before connect(2), so
+	//   there is no TOCTOU and no rebinding window. Rejecting here rejects
+	//   the address actually about to be used.
+	dialer := &net.Dialer{
+		Timeout: 10 * time.Second,
+		Control: func(network, address string, _ syscall.RawConn) error {
+			if w.allowPrivate {
+				return nil
 			}
-			return dialer.DialContext(ctx, network, addr)
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return fmt.Errorf("web_fetch: malformed address %q", address)
+			}
+			ip := net.ParseIP(host)
+			if ip == nil {
+				// Control is documented to receive a resolved address; if we
+				// somehow cannot parse it, refuse rather than assume public.
+				return fmt.Errorf("web_fetch: could not parse resolved address %q", address)
+			}
+			if !isPublicIP(ip) {
+				return fmt.Errorf("web_fetch: refusing to connect to non-public address %s", ip)
+			}
+			return nil
 		},
 	}
+	transport := &http.Transport{DialContext: dialer.DialContext}
 	return &http.Client{
 		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -255,48 +273,92 @@ func extractText(body []byte, contentType string) string {
 	return htmlToText(body)
 }
 
+// blockTags break the text flow — each one starts a new line so the
+// extracted text keeps the page's structure instead of running together.
+var blockTags = map[string]bool{
+	"p": true, "div": true, "li": true, "tr": true, "section": true,
+	"article": true, "h1": true, "h2": true, "h3": true, "h4": true,
+	"h5": true, "h6": true, "blockquote": true, "pre": true,
+}
+
+// skipTags have contents that are code or graphics, never prose.
+var skipTags = map[string]bool{
+	"script": true, "style": true, "noscript": true, "svg": true,
+}
+
 // htmlToText walks the token stream, skipping the contents of script,
 // style, noscript, and svg, and collapses the remaining text runs. A
 // tokenizer (not a regex) so malformed markup degrades instead of
 // producing garbage.
+//
+// <title> is pulled out and used as the first line: for a fetched doc page
+// it is usually the single most useful piece of orientation, and it lives
+// inside <head>, which carries no other prose.
 func htmlToText(body []byte) string {
 	z := html.NewTokenizer(strings.NewReader(string(body)))
 	var out []string
+	var title string
 	skipDepth := 0
 	var skipTag string
+	inTitle := false
 
 	for {
 		switch z.Next() {
 		case html.ErrorToken:
-			return collapseBlankLines(strings.Join(out, " "))
+			text := collapseBlankLines(strings.Join(out, " "))
+			if title != "" && text != "" {
+				return title + "\n\n" + text
+			}
+			if title != "" {
+				return title
+			}
+			return text
 
 		case html.StartTagToken:
-			name, _ := z.TagName()
-			tag := string(name)
+			tagName, _ := z.TagName()
+			tag := string(tagName)
 			if skipDepth > 0 {
 				if tag == skipTag {
 					skipDepth++
 				}
 				continue
 			}
-			switch tag {
-			case "script", "style", "noscript", "svg", "head":
+			switch {
+			case skipTags[tag]:
 				skipTag, skipDepth = tag, 1
-			case "p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article":
+			case tag == "title":
+				inTitle = true
+			case tag == "br":
+				out = append(out, "\n")
+			case blockTags[tag]:
+				out = append(out, "\n")
+			}
+
+		case html.SelfClosingTagToken:
+			// <br/> arrives as its OWN token type, not StartTagToken — the
+			// first version only handled StartTagToken, so self-closed
+			// breaks silently ran their surrounding lines together.
+			if skipDepth > 0 {
+				continue
+			}
+			tagName, _ := z.TagName()
+			if tag := string(tagName); tag == "br" || blockTags[tag] {
 				out = append(out, "\n")
 			}
 
 		case html.EndTagToken:
+			tagName, _ := z.TagName()
+			tag := string(tagName)
 			if skipDepth > 0 {
-				name, _ := z.TagName()
-				if string(name) == skipTag {
+				if tag == skipTag {
 					skipDepth--
 				}
 				continue
 			}
-			name, _ := z.TagName()
-			switch string(name) {
-			case "p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article":
+			if tag == "title" {
+				inTitle = false
+			}
+			if blockTags[tag] {
 				out = append(out, "\n")
 			}
 
@@ -304,9 +366,17 @@ func htmlToText(body []byte) string {
 			if skipDepth > 0 {
 				continue
 			}
-			if t := strings.TrimSpace(string(z.Text())); t != "" {
-				out = append(out, t)
+			t := strings.TrimSpace(string(z.Text()))
+			if t == "" {
+				continue
 			}
+			if inTitle {
+				if title == "" {
+					title = t
+				}
+				continue
+			}
+			out = append(out, t)
 		}
 	}
 }
