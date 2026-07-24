@@ -21,6 +21,7 @@ import (
 	"github.com/CarriedWorldUniverse/agora/contracts"
 	"github.com/CarriedWorldUniverse/agora/internal/daemon"
 	agoraio "github.com/CarriedWorldUniverse/agora/internal/io"
+	"github.com/CarriedWorldUniverse/agora/internal/skills"
 	"github.com/CarriedWorldUniverse/agora/internal/subagent"
 	"github.com/CarriedWorldUniverse/agora/internal/subagent/enginerunner"
 	"github.com/CarriedWorldUniverse/agora/internal/toolrunner"
@@ -51,6 +52,18 @@ func newTurnEngineManager(threadID string, provider bridle.Provider, store contr
 	// default rather than just the TUI. "" (no config anywhere) leaves
 	// Manager's own contracts.EffortHigh fallback in place.
 	defaultEffort := turnengine.LoadDefaultEffort(userHomeOrDot(), roots.WorkingDir)
+	// Custom subagent types (subagents spec §1): discover .agora/agents/*.md
+	// (plus the .claude/agents compat lane), project layer before user. Same
+	// shared seam again, so every lane sees the same agent types. Passing
+	// nil here — which is what this call site did before — meant ONLY the
+	// two builtins ever existed and every operator-authored agent def on
+	// disk was silently unreachable. Warnings are non-fatal: one typo'd def
+	// must not stop a session starting.
+	agentDefs, agentWarnings := subagent.DiscoverAgentDefs(
+		subagent.DefaultAgentRoots(skills.FindProjectRoot(roots.WorkingDir, nil), userHomeOrDot()))
+	for _, w := range agentWarnings {
+		fmt.Fprintf(os.Stderr, "agora: agent def %s: %s\n", w.Path, w.Message)
+	}
 	opts := []turnengine.Option{
 		turnengine.WithRoots(roots),
 		turnengine.WithStore(store),
@@ -63,7 +76,7 @@ func newTurnEngineManager(threadID string, provider bridle.Provider, store contr
 		// agent() delegation (subagents spec §2): the PARENT Manager gets the
 		// tool; enginerunner never re-wires it onto children (structural
 		// depth guard — see turnengine.Manager.subagents' doc comment).
-		turnengine.WithSubagents(subagent.NewManager(store, graph, subagent.NewRegistry(nil),
+		turnengine.WithSubagents(subagent.NewManager(store, graph, subagent.NewRegistry(agentDefs),
 			enginerunner.New(provider, store))),
 	}
 	// MCP (§1 spec): fold this working dir's .mcp.json servers, identity-

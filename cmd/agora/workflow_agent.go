@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/CarriedWorldUniverse/agora/contracts"
+	"github.com/CarriedWorldUniverse/agora/internal/skills"
 	"github.com/CarriedWorldUniverse/agora/internal/subagent"
 	"github.com/CarriedWorldUniverse/agora/internal/subagent/enginerunner"
 	"github.com/CarriedWorldUniverse/agora/internal/turnengine"
@@ -27,7 +28,14 @@ func buildWorkflowInvoker(store contracts.ThreadStore, provider bridle.Provider,
 	prof := turnengine.DevProfile()
 	prof.Policy = contracts.BuiltinPresets()[contracts.PresetNeverEscalate]
 	runner := enginerunner.New(provider, store, enginerunner.WithProfile(prof))
-	mgr := subagent.NewManager(store, subagent.NewMemGraphStore(), subagent.NewRegistry(nil), runner)
+	// Custom agent types must be reachable from a workflow's ctx.agent()
+	// too, not just interactive spawns — same discovery as engine.go's
+	// seam. Warnings are dropped rather than printed here: a headless run
+	// writes machine-readable output on stdout/stderr and engine.go already
+	// reports them for the lanes an operator is watching.
+	defs, _ := subagent.DiscoverAgentDefs(
+		subagent.DefaultAgentRoots(skills.FindProjectRoot(cwd, nil), userHomeOrDot()))
+	mgr := subagent.NewManager(store, subagent.NewMemGraphStore(), subagent.NewRegistry(defs), runner)
 	mgr.RegisterRoot(runThreadID, subagent.ParentContext{
 		Cwd:    cwd,
 		Policy: contracts.BuiltinPresets()[contracts.PresetNeverEscalate],

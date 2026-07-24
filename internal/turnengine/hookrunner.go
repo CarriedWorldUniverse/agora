@@ -37,7 +37,32 @@ type HookRunner struct {
 	dispatcher  *hooks.Dispatcher
 	cwd         string
 
+	// permissionMode is what hooks are TOLD the session's approval posture
+	// is (spec §3: report-only — hooks never configure via this field).
+	// Set by the Manager via setPermissionMode once its policy is resolved;
+	// DiscoverHooks runs before any Manager exists, so the zero value ""
+	// means "no Manager has claimed this runner yet" and reports the
+	// engine's own default posture rather than a misleading preset name.
+	permissionMode string
+
 	asyncResults chan hooks.AsyncResult
+}
+
+// setPermissionMode records the approval posture hooks should be told
+// about. Called by NewManager once opts have resolved m.policy.
+func (hr *HookRunner) setPermissionMode(mode string) {
+	if hr == nil {
+		return
+	}
+	hr.permissionMode = mode
+}
+
+// reportedPermissionMode is the value written into every event's stdin.
+func (hr *HookRunner) reportedPermissionMode() string {
+	if hr == nil || hr.permissionMode == "" {
+		return permissionModeName(defaultPolicy())
+	}
+	return hr.permissionMode
 }
 
 // hookStateEntry is this package's OWN on-disk shape for the trust/enable

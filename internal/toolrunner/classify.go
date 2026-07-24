@@ -133,6 +133,25 @@ func Classify(call Call, roots Roots) (contracts.ApprovalKind, any) {
 		}
 		return contracts.KindExec, ExecPayload{Command: "agent(" + agentType + "): " + a.Prompt}
 
+	case call.Name == ToolWebFetch:
+		// Network egress. Classified as KindExec, not KindEscalation, for
+		// the same reason agent() is (see above): KindEscalation is DENIED
+		// outright under the never-escalate preset, which would make
+		// web_fetch permanently unusable headless. KindExec's per-preset
+		// defaults (prompt in prompt/strict, auto in auto-safe/
+		// never-escalate) are the right middle ground, and ExecPayload's
+		// {command} shape renders in the existing TUI approval modal with
+		// no wire change.
+		//
+		// The SSRF guard in web.go is NOT part of this decision — it always
+		// applies, regardless of what the operator approves here. Approving
+		// a fetch grants reaching a PUBLIC url, never an internal one.
+		var a webFetchArgs
+		if err := json.Unmarshal(call.Args, &a); err != nil {
+			return contracts.KindEscalation, EscalationPayload{Detail: "malformed web_fetch arguments: " + err.Error()}
+		}
+		return contracts.KindExec, ExecPayload{Command: "web_fetch: " + a.URL}
+
 	case call.Name == ToolRunCommand:
 		var a runCommandArgs
 		if err := json.Unmarshal(call.Args, &a); err != nil {
