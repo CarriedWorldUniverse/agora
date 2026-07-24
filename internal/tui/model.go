@@ -52,6 +52,14 @@ type Config struct {
 	// []ServerInfo, keeping internal/tui free of an mcp dependency).
 	// Nil = not wired on this connection.
 	ListServers func() ([]ServerInfo, error)
+	// ListPermissions feeds /permissions: the approval grants saved across
+	// sessions for this project (cmd/agora adapts the approval package's
+	// FileScopeStore, keeping internal/tui free of an approval dependency).
+	// Nil = not wired on this connection.
+	ListPermissions func() ([]PermissionInfo, error)
+	// RevokePermission removes a saved grant, reporting whether one
+	// matched. Nil = revoking not available on this connection.
+	RevokePermission func(kind, scope, key string) (bool, error)
 }
 
 // ThreadLister is the OPTIONAL backend seam behind `/resume` (NEX-798): list
