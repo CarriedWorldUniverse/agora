@@ -16,6 +16,29 @@ import (
 // Spec: agora-spec-subagents.md §1 — "Location: <project>/.agora/agents/*.md
 // and ~/.agora/agents/*.md (also read .claude/agents/*.md for import/compat).
 // One file = one agent type."
+//
+// Trust posture, since this reads PROJECT-layer files and a cloned repo is
+// not trusted input: agent defs are deliberately NOT behind the hash-based
+// trust gate that internal/hooks applies to project hooks. The line is what
+// the file can cause to happen:
+//
+//   - A hook is a shell command the harness executes. Untrusted-by-default,
+//     fail-closed, operator must trust it — internal/hooks/trust.go.
+//   - An agent def is PROMPT-shaped content, the same category as skills and
+//     AGENTS.md, both of which this harness already loads from the project
+//     layer without a trust gate. It cannot execute anything by existing.
+//
+// A def also cannot ESCALATE: ResolveInheritance intersects def.Tools with
+// the parent's, so a def can only ever narrow the tool set, never grant one
+// the spawning session did not already have — and every tool call a child
+// makes still goes through the same approval pipeline as the parent's.
+//
+// What a hostile project-layer def CAN do is shape a child's system prompt.
+// Under a prompting policy the operator still sees each resulting tool call;
+// under an auto-approving preset (auto-safe/never-escalate) it could drive
+// auto-approved calls. That is the same exposure skills and AGENTS.md
+// already carry, so it is governed by the approval preset, not by a gate
+// unique to this file.
 
 // AgentRoot is one directory to scan for agent defs, with the scope it
 // contributes. Order in a []AgentRoot IS precedence order: earlier roots

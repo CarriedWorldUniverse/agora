@@ -125,6 +125,22 @@ func TestDiscoverAgentDefs_MissingDirsAreSilent(t *testing.T) {
 	}
 }
 
+// Running agora in your home directory makes projectRoot == home, so the
+// same directory appears under two roots. It must be scanned once, not
+// reported as a self-collision.
+func TestDiscoverAgentDefs_ProjectRootEqualToHomeScansOnce(t *testing.T) {
+	dir := t.TempDir()
+	writeDef(t, filepath.Join(dir, ".agora", "agents"), "reviewer", goodDef)
+
+	defs, warns := DiscoverAgentDefs(DefaultAgentRoots(dir, dir))
+	if len(warns) != 0 {
+		t.Fatalf("warnings = %v; want none", warns)
+	}
+	if len(defs) != 1 {
+		t.Fatalf("defs = %d; want exactly 1 (the same dir must not be scanned twice)", len(defs))
+	}
+}
+
 // Non-.md files are ignored — a README or a stray .yaml in the directory
 // is not an agent def.
 func TestDiscoverAgentDefs_IgnoresNonMarkdown(t *testing.T) {
