@@ -19,6 +19,7 @@ import (
 	bridle "github.com/CarriedWorldUniverse/bridle"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
+	"github.com/CarriedWorldUniverse/agora/internal/approval"
 	"github.com/CarriedWorldUniverse/agora/internal/daemon"
 	agoraio "github.com/CarriedWorldUniverse/agora/internal/io"
 	"github.com/CarriedWorldUniverse/agora/internal/skills"
@@ -59,15 +60,33 @@ func newTurnEngineManager(threadID string, provider bridle.Provider, store contr
 	// two builtins ever existed and every operator-authored agent def on
 	// disk was silently unreachable. Warnings are non-fatal: one typo'd def
 	// must not stop a session starting.
+	// One project-root resolution shared by everything below that needs it
+	// (agent-def discovery, the durable scope store), so those two can never
+	// disagree about which project a session belongs to.
+	projectRoot := skills.FindProjectRoot(roots.WorkingDir, nil)
 	agentDefs, agentWarnings := subagent.DiscoverAgentDefs(
-		subagent.DefaultAgentRoots(skills.FindProjectRoot(roots.WorkingDir, nil), userHomeOrDot()))
+		subagent.DefaultAgentRoots(projectRoot, userHomeOrDot()))
 	for _, w := range agentWarnings {
 		fmt.Fprintf(os.Stderr, "agora: agent def %s: %s\n", w.Path, w.Message)
+	}
+	// Durable approvals (approvals spec §1): allow-always grants live in
+	// ~/.agora/permissions.json, bucketed by project root, so a grant the
+	// operator gave last session is still in force this session instead of
+	// re-prompting for the same safe command every time. Deliberately the
+	// USER's directory, never the project's — a project-layer permissions
+	// file would let a cloned repo ship its own pre-granted command
+	// prefixes. A missing file is the normal first run; a corrupt one warns
+	// and degrades to no-saved-grants rather than blocking the session.
+	scopeStore, scopeWarn := approval.OpenFileScopeStore(
+		filepath.Join(userHomeOrDot(), ".agora", "permissions.json"), projectRoot)
+	if scopeWarn != nil {
+		fmt.Fprintf(os.Stderr, "agora: %v\n", scopeWarn)
 	}
 	opts := []turnengine.Option{
 		turnengine.WithRoots(roots),
 		turnengine.WithStore(store),
 		turnengine.WithDefaultEffort(defaultEffort),
+		turnengine.WithScopeStore(scopeStore),
 		// Interactive sessions distill each turn into durable facts using the
 		// active model itself (ctxmap fact extraction) — off by default in the
 		// engine, on here, for every lane that runs a real turn.
