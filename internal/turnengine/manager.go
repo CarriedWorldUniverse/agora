@@ -474,6 +474,11 @@ func NewManager(threadID string, provider bridle.Provider, opts ...Option) *Mana
 	}
 	m.surface = toolrunner.NewSurface(m.mcpSource, families...)
 
+	// Hooks are told the approval posture actually in force. DiscoverHooks
+	// builds the runner before any Manager exists, so the policy can only
+	// be handed over here, once opts have resolved it.
+	m.hookRunner.setPermissionMode(permissionModeName(m.policy))
+
 	// Planning/questions (agora-spec-planning-questions.md) need somewhere
 	// to persist thread items even on a Manager built with no durability
 	// (WithStore unset) — see planLog/questionLog's field doc comment.
