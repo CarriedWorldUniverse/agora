@@ -156,9 +156,13 @@ func TestManager_Approval_MemoryWriteClassifiesAsPatchAndDenyBlocksIt(t *testing
 		}},
 		fake.Step{Text: "ok, I won't"},
 	)
-	// No WithPolicy override: defaultPolicy()'s KindPatch=Prompt must gate
-	// this call — proving memory.write is NOT auto-allowed like a read.
-	m := NewManager("th_mem_deny", provider, WithRoots(roots), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
+	// promptAllPolicy: exercises the deny path itself (memory.write shares
+	// KindPatch with write_file — sandbox-first's defaultPolicy now auto-
+	// allows Patch by default, same as a regular write, since MemoryFamily's
+	// own validateSlug containment is memory.write's safety net just as
+	// roots-containment is write_file's; this test still proves a policy
+	// that DOES prompt correctly blocks a denied memory write).
+	m := NewManager("th_mem_deny", provider, WithRoots(roots), WithPolicy(promptAllPolicy()), WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
 
 	in := make(chan contracts.Input, 1)
 	out := make(chan contracts.Event, 32)

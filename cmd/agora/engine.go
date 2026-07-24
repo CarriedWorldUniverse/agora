@@ -51,7 +51,7 @@ func newTurnEngineManager(threadID string, provider bridle.Provider, store contr
 	// default rather than just the TUI. "" (no config anywhere) leaves
 	// Manager's own contracts.EffortHigh fallback in place.
 	defaultEffort := turnengine.LoadDefaultEffort(userHomeOrDot(), roots.WorkingDir)
-	return turnengine.NewManager(threadID, provider,
+	opts := []turnengine.Option{
 		turnengine.WithRoots(roots),
 		turnengine.WithStore(store),
 		turnengine.WithDefaultEffort(defaultEffort),
@@ -65,7 +65,14 @@ func newTurnEngineManager(threadID string, provider bridle.Provider, store contr
 		// depth guard — see turnengine.Manager.subagents' doc comment).
 		turnengine.WithSubagents(subagent.NewManager(store, graph, subagent.NewRegistry(nil),
 			enginerunner.New(provider, store))),
-	)
+	}
+	// MCP (§1 spec): fold this working dir's .mcp.json servers, identity-
+	// interpolated, into the surface — same shared seam as hooks/effort so
+	// every lane (TUI, pipe, daemon) gets the same servers, not just one.
+	if src := buildMCPSource(roots.WorkingDir); src != nil {
+		opts = append(opts, turnengine.WithMCPSource(src))
+	}
+	return turnengine.NewManager(threadID, provider, opts...)
 }
 
 // openAgentGraph opens the ONE process-wide agent-graph store every engine
