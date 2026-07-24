@@ -221,6 +221,12 @@ func writeAtomic(path string, doc *permissionsFile) error {
 
 	// 0600: this file records what the operator has authorised. Another
 	// local user being able to APPEND to it is a privilege-escalation path.
+	//
+	// Unix only, in effect: on Windows os.Chmod merely toggles the
+	// read-only attribute, and access is governed by ACLs inherited from
+	// the containing directory instead. The file still lands under the
+	// user's home there, so it inherits that profile's protection — but
+	// this specific defence is not what is enforcing it.
 	if err := tmp.Chmod(0o600); err != nil {
 		tmp.Close()
 		return fmt.Errorf("approval: securing temp permissions file: %w", err)

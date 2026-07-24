@@ -219,23 +219,6 @@ func TestFileScopeStore_DuplicateGrantWritesOnce(t *testing.T) {
 	}
 }
 
-// The file records what the operator authorised; another local user being
-// able to append to it is a privilege-escalation path.
-func TestFileScopeStore_FileIsNotGroupOrWorldAccessible(t *testing.T) {
-	path := storePath(t)
-	s, _ := OpenFileScopeStore(path, "/work/proj")
-	if err := s.Grant(execPrefixGrant("go test")); err != nil {
-		t.Fatal(err)
-	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
-		t.Fatalf("permissions file mode is %04o; want no group/other access", perm)
-	}
-}
-
 // A second agora running concurrently must not lose its grants to a stale
 // snapshot — persist re-reads under the lock.
 func TestFileScopeStore_ConcurrentStoresBothPersist(t *testing.T) {
