@@ -46,6 +46,19 @@ type ServerInfo struct {
 	Enabled   bool
 }
 
+// PermissionInfo is one saved approval grant, for /permissions. Mirrors
+// approval.DisplayGrant, restated here so internal/tui keeps no dependency
+// on the approval package (the same split ServerInfo uses for mcp).
+type PermissionInfo struct {
+	Kind      string
+	Scope     string
+	Key       string
+	GrantedAt string
+	// Global marks a grant that applies in EVERY project, not just this
+	// one — worth showing differently, since it is the wider authority.
+	Global bool
+}
+
 // slashCommand is one known /verb. Run returns the tea.Cmd the command
 // produces (usually a single Printer call carrying the rendered block).
 // Exit verbs (/quit, /exit, /q) are NOT in this table — they keep their
@@ -72,6 +85,7 @@ func slashCommandTable() []slashCommand {
 		{name: "compact", desc: "compact the thread context (between turns)", run: runSlashCompact},
 		{name: "new", desc: "print the command to start a fresh thread", run: runSlashNew},
 		{name: "mcp", desc: "list configured MCP servers", run: runSlashMCP},
+		{name: "permissions", desc: "list or revoke saved approval grants", run: runSlashPermissions},
 		{name: "init", desc: "create AGENTS.md", run: runSlashInit},
 		{name: "diff", desc: "show git diff", run: runSlashDiff},
 		{name: "help", desc: "list available commands", run: runSlashHelp},
@@ -114,6 +128,7 @@ var helpOrder = []struct{ name, fallbackDesc string }{
 	{"new", "start a fresh thread"},
 	{"init", "create AGENTS.md"},
 	{"mcp", "list configured MCP servers"},
+	{"permissions", "list or revoke saved approval grants"},
 	{"help", "list available commands"},
 }
 
@@ -174,6 +189,99 @@ func renderMCPReport(list func() ([]ServerInfo, error), th Theme) []string {
 	}
 	out = append(out, th.Muted.Render("  configured only — live connection state is not exposed by the engine yet"))
 	return out
+}
+
+// runSlashPermissions shows the approval grants that outlive this session,
+// and revokes one with `/permissions revoke <kind> <scope> <key>`.
+//
+// A permission store the operator cannot inspect is a liability: grants
+// accumulate silently and there is no way to answer "what has this thing
+// been allowed to do?". Listing is therefore the default, and revoke is
+// deliberately explicit (all three fields) rather than an index into the
+// printed list, which would shift under a concurrent grant.
+func runSlashPermissions(m *Model, args string) tea.Cmd {
+	th := m.cfg.Theme
+	header := th.Header.Render("Saved permissions")
+
+	if m.cfg.ListPermissions == nil {
+		return m.cfg.Printer(strings.Join([]string{
+			header, th.Muted.Render("  not available on this connection"),
+		}, "\n"))
+	}
+
+	if fields := strings.Fields(args); len(fields) > 0 {
+		if !strings.EqualFold(fields[0], "revoke") {
+			return m.cfg.Printer(strings.Join([]string{
+				header, th.Danger.Render("  usage: /permissions [revoke <kind> <scope> <key>]"),
+			}, "\n"))
+		}
+		return m.revokePermission(fields[1:], header)
+	}
+
+	grants, err := m.cfg.ListPermissions()
+	if err != nil {
+		return m.cfg.Printer(strings.Join([]string{
+			header, th.Danger.Render("  error reading saved permissions: " + err.Error()),
+		}, "\n"))
+	}
+	if len(grants) == 0 {
+		return m.cfg.Printer(strings.Join([]string{
+			header, th.Muted.Render("  none saved — approvals granted with a wider scope than once appear here"),
+		}, "\n"))
+	}
+
+	out := []string{header}
+	for _, g := range grants {
+		line := fmt.Sprintf("  %s %s %s", g.Kind, g.Scope, g.Key)
+		if g.Global {
+			line += th.Muted.Render("  [all projects]")
+		}
+		if g.GrantedAt != "" {
+			line += th.Muted.Render("  " + g.GrantedAt)
+		}
+		out = append(out, line)
+	}
+	out = append(out, th.Muted.Render("  revoke with: /permissions revoke <kind> <scope> <key>"))
+	return m.cfg.Printer(strings.Join(out, "\n"))
+}
+
+// revokePermission handles the `revoke` subcommand's arguments.
+func (m *Model) revokePermission(rest []string, header string) tea.Cmd {
+	th := m.cfg.Theme
+	if m.cfg.RevokePermission == nil {
+		return m.cfg.Printer(strings.Join([]string{
+			header, th.Muted.Render("  revoking is not available on this connection"),
+		}, "\n"))
+	}
+	// The key may contain spaces (a command prefix like "go test ./..."),
+	// so only kind and scope are split off — everything after is the key.
+	if len(rest) < 3 {
+		return m.cfg.Printer(strings.Join([]string{
+			header, th.Danger.Render("  usage: /permissions revoke <kind> <scope> <key>"),
+		}, "\n"))
+	}
+	kind, scope := rest[0], rest[1]
+	key := strings.Join(rest[2:], " ")
+
+	removed, err := m.cfg.RevokePermission(kind, scope, key)
+	switch {
+	case err != nil:
+		return m.cfg.Printer(strings.Join([]string{
+			header, th.Danger.Render("  error revoking: " + err.Error()),
+		}, "\n"))
+	case !removed:
+		return m.cfg.Printer(strings.Join([]string{
+			header, th.Muted.Render(fmt.Sprintf("  no saved grant matches %s %s %s", kind, scope, key)),
+		}, "\n"))
+	}
+	return m.cfg.Printer(strings.Join([]string{
+		header,
+		fmt.Sprintf("  revoked %s %s %s", kind, scope, key),
+		// Say plainly that this session is unchanged — the store keeps the
+		// grant live in memory on purpose, and a message implying otherwise
+		// would misrepresent what just happened.
+		th.Muted.Render("  takes effect in the next session; this one keeps the grant it already resolved against"),
+	}, "\n"))
 }
 
 // runSlashStatus prints agent id, current model, thread id, working dir,

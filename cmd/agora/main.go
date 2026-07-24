@@ -181,6 +181,11 @@ func main() {
 		Model:       *model,
 		ThreadID:    *threadID,
 		ListServers: listMCPServers,
+		// /permissions: inspect and revoke the approval grants that outlive
+		// this session. A durable permission store the operator cannot see
+		// into would be a liability.
+		ListPermissions:  listPermissions,
+		RevokePermission: revokePermission,
 	})
 	// Never tea.WithAltScreen() (§0 non-negotiable: the transcript lives in
 	// the terminal's own scrollback, not a full-screen widget) — and NO mouse
