@@ -73,6 +73,13 @@ func TestManager_Persist_EventTimeTS_DiffersPerItem(t *testing.T) {
 		if !ok {
 			break
 		}
+		// NEX-825: approval decisions are appended when the DECISION happens
+		// (mid-turn), not with the turn batch — this test is about the turn
+		// batch's shape, so skip them. Their own coverage is in
+		// TestManager_ApprovalDecisionIsAudited.
+		if item.Type == contracts.TIApprovalDecision {
+			continue
+		}
 		items = append(items, item)
 	}
 	if err := it.Err(); err != nil {

@@ -128,6 +128,15 @@ func DiscoverHooks(cwd string) (*HookRunner, []string) {
 		return nil, warnings
 	}
 
+	// NEX-825: tell the operator what was discovered but WITHHELD. Trust is
+	// fail-closed (ResolveTrust refuses anything with no recorded hash), and
+	// nothing writes hooks-state.json, so before this every hook silently
+	// never ran and there was no way to learn that — a configured hook that
+	// does nothing, with no signal, is worse than no hook feature at all.
+	// Same shape as the MCP trust gate's report: name what was withheld and
+	// the exact entry to add.
+	warnings = append(warnings, untrustedHookReport(&reg, state, userDir)...)
+
 	asyncResults := make(chan hooks.AsyncResult, 16)
 	hr := &HookRunner{
 		registry: &reg,
@@ -271,4 +280,28 @@ func shellRunFunc(ctx context.Context, rh hooks.ResolvedHandler, event hooks.Eve
 	// doc comment), which baseInterpret's exit-code switch treats as
 	// Failed regardless of the sentinel ExitCode value.
 	return hooks.RunResult{ExitCode: -1, Err: waitErr, Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
+}
+
+// untrustedHookReport lists handlers that will NOT run because no trusted
+// hash is recorded for them, with the exact hooks-state.json entry that
+// would allow each. Returns warning lines (the caller surfaces them the same
+// way it surfaces parse warnings).
+func untrustedHookReport(reg *hooks.Registry, state map[string]hooks.HandlerState, userDir string) []string {
+	resolved := hooks.Resolve(reg.All(), state, false)
+	var out []string
+	for _, r := range resolved {
+		if r.Runnable {
+			continue
+		}
+		cmd := r.Handler.Command
+		if cmd == "" {
+			cmd = r.Handler.CommandWindows
+		}
+		out = append(out, fmt.Sprintf(
+			"hooks: %s handler %q will NOT run (%s) — command: %s\n"+
+				"       to allow it, add to %s:  %q: {\"enabled\": true, \"trusted_hash\": %q}",
+			r.Event, r.PositionalKey(), r.TrustState, cmd,
+			filepath.Join(userDir, "hooks-state.json"), r.PositionalKey(), r.ContentHash))
+	}
+	return out
 }

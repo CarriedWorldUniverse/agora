@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,6 +101,14 @@ func (e *hooksTestEnv) discover() *HookRunner {
 	e.t.Helper()
 	hr, warnings := DiscoverHooks(e.projectDir)
 	for _, w := range warnings {
+		// NEX-825: an untrusted handler now REPORTS itself (naming the exact
+		// hooks-state.json entry that would allow it). Before that, a
+		// discovered hook silently never ran and nothing said so. That
+		// report is expected in fixtures that deliberately leave a handler
+		// untrusted; anything else is still a fixture bug.
+		if strings.Contains(w, "will NOT run") {
+			continue
+		}
 		e.t.Errorf("unexpected hooks warning: %s", w)
 	}
 	if hr == nil {
