@@ -1,3 +1,7 @@
+//go:build !windows
+
+// Same reason as background_test.go: /bin/sh-dependent.
+
 package toolrunner
 
 import (

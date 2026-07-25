@@ -1,3 +1,8 @@
+//go:build !windows
+
+// run_background shells out to /bin/sh, and this test's liveness check
+// uses pgrep — both unix-only.
+
 package turnengine
 
 import (
@@ -5,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
-	"runtime"
 	"testing"
 	"time"
 
@@ -23,9 +27,6 @@ import (
 // this session, applied here instead of trusting internal bookkeeping.
 func pgrepAlive(t *testing.T, marker string) bool {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("pgrep-based liveness check is unix-only")
-	}
 	out, err := exec.Command("pgrep", "-f", marker).Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {

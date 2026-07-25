@@ -23,6 +23,13 @@ import (
 // alternative was `cmd &`, which orphans the process the moment
 // run_command's own timeout or process-group kill fires.
 //
+// Unix-only at runtime, same as run_command (see exec_procgroup_windows.go):
+// this shells out to /bin/sh, which Windows has no equivalent for. It still
+// builds on Windows (killProcGroup's Windows stub degrades to a direct-child
+// kill, same as run_command's), but starting a job fails immediately with a
+// clear exec error rather than silently misbehaving — disclosed here rather
+// than left to be discovered from that error message alone.
+//
 // Deliberately a NEW file and a new set of tools rather than a
 // `background: true` flag folded into run_command's Execute. That
 // function is already dense, hard-won, and comment-annotated with

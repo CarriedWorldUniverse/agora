@@ -1,3 +1,9 @@
+//go:build !windows
+
+// Background jobs shell out to /bin/sh (background.go, matching
+// run_command's own exec_test.go convention); these tests use POSIX
+// commands and only run on unix.
+
 package toolrunner
 
 import (
