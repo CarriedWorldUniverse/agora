@@ -59,6 +59,25 @@ type PermissionInfo struct {
 	Global bool
 }
 
+// HookInfo is one discovered lifecycle hook as the TUI needs it for /hooks —
+// deliberately NOT hooks.ResolvedHandler, so internal/tui keeps no dependency
+// on internal/hooks; cmd/agora adapts the runner's output into this shape
+// (the same split ServerInfo uses for mcp).
+type HookInfo struct {
+	Event   string
+	Key     string // PositionalKey — what hooks-state.json records trust under
+	Command string
+	Matcher string
+	// Trust is the resolved trust state ("Trusted"/"Untrusted"/"Modified"/…).
+	Trust string
+	// Runnable is the fail-closed gate: false means this hook will NOT fire.
+	Runnable bool
+	// Hash is the content hash to record in hooks-state.json to trust it.
+	Hash string
+	// StatePath is where that file lives, so the block can say it exactly.
+	StatePath string
+}
+
 // slashCommand is one known /verb. Run returns the tea.Cmd the command
 // produces (usually a single Printer call carrying the rendered block).
 // Exit verbs (/quit, /exit, /q) are NOT in this table — they keep their
@@ -85,6 +104,7 @@ func slashCommandTable() []slashCommand {
 		{name: "compact", desc: "compact the thread context (between turns)", run: runSlashCompact},
 		{name: "new", desc: "print the command to start a fresh thread", run: runSlashNew},
 		{name: "mcp", desc: "list configured MCP servers", run: runSlashMCP},
+		{name: "hooks", desc: "list discovered lifecycle hooks and their trust state", run: runSlashHooks},
 		{name: "permissions", desc: "list or revoke saved approval grants", run: runSlashPermissions},
 		{name: "mode", desc: "show this session's approval posture", run: runSlashMode},
 		{name: "init", desc: "create AGENTS.md", run: runSlashInit},
@@ -129,6 +149,7 @@ var helpOrder = []struct{ name, fallbackDesc string }{
 	{"new", "start a fresh thread"},
 	{"init", "create AGENTS.md"},
 	{"mcp", "list configured MCP servers"},
+	{"hooks", "list lifecycle hooks and their trust state"},
 	{"permissions", "list or revoke saved approval grants"},
 	{"mode", "show this session's approval posture"},
 	{"help", "list available commands"},
@@ -190,6 +211,64 @@ func renderMCPReport(list func() ([]ServerInfo, error), th Theme) []string {
 		out = append(out, fmt.Sprintf("  %s  %s", name, th.Muted.Render(s.Transport+" · "+s.Detail)))
 	}
 	out = append(out, th.Muted.Render("  configured only — live connection state is not exposed by the engine yet"))
+	return out
+}
+
+func runSlashHooks(m *Model, _ string) tea.Cmd {
+	return m.cfg.Printer(strings.Join(renderHooksReport(m.cfg.ListHooks, m.cfg.Theme), "\n"))
+}
+
+// renderHooksReport builds the /hooks transcript block.
+//
+// This verb exists because hook trust is fail-closed and had no surface: a
+// handler with no recorded hash never runs, and until NEX-825 nothing said
+// so — a configured hook silently did nothing. DiscoverHooks now emits a
+// warning, but in TUI mode that goes to stderr during engine construction,
+// where the alt-screen swallows it; the operator still could not SEE why
+// their hook was inert. So the report belongs here, on demand, where it can
+// also hand over the exact hooks-state.json entry that would enable each one.
+func renderHooksReport(list func() ([]HookInfo, error), th Theme) []string {
+	header := th.Header.Render("lifecycle hooks")
+	if list == nil {
+		return []string{header, th.Muted.Render("  hook list not available on this connection")}
+	}
+	hooks, err := list()
+	if err != nil {
+		return []string{header, th.Danger.Render("  error reading hooks: " + err.Error())}
+	}
+	if len(hooks) == 0 {
+		return []string{header, th.Muted.Render("  none discovered — add handlers to .agora/hooks.json (project) or ~/.agora/hooks.json (user)")}
+	}
+	out := []string{header}
+	var blocked int
+	for _, h := range hooks {
+		mark := th.Muted.Render("will not run")
+		if h.Runnable {
+			mark = th.Accent.Render("active")
+		} else {
+			blocked++
+		}
+		matcher := h.Matcher
+		if matcher == "" {
+			matcher = "*"
+		}
+		out = append(out,
+			fmt.Sprintf("  %-14s %-9s %s", h.Event, h.Trust, mark),
+			th.Muted.Render("      matcher "+matcher+" · "+h.Command))
+	}
+	if blocked > 0 {
+		out = append(out,
+			"",
+			th.Muted.Render(fmt.Sprintf("  %d hook(s) will not run: trust is fail-closed, so a handler only fires", blocked)),
+			th.Muted.Render("  once its content hash is recorded. To allow one, add to "+hooks[0].StatePath+":"))
+		for _, h := range hooks {
+			if h.Runnable {
+				continue
+			}
+			out = append(out, th.Muted.Render(fmt.Sprintf("      %q: {\"enabled\": true, \"trusted_hash\": %q}", h.Key, h.Hash)))
+		}
+		out = append(out, th.Muted.Render("  Editing a trusted hook changes its hash and revokes the grant."))
+	}
 	return out
 }
 

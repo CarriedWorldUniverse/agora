@@ -188,6 +188,9 @@ func main() {
 		Model:       resolveModel(*model, mustGetwd()),
 		ThreadID:    *threadID,
 		ListServers: listMCPServers,
+		// /hooks: which lifecycle hooks were discovered and whether trust
+		// lets them fire — fail-closed trust is invisible without this.
+		ListHooks: listHooks,
 		// /permissions: inspect and revoke the approval grants that outlive
 		// this session. A durable permission store the operator cannot see
 		// into would be a liability.

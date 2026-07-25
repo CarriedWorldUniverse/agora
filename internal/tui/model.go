@@ -57,6 +57,10 @@ type Config struct {
 	// FileScopeStore, keeping internal/tui free of an approval dependency).
 	// Nil = not wired on this connection.
 	ListPermissions func() ([]PermissionInfo, error)
+	// ListHooks feeds /hooks: the lifecycle hooks discovered for this
+	// session with their resolved trust state. nil = the connection cannot
+	// report them (the verb says so rather than implying "none").
+	ListHooks func() ([]HookInfo, error)
 	// RevokePermission removes a saved grant, reporting whether one
 	// matched. Nil = revoking not available on this connection.
 	RevokePermission func(kind, scope, key string) (bool, error)
