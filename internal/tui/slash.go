@@ -338,7 +338,40 @@ func runSlashStatus(m *Model, _ string) tea.Cmd {
 		usage = strings.TrimPrefix(strings.TrimSpace(m.usageSegment()), "· ")
 	}
 	row("usage", usage)
+	// Only shown once a rate_limit event has actually arrived — the
+	// overwhelming majority of sessions (API key, Bedrock, Vertex, any
+	// non-subscription provider) never receive one, and a permanent
+	// "plan: n/a" row would be clutter for every one of them for a signal
+	// that will never apply.
+	if m.haveRateLimit {
+		row("plan", renderRateLimit(m.rateLimit))
+	}
 	return m.cfg.Printer(b.String())
+}
+
+// renderRateLimit formats one contracts.RateLimit for /status — e.g.
+// "five_hour 82% (allowed_warning, resets 14:32)" or "overage 12%
+// (overage credits in use)" when UsingOverage.
+func renderRateLimit(rl contracts.RateLimit) string {
+	window := rl.WindowType
+	if window == "" {
+		window = "usage"
+	}
+	s := fmt.Sprintf("%s %d%%", window, rl.Utilization)
+	var notes []string
+	if rl.Status != "" && rl.Status != "allowed" {
+		notes = append(notes, rl.Status)
+	}
+	if rl.UsingOverage {
+		notes = append(notes, "overage credits in use")
+	}
+	if rl.ResetsAt != nil {
+		notes = append(notes, "resets "+rl.ResetsAt.Local().Format("15:04"))
+	}
+	if len(notes) > 0 {
+		s += " (" + strings.Join(notes, ", ") + ")"
+	}
+	return s
 }
 
 // effortTierOrder is the display order for the reasoning-effort ladder —
