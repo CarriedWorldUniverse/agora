@@ -43,6 +43,13 @@ type errorPayload struct {
 	Message string `json:"message"`
 }
 
+// rateLimitPayload is the EvRateLimit event body — wraps contracts.RateLimit
+// under a "rate_limit" key, the same nest-under-the-name-of-the-thing shape
+// usagePayload above uses for contracts.Usage.
+type rateLimitPayload struct {
+	RateLimit contracts.RateLimit `json:"rate_limit"`
+}
+
 // Tool-call item payload shapes (U-C5, NEX-784) — mirror
 // agora-engine-blueprint.md's approval-payload-shape convention
 // (docs/spec/DEVIATIONS.md §5) but for item.* events rather than
@@ -366,6 +373,8 @@ func (s *turnSink) Emit(e bridle.Event) {
 		s.emitToolStart(ev)
 	case bridle.ToolCallResult:
 		s.emitToolResult(ev)
+	case bridle.RateLimit:
+		s.emitRateLimit(ev)
 	default:
 		// bridle.StepBoundary/MCPServerFailed: see the type doc comment
 		// above — no agora wire equivalent yet, out of scope this slice.
@@ -458,6 +467,23 @@ func (s *turnSink) emitToolStart(ev bridle.ToolCallStart) {
 // contracts.ItemType or build its payload, and a bare item.completed with
 // no preceding item.started would be a wire artifact no consumer expects
 // — see docs/spec/DEVIATIONS.md §11.
+// emitRateLimit translates a bridle.RateLimit into EvRateLimit. Unlike
+// tool-call events this carries no correlation id and needs no started/
+// completed pairing — it is a single point-in-time reading, sent as-is.
+func (s *turnSink) emitRateLimit(ev bridle.RateLimit) {
+	rl := contracts.RateLimit{
+		Status:       ev.Status,
+		WindowType:   ev.WindowType,
+		Utilization:  ev.Utilization,
+		UsingOverage: ev.UsingOverage,
+	}
+	if !ev.ResetsAt.IsZero() {
+		resetsAt := ev.ResetsAt
+		rl.ResetsAt = &resetsAt
+	}
+	s.send(contracts.Event{Type: contracts.EvRateLimit, Payload: mustMarshal(rateLimitPayload{RateLimit: rl})})
+}
+
 func (s *turnSink) emitToolResult(ev bridle.ToolCallResult) {
 	s.mu.Lock()
 	state, ok := s.toolSeq[ev.ID]

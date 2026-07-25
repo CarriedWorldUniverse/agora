@@ -158,6 +158,14 @@ type Model struct {
 	haveUsage                              bool
 	turnModelID                            string
 
+	// Most recent claude.ai plan-usage reading (rate_limit event), for
+	// /status and /usage. Provider-specific — stays haveRateLimit=false
+	// for the whole session on any provider that never sends one (API
+	// key, Bedrock, Vertex), which the reader must treat as "not
+	// applicable", not "0% used".
+	rateLimit     contracts.RateLimit
+	haveRateLimit bool
+
 	// lastAgentMessage is the most recently FINALIZED agent reply's raw text
 	// (markdown, as streamed) — the source `/copy` puts on the clipboard.
 	// Set from stream.Raw() at turn.completed, before the stream is dropped
@@ -388,6 +396,21 @@ func (m *Model) usageSegment() string {
 		seg += " · " + fmtUSD(m.sessCost)
 	}
 	return seg
+}
+
+// recordRateLimit replaces the cached plan-usage reading with an
+// EvRateLimit payload. Unlike recordUsage this is a REPLACE, not an
+// accumulation: the event already carries the provider's own current
+// utilization for its window, not a per-turn delta to sum.
+func (m *Model) recordRateLimit(payload []byte) {
+	var p struct {
+		RateLimit *contracts.RateLimit `json:"rate_limit"`
+	}
+	if json.Unmarshal(payload, &p) != nil || p.RateLimit == nil {
+		return
+	}
+	m.rateLimit = *p.RateLimit
+	m.haveRateLimit = true
 }
 
 // recordUsage folds one turn.completed usage payload into the session totals.
@@ -625,6 +648,8 @@ func (m *Model) handleEvent(ev contracts.Event) []tea.Cmd {
 		for _, line := range m.stream.Commit() {
 			cmds = append(cmds, m.cfg.Printer(line))
 		}
+	case contracts.EvRateLimit:
+		m.recordRateLimit(ev.Payload)
 	case contracts.EvTurnCompleted, contracts.EvTurnFailed:
 		if ev.Type == contracts.EvTurnCompleted {
 			m.recordUsage(ev.Payload)
