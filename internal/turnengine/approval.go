@@ -2,6 +2,7 @@ package turnengine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -328,6 +329,17 @@ func (m *Manager) beforeToolCall(ctx context.Context, c bridle.BeforeToolCallCtx
 		}
 	}
 
+	// NEX-825: record the decision. Spec §4 invariant 3 ("every decision is
+	// recorded with its stage + actor") and bridge.go's own "Callers MUST
+	// emit an audit line" were both unmet — approval.NewAuditLine had ZERO
+	// call sites, so nothing durable said who allowed what. Auto-decisions
+	// are recorded here; an ActionAsk is recorded after the operator answers
+	// (see the waiter below), so the line carries the REAL outcome rather
+	// than "we asked".
+	if res.Action != approval.ActionAsk {
+		m.persistApprovalAudit(c.Call.ID, res)
+	}
+
 	switch res.Action {
 	case approval.ActionAllow:
 		return c, bridle.HookContinue, nil
@@ -475,9 +487,17 @@ func (m *Manager) askAndWait(turnCtx context.Context, htc *turnHookCtx, c bridle
 		}
 		if out.Decision == contracts.DecisionAllow {
 			m.recordScopeGrant(kind, out.Scope, scopeKey)
+			m.persistApprovalAudit(c.Call.ID, approval.Result{
+				Kind: kind, Action: approval.ActionAllow, Scope: out.Scope,
+				Stage: contracts.StageApprover, By: answeringIdentity,
+			})
 			c.Deny = false
 			return c, bridle.HookContinue, nil
 		}
+		m.persistApprovalAudit(c.Call.ID, approval.Result{
+			Kind: kind, Action: approval.ActionDeny,
+			Stage: contracts.StageApprover, By: answeringIdentity, Message: out.Message,
+		})
 		// DecisionDeny, or anything else a malformed/forged response
 		// might carry — fail closed to deny (Decide's own "the safe side
 		// is always chosen when resolution is ambiguous" convention).
@@ -522,4 +542,36 @@ func (m *Manager) recordScopeGrant(kind contracts.ApprovalKind, scope contracts.
 		return
 	}
 	_ = m.scopeStore.Grant(approval.ScopeAllow{Kind: kind, Scope: scope, Key: key, ScopeKey: scopeKey, By: "approver"})
+}
+
+// persistApprovalAudit records one resolved approval decision as a durable
+// thread item (NEX-825). Spec §4 invariant 3 requires every decision to be
+// recorded with its stage and actor, and internal/hooks/bridge.go states
+// callers MUST emit an audit line for the PermissionRequest bypass — yet
+// approval.NewAuditLine had no call sites at all, so no durable record of
+// any decision existed. The AuditLine JSON is the item payload, so the
+// on-disk shape is exactly the structured record the approval package
+// already defines rather than a second, drifting one.
+//
+// Best-effort, like persistTurn: a store hiccup must never fail the tool
+// call the operator just decided on — the decision itself already happened.
+func (m *Manager) persistApprovalAudit(callID string, res approval.Result) {
+	if m.store == nil {
+		return
+	}
+	line := approval.NewAuditLine(callID, res)
+	payload, err := json.Marshal(line)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "turnengine: marshal approval audit for %s: %v\n", callID, err)
+		return
+	}
+	item := contracts.ThreadItem{
+		TS:       m.now(),
+		Type:     contracts.TIApprovalDecision,
+		Identity: answeringIdentity,
+		Payload:  json.RawMessage(payload),
+	}
+	if err := m.store.Append(m.threadID, []contracts.ThreadItem{item}); err != nil {
+		fmt.Fprintf(os.Stderr, "turnengine: persist approval audit for %s: %v\n", callID, err)
+	}
 }

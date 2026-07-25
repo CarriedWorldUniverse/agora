@@ -124,6 +124,17 @@ func (reg *Registry) Load(src Source, cfg Config) {
 // since Load assigns Seq monotonically). A matcher group with an invalid
 // regex is dropped with a warning (§1.5) rather than erroring the whole
 // call.
+// All returns every registered handler in discovery order. Exported for the
+// trust surface (NEX-825): an operator cannot grant trust to a hook they
+// cannot see, and until this existed nothing could enumerate what had been
+// discovered — hooks-state.json had a reader and no writer, so every handler
+// resolved untrusted and silently never ran.
+func (reg *Registry) All() []RegisteredHandler {
+	out := make([]RegisteredHandler, len(reg.handlers))
+	copy(out, reg.handlers)
+	return out
+}
+
 func (reg *Registry) ForEvent(event EventName, matchAgainst string) (matched []RegisteredHandler, warnings []string) {
 	ignore := event.MatcherIgnored()
 	for _, rh := range reg.handlers {
