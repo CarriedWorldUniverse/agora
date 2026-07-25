@@ -738,6 +738,39 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 		}
 	}
 
+	// finishInFlight waits for an in-flight turn to COMPLETE on its own
+	// and forwards its terminal event. Unlike stopInFlight it does not
+	// cancel the turn.
+	//
+	// This is the "input stream ended" path (the `in` channel closing),
+	// which is NOT the same thing as being told to stop: closing an input
+	// channel means "no more input is coming", while contracts.InEnd is
+	// the explicit stop-now request. Treating the two identically is what
+	// made the documented `echo "fix the test" | agora pipe` shape
+	// impossible (#118) — stdin hits EOF microseconds after the single
+	// message is delivered, so the turn was cancelled long before a real
+	// provider could answer, and every such run reported turn.failed
+	// {interrupted:true} with no output.
+	//
+	// A cancelled ctx still cuts it short: a caller shutting down (SIGINT,
+	// a daemon stopping) has genuinely asked to abandon the work, and
+	// waiting out a slow turn there would hang shutdown.
+	finishInFlight := func() {
+		if turnCancel == nil {
+			return
+		}
+		select {
+		case ev := <-turnDone:
+			forward(ev)
+		case <-ctx.Done():
+			turnCancel()
+			forward(<-turnDone)
+		}
+		turnCancel() // idempotent; releases turnCtx's registration in ctx
+		turnCancel, turnDone = nil, nil
+		m.setHookTurn(nil)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -765,7 +798,10 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 
 		case input, ok := <-in:
 			if !ok {
-				stopInFlight()
+				// Input stream ended (EOF), not an explicit stop — let an
+				// in-flight turn finish rather than killing it. See
+				// finishInFlight.
+				finishInFlight()
 				return nil
 			}
 			switch input.Type {
