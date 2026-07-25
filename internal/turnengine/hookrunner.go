@@ -50,6 +50,52 @@ type HookRunner struct {
 
 // setPermissionMode records the approval posture hooks should be told
 // about. Called by NewManager once opts have resolved m.policy.
+// DiscoveredHook is one resolved handler, flattened for a UI that must not
+// import internal/hooks (the TUI's /hooks verb — NEX-825).
+type DiscoveredHook struct {
+	Event     string
+	Key       string
+	Command   string
+	Matcher   string
+	Trust     string
+	Runnable  bool
+	Hash      string
+	StatePath string
+}
+
+// Discovered lists every handler this runner found, with its resolved trust
+// state and the content hash that would enable it. A nil runner (no hooks.json
+// anywhere) reports nothing — the caller renders "none discovered".
+//
+// Trust is fail-closed, so a handler with no recorded hash never fires; this
+// is what lets the operator SEE that, rather than watching a configured hook
+// silently do nothing.
+func (hr *HookRunner) Discovered() []DiscoveredHook {
+	if hr == nil || hr.registry == nil {
+		return nil
+	}
+	statePath := filepath.Join(hooksUserDir(), "hooks-state.json")
+	resolved := hooks.Resolve(hr.registry.All(), hr.state, hr.bypassTrust)
+	out := make([]DiscoveredHook, 0, len(resolved))
+	for _, r := range resolved {
+		cmd := r.Handler.Command
+		if cmd == "" {
+			cmd = r.Handler.CommandWindows
+		}
+		out = append(out, DiscoveredHook{
+			Event:     string(r.Event),
+			Key:       r.PositionalKey(),
+			Command:   cmd,
+			Matcher:   r.Matcher,
+			Trust:     string(r.TrustState),
+			Runnable:  r.Runnable,
+			Hash:      r.ContentHash,
+			StatePath: statePath,
+		})
+	}
+	return out
+}
+
 func (hr *HookRunner) setPermissionMode(mode string) {
 	if hr == nil {
 		return
