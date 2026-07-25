@@ -1,6 +1,9 @@
 package contracts
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // EventType tags every output event on the io seam (pipe mode JSONL and the
 // session protocol carry the same types).
@@ -54,6 +57,13 @@ const (
 	// §6a ("Provisioning is atomic: apply-all-or-reject, then `provisioned
 	// {identity_fp, profile}` event").
 	EvProvisioned EventType = "provisioned"
+
+	// EvRateLimit: a claude.ai subscription plan-usage reading changed
+	// (window utilization, or a transition into paid overage). Fires only
+	// on providers that expose plan usage (today: claudesdk over a real
+	// subscription) — its absence for a whole session is not itself
+	// meaningful, since an API-key/Bedrock/Vertex session never sends it.
+	EvRateLimit EventType = "rate_limit"
 
 	EvError EventType = "error"
 )
@@ -178,4 +188,36 @@ type Usage struct {
 	// subscription claudesdk path reports no cost; ccusage-style notional
 	// pricing comes from models.json).
 	Cost float64 `json:"cost,omitempty"`
+}
+
+// RateLimit is a claude.ai subscription plan-usage reading — the wire
+// shape for EvRateLimit. Mirrors bridle.RateLimit field-for-field; agora's
+// own wire type rather than a reused bridle one, the same split Usage
+// above already uses for bridle's per-turn token numbers.
+//
+// Provider-specific: this event, and therefore this payload, only ever
+// arrives on a real claude.ai subscription session. Its absence for a
+// whole thread is not itself meaningful — an API-key/Bedrock/Vertex
+// session never sends one.
+type RateLimit struct {
+	// Status: "allowed" | "allowed_warning" | "rejected" — the provider's
+	// own coarse verdict, cheaper for a client to react to than deriving a
+	// threshold from Utilization itself.
+	Status string `json:"status"`
+	// WindowType names which window this reading is for — e.g.
+	// "five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet",
+	// "seven_day_overage_included", "overage" — or "" when the provider
+	// did not specify one.
+	WindowType string `json:"window_type,omitempty"`
+	// Utilization is 0-100.
+	Utilization int `json:"utilization"`
+	// ResetsAt is when this window resets; nil when unknown. A POINTER,
+	// not a plain time.Time — the latter's zero value is a non-empty
+	// struct as far as encoding/json's omitempty is concerned, so it
+	// would always serialize as "0001-01-01T00:00:00Z" instead of being
+	// omitted.
+	ResetsAt *time.Time `json:"resets_at,omitempty"`
+	// UsingOverage is true once the session has started drawing on paid
+	// overage credits rather than the plan's included allowance.
+	UsingOverage bool `json:"using_overage,omitempty"`
 }
