@@ -47,6 +47,18 @@ type PipeOptions struct {
 	Lenient bool
 	// Filter narrows stdout per Filter's doc.
 	Filter Filter
+	// DefaultModel/DefaultProvider are applied to every user_message that
+	// does not carry its own (a per-message "model" field on the wire
+	// always wins — the caller was explicit for that message, and a
+	// session default must never override an explicit choice).
+	//
+	// Without these, `agora pipe` could only ever reach the engine's
+	// built-in provider: it never set Input.Model or Input.Provider at
+	// all, so the headless lane — the one place automation most wants a
+	// local or self-hosted model — was pinned to the subscription lane
+	// regardless of what models.json defined.
+	DefaultModel    string
+	DefaultProvider *contracts.ProviderSpec
 }
 
 // maxPipeLineBytes bounds a single stdin/JSONL line, mirroring
@@ -208,6 +220,15 @@ func readPipeInput(ctx context.Context, r stdio.Reader, opts PipeOptions, delive
 				return fmt.Errorf("io: decode input line: %w", err)
 			}
 			in = contracts.Input{Type: contracts.InUserMessage, Text: string(line)}
+		}
+		// Apply session defaults only where the message itself was silent.
+		if in.Type == contracts.InUserMessage {
+			if in.Model == "" {
+				in.Model = opts.DefaultModel
+			}
+			if in.Provider == nil {
+				in.Provider = opts.DefaultProvider
+			}
 		}
 		if !deliver(in) {
 			return nil

@@ -317,3 +317,97 @@ func TestRunPipe_UnscriptedInputEmitsError(t *testing.T) {
 		t.Fatalf("expected an error event, got: %s", out.String())
 	}
 }
+
+// collectPipeInputs runs readPipeInput over lines and returns what it
+// delivered — the seam where session defaults are applied.
+func collectPipeInputs(t *testing.T, lines string, opts PipeOptions) []contracts.Input {
+	t.Helper()
+	var got []contracts.Input
+	err := readPipeInput(context.Background(), strings.NewReader(lines), opts, func(in contracts.Input) bool {
+		got = append(got, in)
+		return true
+	})
+	if err != nil {
+		t.Fatalf("readPipeInput: %v", err)
+	}
+	return got
+}
+
+// The gap this closes: pipe never set Model/Provider, so headless runs
+// could only ever reach the engine's built-in provider.
+func TestReadPipeInput_AppliesSessionDefaults(t *testing.T) {
+	spec := &contracts.ProviderSpec{Name: "openai", BaseURL: "http://gw:4000/v1", APIKey: "k"}
+	got := collectPipeInputs(t, `{"type":"user_message","text":"hi"}`+"\n", PipeOptions{
+		DefaultModel:    "kimi-k3",
+		DefaultProvider: spec,
+	})
+	if len(got) != 1 {
+		t.Fatalf("got %d inputs; want 1", len(got))
+	}
+	if got[0].Model != "kimi-k3" {
+		t.Errorf("Model = %q; want the session default", got[0].Model)
+	}
+	if got[0].Provider != spec {
+		t.Errorf("Provider = %+v; want the session default", got[0].Provider)
+	}
+}
+
+// An explicit per-message model must WIN over the session default — the
+// caller was specific for that message, and silently overriding it would
+// make a documented wire field a lie.
+func TestReadPipeInput_PerMessageModelBeatsTheDefault(t *testing.T) {
+	got := collectPipeInputs(t, `{"type":"user_message","text":"hi","model":"explicit-model"}`+"\n", PipeOptions{
+		DefaultModel: "default-model",
+	})
+	if got[0].Model != "explicit-model" {
+		t.Fatalf("Model = %q; an explicit per-message model must win", got[0].Model)
+	}
+}
+
+func TestReadPipeInput_PerMessageProviderBeatsTheDefault(t *testing.T) {
+	explicit := `{"type":"user_message","text":"hi","provider":{"name":"openai","base_url":"http://explicit/v1"}}`
+	got := collectPipeInputs(t, explicit+"\n", PipeOptions{
+		DefaultProvider: &contracts.ProviderSpec{Name: "openai", BaseURL: "http://default/v1"},
+	})
+	if got[0].Provider == nil || got[0].Provider.BaseURL != "http://explicit/v1" {
+		t.Fatalf("Provider = %+v; an explicit per-message provider must win", got[0].Provider)
+	}
+}
+
+// No defaults configured must leave inputs exactly as they arrived —
+// this is the overwhelmingly common case and must not be disturbed.
+func TestReadPipeInput_NoDefaultsLeavesInputUntouched(t *testing.T) {
+	got := collectPipeInputs(t, `{"type":"user_message","text":"hi"}`+"\n", PipeOptions{})
+	if got[0].Model != "" || got[0].Provider != nil {
+		t.Fatalf("input was modified with no defaults set: %+v", got[0])
+	}
+}
+
+// Defaults are a USER-MESSAGE concept — applying them to an approval
+// response or an end marker would be meaningless at best.
+func TestReadPipeInput_DefaultsOnlyApplyToUserMessages(t *testing.T) {
+	lines := `{"type":"approval_response","id":"1","decision":"allow"}` + "\n" +
+		`{"type":"end"}` + "\n"
+	got := collectPipeInputs(t, lines, PipeOptions{
+		DefaultModel:    "kimi-k3",
+		DefaultProvider: &contracts.ProviderSpec{Name: "openai"},
+	})
+	for _, in := range got {
+		if in.Model != "" || in.Provider != nil {
+			t.Errorf("%s input got session defaults applied: %+v", in.Type, in)
+		}
+	}
+}
+
+// The lenient path (a bare non-JSON line) synthesizes a user_message and
+// must get defaults too — `echo "fix it" | agora pipe -model kimi` is
+// exactly the shape this feature is for.
+func TestReadPipeInput_LenientLineAlsoGetsDefaults(t *testing.T) {
+	got := collectPipeInputs(t, "fix the test\n", PipeOptions{
+		Lenient:      true,
+		DefaultModel: "kimi-k3",
+	})
+	if len(got) != 1 || got[0].Model != "kimi-k3" {
+		t.Fatalf("lenient line did not get the session default: %+v", got)
+	}
+}
