@@ -180,6 +180,32 @@ func Classify(call Call, roots Roots) (contracts.ApprovalKind, any) {
 		}
 		return contracts.KindExec, ExecPayload{Command: a.Command}
 
+	case call.Name == ToolRunBackground:
+		var a runBackgroundArgs
+		if err := json.Unmarshal(call.Args, &a); err != nil {
+			return contracts.KindEscalation, EscalationPayload{Detail: "malformed run_background arguments: " + err.Error()}
+		}
+		// Starts a real shell command, same risk as run_command — same
+		// sandbox-first check, same classification. Only the LIFETIME
+		// differs (until bg.kill/session end, not until it exits), which
+		// has no bearing on what it's allowed to touch when it starts.
+		if off, outside := commandNamesOutsidePath(a.Command, roots); outside {
+			return contracts.KindEscalation, EscalationPayload{
+				Detail: "command references " + strconv.Quote(off) + " outside the sandbox: " + a.Command,
+			}
+		}
+		return contracts.KindExec, ExecPayload{Command: a.Command}
+
+	case call.Name == ToolBgOutput, call.Name == ToolBgList, call.Name == ToolBgKill:
+		// Bookkeeping bounded entirely to jobs THIS session's own
+		// run_background already started and had approved — same
+		// reasoning as the task family: no new privilege is exercised by
+		// reading a job's buffered output or listing known ids, and
+		// bg.kill can only ever terminate a job this registry itself
+		// tracks (never an arbitrary PID), so it cannot escalate either —
+		// worst case is a model stopping its own spawned job early.
+		return contracts.KindRead, ReadPayload{Detail: call.Name}
+
 	case strings.HasPrefix(call.Name, mcpPrefix):
 		return contracts.KindMCPTool, MCPToolPayload{Tool: call.Name, Args: call.Args}
 

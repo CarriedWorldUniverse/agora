@@ -681,6 +681,12 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 	if closer, ok := m.mcpSource.(interface{ Close() }); ok {
 		defer closer.Close()
 	}
+	// Same one-thread-lifetime-scope rationale again: a background job
+	// (run_background) is a subprocess with NO deadline of its own by
+	// design (it runs until bg.kill or session end) — without this, it
+	// would survive past the Manager that started it, exactly the MCP
+	// subprocess leak above but for the exec family's own jobs.
+	defer m.surface.Close()
 	// Alt-provider harnesses (built lazily by harnessFor for /model entries that
 	// route to a non-default provider) share m.eng but each Attach'd their own
 	// ctxmap hooks — detach them here too so no extraction hooks outlive Run.

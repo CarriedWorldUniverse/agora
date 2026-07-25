@@ -288,3 +288,49 @@ func assertJSONExact(t *testing.T, payload any, want string) {
 		t.Fatalf("payload JSON =\n%s\nwant\n%s", got, want)
 	}
 }
+
+// run_background shares run_command's sandbox-first classification
+// exactly — same escape check, same auto-vs-prompt split. Mirrors
+// TestClassifyExec/TestClassifyExec_SandboxEscapes rather than assuming
+// the shared code path makes a separate test redundant.
+func TestClassifyRunBackground_SandboxEscapes(t *testing.T) {
+	roots := newTestRoots(t)
+
+	kind, payload := Classify(Call{Name: ToolRunBackground, Args: mustArgs(t, runBackgroundArgs{Command: "npm run dev"})}, roots)
+	if kind != contracts.KindExec {
+		t.Fatalf("in-sandbox run_background: kind = %v, want %v", kind, contracts.KindExec)
+	}
+	assertJSONExact(t, payload, `{"command":"npm run dev"}`)
+
+	outside := []string{"cat /etc/passwd", "npm run dev --prefix ~/other-project"}
+	for _, cmd := range outside {
+		kind, _ := Classify(Call{Name: ToolRunBackground, Args: mustArgs(t, runBackgroundArgs{Command: cmd})}, roots)
+		if kind != contracts.KindEscalation {
+			t.Errorf("Classify(run_background, %q) = %v, want escalation", cmd, kind)
+		}
+	}
+}
+
+func TestClassifyRunBackground_MalformedArgs(t *testing.T) {
+	roots := newTestRoots(t)
+	kind, payload := Classify(Call{Name: ToolRunBackground, Args: json.RawMessage(`not json`)}, roots)
+	if kind != contracts.KindEscalation {
+		t.Fatalf("malformed run_background args: kind = %v, want escalation (fail closed)", kind)
+	}
+	if _, ok := payload.(EscalationPayload); !ok {
+		t.Fatalf("payload = %T, want EscalationPayload", payload)
+	}
+}
+
+func TestClassify_BackgroundControlToolsAreReadKind(t *testing.T) {
+	roots := newTestRoots(t)
+	for _, name := range []string{ToolBgOutput, ToolBgList, ToolBgKill} {
+		kind, payload := Classify(Call{Name: name, Args: json.RawMessage(`{}`)}, roots)
+		if kind != contracts.KindRead {
+			t.Errorf("Classify(%s) kind = %q; want %q", name, kind, contracts.KindRead)
+		}
+		if _, ok := payload.(ReadPayload); !ok {
+			t.Errorf("Classify(%s) payload is %T; want ReadPayload", name, payload)
+		}
+	}
+}
