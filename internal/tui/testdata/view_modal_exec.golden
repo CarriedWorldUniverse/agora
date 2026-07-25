@@ -2,6 +2,6 @@ anvil-builder · frontier:high · Esc to quit
 approve exec?
 $ rm -rf tmp
 > Approve once
-  Approve for session
+  Approve for the rest of this session
   Deny — tell the agent what to do differently
 

@@ -55,7 +55,7 @@ func ApprovalModalOptions(kind contracts.ApprovalKind) []ModalOption {
 	}
 	return []ModalOption{
 		{Label: "Approve once", Decision: contracts.DecisionAllow, Scope: contracts.ScopeOnce},
-		{Label: "Approve for session", Decision: contracts.DecisionAllow, Scope: contracts.ScopeSession},
+		{Label: "Approve for the rest of this session", Decision: contracts.DecisionAllow, Scope: contracts.ScopeSession},
 		{
 			Label:           "Deny — tell the agent what to do differently",
 			Decision:        contracts.DecisionDeny,
