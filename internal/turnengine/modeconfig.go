@@ -124,3 +124,39 @@ func WithPermissionMode(name string) Option {
 		}
 	}
 }
+
+// modelConfig is the on-disk shape of .agora/config.json's default_model
+// setting — additive alongside default_effort and permission_mode in the
+// same file.
+type modelConfig struct {
+	DefaultModel string `json:"default_model,omitempty"`
+}
+
+// LoadDefaultModel reads default_model from .agora/config.json — global
+// (home) then per-project (cwd), the latter winning, exactly as
+// LoadDefaultEffort and LoadPermissionMode do for their own keys.
+//
+// The value is returned VERBATIM and deliberately not validated here: it
+// may name a models.json registry key ("kimi") or a raw upstream model id
+// ("claude-sonnet-5"), and this package has no access to the registry that
+// would distinguish them — resolution is the caller's job (cmd/agora),
+// which owns that lookup. An unreadable config file is skipped with a
+// warning rather than being fatal, matching the two loaders above.
+func LoadDefaultModel(home, cwd string) string {
+	result := ""
+	for _, path := range effortConfigDirs(home, cwd) { // same config.json files
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var cfg modelConfig
+		if uerr := json.Unmarshal(data, &cfg); uerr != nil {
+			fmt.Fprintf(os.Stderr, "agora: config %s is unreadable and was SKIPPED (%v)\n", path, uerr)
+			continue
+		}
+		if cfg.DefaultModel != "" {
+			result = cfg.DefaultModel
+		}
+	}
+	return result
+}

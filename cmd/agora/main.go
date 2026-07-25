@@ -179,9 +179,13 @@ func main() {
 	printResumeHistory(backend, *threadID)
 
 	m := tui.NewModel(tui.Config{
-		Backend:     backend,
-		AgentID:     *agentID,
-		Model:       *model,
+		Backend: backend,
+		AgentID: *agentID,
+		// resolveModel adds the default_model config fallback; tui.NewModel
+		// then does the registry lookup (it needs the resolved entry for
+		// /model and pricing anyway, so resolving the SPEC here too would
+		// duplicate that work rather than save it).
+		Model:       resolveModel(*model, mustGetwd()),
 		ThreadID:    *threadID,
 		ListServers: listMCPServers,
 		// /permissions: inspect and revoke the approval grants that outlive

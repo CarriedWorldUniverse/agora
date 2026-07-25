@@ -149,3 +149,53 @@ func TestPolicyForMode_NeverEscalateDeniesEscalation(t *testing.T) {
 			p[contracts.KindEscalation])
 	}
 }
+
+func TestLoadDefaultModel_ProjectOverridesUser(t *testing.T) {
+	home, cwd := t.TempDir(), t.TempDir()
+	writeConfig(t, home, `{"default_model":"opus"}`)
+	writeConfig(t, cwd, `{"default_model":"kimi"}`)
+	if got := LoadDefaultModel(home, cwd); got != "kimi" {
+		t.Fatalf("LoadDefaultModel = %q; want the project value kimi", got)
+	}
+}
+
+func TestLoadDefaultModel_UserAppliesWhenProjectIsSilent(t *testing.T) {
+	home, cwd := t.TempDir(), t.TempDir()
+	writeConfig(t, home, `{"default_model":"opus"}`)
+	writeConfig(t, cwd, `{"default_effort":"low"}`) // unrelated key only
+	if got := LoadDefaultModel(home, cwd); got != "opus" {
+		t.Fatalf("LoadDefaultModel = %q; want the user value opus", got)
+	}
+}
+
+func TestLoadDefaultModel_NoConfigIsEmpty(t *testing.T) {
+	if got := LoadDefaultModel(t.TempDir(), t.TempDir()); got != "" {
+		t.Fatalf("LoadDefaultModel = %q; want \"\" with no config", got)
+	}
+}
+
+func TestLoadDefaultModel_CorruptFileIsSkipped(t *testing.T) {
+	home, cwd := t.TempDir(), t.TempDir()
+	writeConfig(t, cwd, `{not json`)
+	if got := LoadDefaultModel(home, cwd); got != "" {
+		t.Fatalf("LoadDefaultModel = %q; a corrupt file must be skipped", got)
+	}
+}
+
+// The three config keys share one file and must not interfere — a config
+// setting all of them must yield all three, not just whichever loader
+// happens to parse last.
+func TestConfigKeys_Coexist(t *testing.T) {
+	home, cwd := t.TempDir(), t.TempDir()
+	writeConfig(t, cwd, `{"default_model":"kimi","default_effort":"low","permission_mode":"strict"}`)
+
+	if got := LoadDefaultModel(home, cwd); got != "kimi" {
+		t.Errorf("default_model = %q; want kimi", got)
+	}
+	if got := LoadDefaultEffort(home, cwd); got != "low" {
+		t.Errorf("default_effort = %q; want low", got)
+	}
+	if got := LoadPermissionMode(home, cwd); got != "strict" {
+		t.Errorf("permission_mode = %q; want strict", got)
+	}
+}
