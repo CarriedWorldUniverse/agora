@@ -121,9 +121,16 @@ func (hr *HookRunner) reportedPermissionMode() string {
 // internal/hooks.HandlerState itself carries no json tags (it's an
 // already-merged, in-memory-only shape per its own doc comment), so this is
 // a deliberately separate wire type, converted 1:1 on load.
+//
+// The field names are the SPEC's (§4.4: `enabled`, `trusted_hash`) and must
+// stay byte-identical to the entry untrustedHookReport and /hooks print. A
+// camelCase `trustedHash` tag shipped here originally, so the recorded hash
+// never unmarshalled and following the printed instruction left the handler
+// Untrusted forever — the trust gate had no key, only a lock (caught by the
+// round-trip test below, live-verified 2026-07-25).
 type hookStateEntry struct {
 	Enabled     bool   `json:"enabled"`
-	TrustedHash string `json:"trustedHash"`
+	TrustedHash string `json:"trusted_hash"`
 }
 
 // DiscoverHooks loads hooks.json for cwd's project layer and the operator's
