@@ -1,0 +1,10 @@
+# Accepted govulncheck advisories (symbol-level, i.e. REACHABLE from agora).
+#
+# An entry here is not bookkeeping — it is a decision to ship a live,
+# reachable vulnerability. Every line needs a comment saying who accepted it,
+# when, and why the exposure is tolerable. Prefer bumping the dependency;
+# reach for this file only when no fixed version exists.
+#
+# Format: one OSV id per line, '#' comments allowed.
+#
+# (empty — nothing accepted)

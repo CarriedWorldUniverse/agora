@@ -2,6 +2,17 @@ module github.com/CarriedWorldUniverse/agora
 
 go 1.26.2
 
+// Floor the toolchain at the version that fixes the stdlib advisories the
+// security gate reports: GO-2026-5037 (crypto/x509) and GO-2026-5039
+// (net/textproto) are fixed in go1.26.4, GO-2026-5856 (crypto/tls) in
+// go1.26.5. All three are reachable from agora — the daemon's TLS listener,
+// the web tool's http.Client, and the workflow journal's I/O.
+//
+// This is here rather than only in CI because the binary the operator RUNS is
+// built locally (croft ships go1.26.3), so a CI-only pin would leave the
+// installed binary vulnerable while the badge stayed green.
+toolchain go1.26.5
+
 require (
 	github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260725020851-f7fe28dd40c2
 	github.com/CarriedWorldUniverse/nexus v0.2.1-0.20260529191407-d8a3450956ea
@@ -59,11 +70,11 @@ require (
 	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
-	github.com/yuin/goldmark v1.7.13 // indirect
+	github.com/yuin/goldmark v1.7.17 // indirect
 	github.com/yuin/goldmark-emoji v1.0.6 // indirect
 	golang.org/x/sys v0.44.0 // indirect
 	golang.org/x/term v0.41.0 // indirect
-	golang.org/x/text v0.37.0 // indirect
+	golang.org/x/text v0.39.0 // indirect
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
