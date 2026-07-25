@@ -30,6 +30,14 @@ func buildMCPSource(workingDir string) *mcp.Source {
 	for _, name := range mcp.SortedNames(cfgs) {
 		ordered = append(ordered, cfgs[name])
 	}
+	// SECURITY (2026-07-25): .mcp.json comes from the working directory — a
+	// repo the operator may not have written. Starting a server EXECUTES its
+	// command (Source.Tools -> ensureStarted -> exec.Command) while merely
+	// assembling the turn's tool list, so the approval gate never sees it.
+	// Everything here is therefore withheld until the operator records its
+	// fingerprint in the user-layer trust file. See mcptrust.go.
+	userDir := filepath.Join(userHomeOrDot(), ".agora")
+	ordered = gateProjectMCPServers(ordered, loadMCPTrust(userDir), userDir)
 	return mcp.NewSource(ordered)
 }
 

@@ -4,6 +4,6 @@ main.go
         3 + func main() {}
    3      - func old() {}
 > Approve once
-  Approve for session
+  Approve for the rest of this session
   Deny — tell the agent what to do differently
 

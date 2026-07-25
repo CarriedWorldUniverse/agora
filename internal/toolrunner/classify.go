@@ -178,6 +178,12 @@ func Classify(call Call, roots Roots) (contracts.ApprovalKind, any) {
 				Detail: "command references " + strconv.Quote(off) + " outside the sandbox: " + a.Command,
 			}
 		}
+		// The cwd is part of what the command can reach — see cwdOutsideSandbox.
+		if off, outside := cwdOutsideSandbox(a.Cwd, roots); outside {
+			return contracts.KindEscalation, EscalationPayload{
+				Detail: "command runs in " + strconv.Quote(off) + " outside the sandbox: " + a.Command,
+			}
+		}
 		return contracts.KindExec, ExecPayload{Command: a.Command}
 
 	case call.Name == ToolRunBackground:
@@ -192,6 +198,12 @@ func Classify(call Call, roots Roots) (contracts.ApprovalKind, any) {
 		if off, outside := commandNamesOutsidePath(a.Command, roots); outside {
 			return contracts.KindEscalation, EscalationPayload{
 				Detail: "command references " + strconv.Quote(off) + " outside the sandbox: " + a.Command,
+			}
+		}
+		// The cwd is part of what the command can reach — see cwdOutsideSandbox.
+		if off, outside := cwdOutsideSandbox(a.Cwd, roots); outside {
+			return contracts.KindEscalation, EscalationPayload{
+				Detail: "command runs in " + strconv.Quote(off) + " outside the sandbox: " + a.Command,
 			}
 		}
 		return contracts.KindExec, ExecPayload{Command: a.Command}
@@ -330,6 +342,44 @@ func Classify(call Call, roots Roots) (contracts.ApprovalKind, any) {
 // nothing on disk means nothing to leak, and matches the file's existing
 // "a false prompt is recoverable, a false auto-run is not" rule — it's
 // only ever the RESOLVED existing target landing outside that flips this.
+// cwdOutsideSandbox judges a run_command/run_background `cwd` argument the
+// same way commandNamesOutsidePath judges a path token: empty means the
+// working dir (inside by definition); anything else is resolved (symlinks
+// included) and must stay under WorkingDir.
+//
+// This exists because Execute uses `cwd` UNCONDITIONALLY (exec.go: cmd.Dir =
+// cwd, no containment check), so a command whose TEXT names nothing outside
+// the sandbox still runs wherever cwd points. Without this check
+// {"command":"cat id_ed25519","cwd":"/home/operator/.ssh"} classified as
+// plain KindExec — PolicyAuto under the interactive default AND under
+// auto-safe/never-escalate — and read the operator's keys with no prompt.
+// Security review 2026-07-25.
+func cwdOutsideSandbox(cwd string, roots Roots) (string, bool) {
+	if strings.TrimSpace(cwd) == "" {
+		return "", false
+	}
+	wd := roots.WorkingDir
+	sep := string(filepath.Separator)
+	outsideOf := func(p string) bool { return p != wd && !strings.HasPrefix(p+sep, wd+sep) }
+
+	p := cwd
+	if strings.HasPrefix(p, "~") {
+		return cwd, true
+	}
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(wd, p)
+	}
+	p = filepath.Clean(p)
+	if outsideOf(p) {
+		return cwd, true
+	}
+	// Lexically inside, but the path itself may be a symlink out.
+	if resolved, err := filepath.EvalSymlinks(p); err == nil && outsideOf(resolved) {
+		return cwd, true
+	}
+	return "", false
+}
+
 func commandNamesOutsidePath(command string, roots Roots) (offending string, outside bool) {
 	wd := roots.WorkingDir
 	sep := string(filepath.Separator)
