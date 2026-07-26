@@ -12,6 +12,7 @@ import (
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
 	"github.com/CarriedWorldUniverse/agora/internal/hooks"
+	"github.com/CarriedWorldUniverse/agora/internal/toolrunner"
 	bridle "github.com/CarriedWorldUniverse/bridle"
 	"github.com/CarriedWorldUniverse/bridle/fake"
 )
@@ -209,8 +210,10 @@ func TestHooks_PreAndPostToolUse_FireWithSpecShapeAndToolStillExecutes(t *testin
 
 	var pre preToolUseInput
 	readJSONFile(t, preOut, &pre)
-	if pre.ToolName != "write_file" {
-		t.Errorf("PreToolUse tool_name = %q; want write_file", pre.ToolName)
+	// Hooks see the ADVERTISED tool name. This is an external contract:
+	// a user matcher keyed on "write_file" must be updated to "Write".
+	if pre.ToolName != toolrunner.ToolWriteFile {
+		t.Errorf("PreToolUse tool_name = %q; want %q", pre.ToolName, toolrunner.ToolWriteFile)
 	}
 	if pre.HookEventName != "PreToolUse" {
 		t.Errorf("PreToolUse hook_event_name = %q", pre.HookEventName)
@@ -222,8 +225,8 @@ func TestHooks_PreAndPostToolUse_FireWithSpecShapeAndToolStillExecutes(t *testin
 
 	var post postToolUseInput
 	readJSONFile(t, postOut, &post)
-	if post.ToolName != "write_file" {
-		t.Errorf("PostToolUse tool_name = %q; want write_file", post.ToolName)
+	if post.ToolName != toolrunner.ToolWriteFile {
+		t.Errorf("PostToolUse tool_name = %q; want %q", post.ToolName, toolrunner.ToolWriteFile)
 	}
 	var toolResp postToolUseResponsePayload
 	if err := json.Unmarshal(post.ToolResponse, &toolResp); err != nil {
