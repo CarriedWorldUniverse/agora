@@ -184,6 +184,55 @@ func TestManager_InputEOF_CancelledContextStillCutsTheTurnShort(t *testing.T) {
 	}
 }
 
+// TestManager_InputEOF_ThenCancel_CutsTheDrainShort covers the ordering
+// the sibling test above does not: EOF lands FIRST, so the drain is
+// already blocked in finishInFlight, and only then does the caller cancel.
+// The sibling cancels before closing in, so the Run loop's own ctx.Done()
+// branch wins the select and the drain is never entered at all.
+//
+// The scenario is real — a piped run hits EOF mid-turn and the operator
+// hits Ctrl-C. Note this passes with or without finishInFlight's own
+// ctx.Done() case, because turnCtx derives from ctx: cancelling reaches
+// the provider directly and turnDone then fires on its own. See the
+// limitation noted on finishInFlight.
+func TestManager_InputEOF_ThenCancel_CutsTheDrainShort(t *testing.T) {
+	provider := newSlowProvider(10*time.Second, "SHOULD_NOT_APPEAR")
+	m := NewManager("th_eof_then_cancel", provider, WithIDGen(&FakeIDGen{IDs: []string{"tu_0001"}}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	in := make(chan contracts.Input, 1)
+	out := make(chan contracts.Event, 64)
+	runErr := make(chan error, 1)
+	go func() { runErr <- m.Run(ctx, in, out) }()
+
+	in <- contracts.Input{Type: contracts.InUserMessage, Text: "hi"}
+	<-provider.started
+	close(in) // EOF FIRST: the drain is now blocked waiting on the turn
+
+	// Give the drain a moment to actually enter finishInFlight, so the
+	// cancel below is observed there rather than by the Run loop.
+	time.Sleep(100 * time.Millisecond)
+	start := time.Now()
+	cancel()
+
+	deadline := time.After(testTimeout)
+	for {
+		select {
+		case _, ok := <-out:
+			if !ok {
+				<-runErr
+				if elapsed := time.Since(start); elapsed > 3*time.Second {
+					t.Fatalf("cancel during the EOF drain took %v; the ctx escape did not fire", elapsed)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out; cancelling during the EOF drain did not cut the turn short")
+		}
+	}
+}
+
 // EOF with NO turn in flight (the common case: a session that already
 // finished, or never started one) must still wind down cleanly.
 func TestManager_InputEOF_NoTurnInFlightIsClean(t *testing.T) {

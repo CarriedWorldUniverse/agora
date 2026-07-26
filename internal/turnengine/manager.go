@@ -752,9 +752,18 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 	// provider could answer, and every such run reported turn.failed
 	// {interrupted:true} with no output.
 	//
-	// A cancelled ctx still cuts it short: a caller shutting down (SIGINT,
-	// a daemon stopping) has genuinely asked to abandon the work, and
-	// waiting out a slow turn there would hang shutdown.
+	// A cancelled ctx cuts the drain short for any provider that honours
+	// cancellation — though note turnCtx derives from ctx, so such a
+	// provider returns on its own and the plain <-turnDone case would
+	// suffice; the explicit branch just cancels eagerly rather than
+	// relying on that propagation.
+	//
+	// LIMITATION: it does NOT bound shutdown against a provider that
+	// ignores ctx (wedged on a syscall or a non-cancellable read). The
+	// branch calls turnCancel and then BLOCKS on <-turnDone, so such a
+	// turn is still waited out in full. Bounding it would mean abandoning
+	// the turn without forwarding a terminal event, which is a shutdown
+	// semantics change and deliberately out of scope here.
 	finishInFlight := func() {
 		if turnCancel == nil {
 			return
