@@ -63,6 +63,17 @@ func decodePayload(payload any, out any) bool {
 
 // argString extracts a string field named key from a raw JSON args object
 // ("" if absent/not-a-string).
+// argStringAny returns the first of keys present in args, in order — the
+// fallback that lets one mapping accept either spelling of an argument.
+func argStringAny(args json.RawMessage, keys []string) string {
+	for _, k := range keys {
+		if v := argString(args, k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func argString(args json.RawMessage, key string) string {
 	if len(args) == 0 {
 		return ""

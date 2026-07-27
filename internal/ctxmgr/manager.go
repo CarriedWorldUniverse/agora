@@ -149,7 +149,7 @@ func (m *Manager) Assemble(threadID string, turnInput []contracts.ThreadItem) ([
 			if !ok {
 				continue // unkeyed (command) — tier 4, no ledger entry
 			}
-			id := argString(tc.Args, mapping.KeyArg)
+			id := argStringAny(tc.Args, mapping.KeyArg)
 			if id == "" {
 				continue
 			}
@@ -280,7 +280,7 @@ func (m *Manager) Assemble(threadID string, turnInput []contracts.ThreadItem) ([
 				emit(i, contracts.RoleAssistant, capText(fmt.Sprintf("tool_call %s %s", tc.ToolName, string(tc.Args)), m.cfg.MaxRetainBytes))
 				continue
 			}
-			id := argString(tc.Args, mapping.KeyArg)
+			id := argStringAny(tc.Args, mapping.KeyArg)
 			k := Key{Domain: mapping.Domain, ID: id}
 			if mapping.Class == ClassEdit {
 				emit(i, contracts.RoleAssistant, fmt.Sprintf("tool_call %s %s", tc.ToolName, string(tc.Args)))
@@ -374,7 +374,7 @@ func resolveResultKey(items []contracts.ThreadItem, i int, keys map[string]KeyMa
 		if !ok || mapping.Class != ClassRead {
 			return Key{}, false
 		}
-		return Key{Domain: mapping.Domain, ID: argString(tc.Args, mapping.KeyArg)}, true
+		return Key{Domain: mapping.Domain, ID: argStringAny(tc.Args, mapping.KeyArg)}, true
 	}
 	return Key{}, false
 }

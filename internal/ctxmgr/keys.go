@@ -45,5 +45,12 @@ type KeyMapping struct {
 	// into the same ledger entry).
 	Domain string
 	Class  ToolClass
-	KeyArg string
+	// KeyArg is the argument naming the artifact, tried IN ORDER. It is a
+	// list because a tool can be called with either spelling of the same
+	// argument: the fs family advertises file_path but still accepts the
+	// legacy path, so a call pairing the new NAME with the old ARG is
+	// valid and must still key. With a single arg it silently produced an
+	// empty key, which disables working-set supersede — a stale write then
+	// leaks into the curated tail with no error anywhere.
+	KeyArg []string
 }
