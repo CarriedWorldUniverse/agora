@@ -362,12 +362,15 @@ func (s *turnSink) Emit(e bridle.Event) {
 		// (events.go: Retry, ProviderAPIError, ResumeFallback) that arrive
 		// ALONGSIDE a successful TurnDone. Rendering those as agora's red
 		// "error:" status (model.go) makes a turn that actually succeeded look
-		// broken. Drop only those (the authoritative outcome is the TurnDone
-		// that follows); everything else — including StderrOutput's arbitrary
-		// sidecar stderr, which can carry real failures — still surfaces (see
-		// isNonTerminalErrorStage). A richer EvWarning severity so the benign
-		// ones show as a dim note instead of vanishing is filed as follow-up.
+		// broken — but DROPPING them told the operator nothing, which is worse
+		// for the resume fallback: the turn quietly restarts on a fresh
+		// provider session and the prior context is gone with nothing in the
+		// stream saying so (agora#120). They go out as EvWarning instead.
+		// Everything else — including StderrOutput's arbitrary sidecar stderr,
+		// which can carry real failures — still surfaces as an error (see
+		// isNonTerminalErrorStage).
 		if isNonTerminalErrorStage(ev.Stage) {
+			s.emitWarning(ev.Err, string(ev.Stage))
 			return
 		}
 		msg := ""
@@ -376,9 +379,10 @@ func (s *turnSink) Emit(e bridle.Event) {
 		}
 		s.send(contracts.Event{Type: contracts.EvError, Payload: mustMarshal(errorPayload{Message: msg})})
 	case bridle.Warning:
-		// A bridle.Warning is, by name, non-fatal — never an agora "error:".
-		// Dropped for the same reason as the non-terminal TurnError stages
-		// above (see the EvWarning follow-up).
+		// A bridle.Warning is, by name, non-fatal — never an agora "error:",
+		// but no longer dropped either: same reasoning as the non-terminal
+		// TurnError stages above.
+		s.emitWarningMsg(ev.Message, ev.Kind)
 		return
 	case bridle.ToolCallStart:
 		s.emitToolStart(ev)
@@ -390,6 +394,29 @@ func (s *turnSink) Emit(e bridle.Event) {
 		// bridle.StepBoundary/MCPServerFailed: see the type doc comment
 		// above — no agora wire equivalent yet, out of scope this slice.
 	}
+}
+
+// emitWarning sends a non-terminal note. A nil/empty error emits nothing:
+// a warning with no message is noise, and the caller cannot always know
+// whether the source populated one.
+func (s *turnSink) emitWarning(err error, stage string) {
+	if err == nil {
+		return
+	}
+	s.emitWarningMsg(err.Error(), stage)
+}
+
+// emitWarningMsg is emitWarning for sources that carry a plain string
+// rather than an error (bridle.Warning). An empty message emits nothing:
+// a note with no content is noise.
+func (s *turnSink) emitWarningMsg(msg, stage string) {
+	if msg == "" {
+		return
+	}
+	s.send(contracts.Event{
+		Type:    contracts.EvWarning,
+		Payload: mustMarshal(contracts.WarningPayload{Message: msg, Stage: stage}),
+	})
 }
 
 // isNonTerminalErrorStage reports whether a bridle.TurnError.Stage is a

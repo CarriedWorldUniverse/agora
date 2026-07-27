@@ -2,6 +2,7 @@ package turnengine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -36,14 +37,53 @@ func TestSink_NonTerminalStages_NotErrors(t *testing.T) {
 	}
 	for _, stage := range nonTerminal {
 		got := emitAndCollect(t, bridle.TurnError{Err: errors.New("noise"), Stage: stage})
-		if len(got) != 0 {
-			t.Errorf("stage %q emitted %d events; want 0 (non-terminal, must not be an error)", stage, len(got))
+		// These used to emit NOTHING. Silence was wrong for the resume
+		// fallback: the turn quietly restarts on a fresh provider session
+		// and the prior context is gone, with nothing in the stream saying
+		// so (agora#120). They are notes now — still never errors.
+		if len(got) != 1 {
+			t.Errorf("stage %q emitted %d events; want exactly 1 (a note)", stage, len(got))
+			continue
+		}
+		if got[0].Type == contracts.EvError {
+			t.Errorf("stage %q emitted an EvError; non-terminal stages must never render as a terminal error", stage)
+		}
+		if got[0].Type != contracts.EvWarning {
+			t.Errorf("stage %q emitted %q; want %q", stage, got[0].Type, contracts.EvWarning)
+		}
+		var p contracts.WarningPayload
+		if err := json.Unmarshal(got[0].Payload, &p); err != nil {
+			t.Errorf("stage %q: decode payload: %v", stage, err)
+			continue
+		}
+		if p.Message != "noise" {
+			t.Errorf("stage %q: message = %q; want the underlying error text", stage, p.Message)
+		}
+		if p.Stage != string(stage) {
+			t.Errorf("stage %q: payload stage = %q; want the stage carried verbatim so consumers can filter by cause", stage, p.Stage)
 		}
 	}
 
-	if got := emitAndCollect(t, bridle.Warning{Kind: "k", Message: "m"}); len(got) != 0 {
-		t.Errorf("bridle.Warning emitted %d events; want 0", len(got))
+	got := emitAndCollect(t, bridle.Warning{Kind: "k", Message: "m"})
+	if len(got) != 1 || got[0].Type != contracts.EvWarning {
+		t.Fatalf("bridle.Warning emitted %d events (%v); want exactly 1 EvWarning", len(got), eventTypes(got))
 	}
+
+	// A warning with no message is noise, not information.
+	if empty := emitAndCollect(t, bridle.Warning{Kind: "k"}); len(empty) != 0 {
+		t.Errorf("an empty bridle.Warning emitted %d events; want 0", len(empty))
+	}
+	if empty := emitAndCollect(t, bridle.TurnError{Stage: bridle.TurnErrorStageRetry}); len(empty) != 0 {
+		t.Errorf("a nil-Err TurnError emitted %d events; want 0", len(empty))
+	}
+}
+
+func eventTypes(evs []contracts.Event) []contracts.EventType {
+	out := make([]contracts.EventType, 0, len(evs))
+	for _, e := range evs {
+		out = append(out, e.Type)
+	}
+	return out
 }
 
 // TestSink_TerminalStages_AreErrors: real failures still surface as EvError so
