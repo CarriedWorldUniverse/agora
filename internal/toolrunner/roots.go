@@ -26,6 +26,17 @@ var ProtectedDirs = []string{".git", ".agora", ".cairn"}
 type Roots struct {
 	WorkingDir string
 	AddDirs    []string
+	// TempDirs is the scratch/tmp half of §3a's writable set. It is
+	// populated automatically by NewRoots, not declared by the caller.
+	//
+	// Temp dirs count for CONTAINMENT (All/ContainingRoot/ContainsLexical
+	// and so resolveContained) but are deliberately excluded from
+	// SearchRoots, the set a bare glob/grep walks. Walking a shared /tmp
+	// would be slow and would surface unrelated processes' files into the
+	// model's context; a scratch dir is somewhere to WRITE, not somewhere
+	// to search by default. An explicit `grep path=/tmp/...` still works,
+	// because that goes through containment, not the walk set.
+	TempDirs []string
 }
 
 // NewRoots canonicalizes workingDir/addDirs (abs + symlink-resolved, per the
@@ -45,7 +56,34 @@ func NewRoots(workingDir string, addDirs ...string) (Roots, error) {
 		}
 		dirs = append(dirs, cd)
 	}
-	return Roots{WorkingDir: wd, AddDirs: dirs}, nil
+	return Roots{WorkingDir: wd, AddDirs: dirs, TempDirs: tempDirs()}, nil
+}
+
+// tempDirs returns the scratch roots: the process's temp dir (TMPDIR, or
+// the platform default) plus "/tmp" when that is a different, real
+// directory — macOS resolves TMPDIR to a per-user /var/folders path while
+// tools still write to /tmp, and a model asked to scribble a scratch file
+// reaches for /tmp by habit either way.
+//
+// A temp dir that cannot be resolved is SKIPPED rather than failing
+// NewRoots: WorkingDir and AddDirs are caller-declared, so a bad one is a
+// caller bug worth erroring on, but an absent /tmp must not stop a session
+// from starting.
+func tempDirs() []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, d := range []string{os.TempDir(), "/tmp"} {
+		if d == "" {
+			continue
+		}
+		resolved, err := canonDir(d)
+		if err != nil || seen[resolved] {
+			continue
+		}
+		seen[resolved] = true
+		out = append(out, resolved)
+	}
+	return out
 }
 
 func canonDir(dir string) (string, error) {
@@ -60,22 +98,31 @@ func canonDir(dir string) (string, error) {
 	return resolved, nil
 }
 
-// All returns every configured root, working dir first.
+// All returns every root that counts for CONTAINMENT — working dir first,
+// then add_dirs, then temp dirs. This is the set a path must fall inside
+// to be readable/writable at all. For the narrower set a bare glob/grep
+// walks, use SearchRoots.
 func (r Roots) All() []string {
-	out := make([]string, 0, 1+len(r.AddDirs))
+	out := make([]string, 0, 1+len(r.AddDirs)+len(r.TempDirs))
 	out = append(out, r.WorkingDir)
 	out = append(out, r.AddDirs...)
+	out = append(out, r.TempDirs...)
 	return out
 }
 
-// DedupedAll is All() with any root dropped that is lexically nested under
-// an earlier root in the list (review fix 5: a walk over WorkingDir already
-// descends into a nested add_dir, so a naive per-root filepath.WalkDir over
-// All() double-lists every file under it and pre-trips grepMaxMatches).
-// Earlier entries win — WorkingDir is listed first, so a nested add_dir is
-// the one dropped, not the other way around.
-func (r Roots) DedupedAll() []string {
-	all := r.All()
+// SearchRoots is the set a bare glob/grep WALKS: the working dir and
+// add_dirs, with any root dropped that is lexically nested under an
+// earlier one (review fix 5: a walk over WorkingDir already descends into
+// a nested add_dir, so a naive per-root filepath.WalkDir double-lists
+// every file under it and pre-trips grepMaxMatches). Earlier entries win —
+// WorkingDir is listed first, so a nested add_dir is the one dropped.
+//
+// TempDirs are excluded on purpose — see the field's comment on Roots.
+// This is NOT the containment set; that is All().
+func (r Roots) SearchRoots() []string {
+	all := make([]string, 0, 1+len(r.AddDirs))
+	all = append(all, r.WorkingDir)
+	all = append(all, r.AddDirs...)
 	out := make([]string, 0, len(all))
 	for _, root := range all {
 		nested := false

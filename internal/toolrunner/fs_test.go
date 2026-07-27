@@ -17,6 +17,14 @@ func newFSFamily(t *testing.T) (*FSFamily, Roots) {
 	return NewFSFamily(roots), roots
 }
 
+// newFSFamilyNoTemp is newFSFamily without the temp roots — see
+// newTestRootsNoTemp for why the escape tests need it.
+func newFSFamilyNoTemp(t *testing.T) (*FSFamily, Roots) {
+	t.Helper()
+	roots := newTestRootsNoTemp(t)
+	return NewFSFamily(roots), roots
+}
+
 func mustArgs(t *testing.T, v any) json.RawMessage {
 	t.Helper()
 	b, err := json.Marshal(v)
@@ -98,7 +106,7 @@ func TestReadFileOffsetLimit(t *testing.T) {
 }
 
 func TestWriteFileRejectsPathEscape(t *testing.T) {
-	fam, _ := newFSFamily(t)
+	fam, _ := newFSFamilyNoTemp(t)
 	res, err := fam.Execute(context.Background(), Call{Name: ToolWriteFile, Args: mustArgs(t, writeFileArgs{Path: "../escape.txt", Content: "x"})})
 	if err != nil {
 		t.Fatalf("unexpected Go error: %v", err)
@@ -109,7 +117,7 @@ func TestWriteFileRejectsPathEscape(t *testing.T) {
 }
 
 func TestWriteFileRejectsSymlinkEscape(t *testing.T) {
-	fam, roots := newFSFamily(t)
+	fam, roots := newFSFamilyNoTemp(t)
 	outside := t.TempDir()
 	link := filepath.Join(roots.WorkingDir, "out")
 	if err := os.Symlink(outside, link); err != nil {

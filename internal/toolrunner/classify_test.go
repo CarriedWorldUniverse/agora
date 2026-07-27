@@ -152,7 +152,7 @@ func TestClassifyWriteFileInsideRoots(t *testing.T) {
 }
 
 func TestClassifyWriteFileOutsideRoots(t *testing.T) {
-	roots := newTestRoots(t)
+	roots := newTestRootsNoTemp(t)
 	kind, payload := Classify(Call{Name: ToolWriteFile, Args: mustArgs(t, writeFileArgs{Path: "../escape.txt", Content: "x"})}, roots)
 	if kind != contracts.KindEscalation {
 		t.Fatalf("kind = %v, want %v", kind, contracts.KindEscalation)
