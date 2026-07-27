@@ -66,9 +66,16 @@ func DefaultConfig() Config {
 		DialogueKeepTurns:  8,
 		SpanIndexerName:    "",
 		Keys: map[string]KeyMapping{
-			"read_file":   {Domain: "file", Class: ClassRead, KeyArg: "path"},
-			"write_file":  {Domain: "file", Class: ClassWrite, KeyArg: "path"},
-			"apply_patch": {Domain: "file", Class: ClassEdit, KeyArg: "path"},
+			// Advertised names + their file_path arg (they match Claude's
+			// native tool surface — see toolrunner's fs.go const block).
+			"Read":  {Domain: "file", Class: ClassRead, KeyArg: []string{"file_path", "path"}},
+			"Write": {Domain: "file", Class: ClassWrite, KeyArg: []string{"file_path", "path"}},
+			"Edit":  {Domain: "file", Class: ClassEdit, KeyArg: []string{"file_path", "path"}},
+			// Legacy spellings, still accepted by the fs family, so a
+			// resumed pre-rename thread keys its working set the same way.
+			"read_file":   {Domain: "file", Class: ClassRead, KeyArg: []string{"path", "file_path"}},
+			"write_file":  {Domain: "file", Class: ClassWrite, KeyArg: []string{"path", "file_path"}},
+			"apply_patch": {Domain: "file", Class: ClassEdit, KeyArg: []string{"path", "file_path"}},
 		},
 	}
 }

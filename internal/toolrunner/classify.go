@@ -221,28 +221,28 @@ func Classify(call Call, roots Roots) (contracts.ApprovalKind, any) {
 	case strings.HasPrefix(call.Name, mcpPrefix):
 		return contracts.KindMCPTool, MCPToolPayload{Tool: call.Name, Args: call.Args}
 
-	case call.Name == ToolReadFile:
+	case call.Name == ToolReadFile, call.Name == LegacyReadFile:
 		var a readFileArgs
 		if err := json.Unmarshal(call.Args, &a); err != nil {
 			return contracts.KindEscalation, EscalationPayload{Detail: "malformed read_file arguments: " + err.Error()}
 		}
-		return contracts.KindRead, ReadPayload{Detail: a.Path}
+		return contracts.KindRead, ReadPayload{Detail: a.filePath()}
 
-	case call.Name == ToolListDir:
+	case call.Name == ToolListDir, call.Name == LegacyListDir:
 		var a listDirArgs
 		if err := json.Unmarshal(call.Args, &a); err != nil {
 			return contracts.KindEscalation, EscalationPayload{Detail: "malformed list_dir arguments: " + err.Error()}
 		}
-		return contracts.KindRead, ReadPayload{Detail: a.Path}
+		return contracts.KindRead, ReadPayload{Detail: a.filePath()}
 
-	case call.Name == ToolGlob:
+	case call.Name == ToolGlob, call.Name == LegacyGlob:
 		var a globArgs
 		if err := json.Unmarshal(call.Args, &a); err != nil {
 			return contracts.KindEscalation, EscalationPayload{Detail: "malformed glob arguments: " + err.Error()}
 		}
 		return contracts.KindRead, ReadPayload{Detail: a.Pattern}
 
-	case call.Name == ToolGrep:
+	case call.Name == ToolGrep, call.Name == LegacyGrep:
 		var a grepArgs
 		if err := json.Unmarshal(call.Args, &a); err != nil {
 			return contracts.KindEscalation, EscalationPayload{Detail: "malformed grep arguments: " + err.Error()}
@@ -287,29 +287,29 @@ func Classify(call Call, roots Roots) (contracts.ApprovalKind, any) {
 		// alone identifies what's being deleted.
 		return contracts.KindPatch, PatchPayload{Path: a.Name + ".md"}
 
-	case call.Name == ToolWriteFile:
+	case call.Name == ToolWriteFile, call.Name == LegacyWriteFile:
 		var a writeFileArgs
 		if err := json.Unmarshal(call.Args, &a); err != nil {
 			return contracts.KindEscalation, EscalationPayload{Detail: "malformed write_file arguments: " + err.Error()}
 		}
-		if kind, payload, ok := classifyWriteTarget(a.Path, roots); !ok {
+		if kind, payload, ok := classifyWriteTarget(a.filePath(), roots); !ok {
 			return kind, payload
 		}
 		return contracts.KindPatch, PatchPayload{
-			Path:  a.Path,
+			Path:  a.filePath(),
 			Lines: linesAsAdd(a.Content),
 		}
 
-	case call.Name == ToolEditFile:
+	case call.Name == ToolEditFile, call.Name == LegacyEditFile:
 		var a editFileArgs
 		if err := json.Unmarshal(call.Args, &a); err != nil {
 			return contracts.KindEscalation, EscalationPayload{Detail: "malformed edit_file arguments: " + err.Error()}
 		}
-		if kind, payload, ok := classifyWriteTarget(a.Path, roots); !ok {
+		if kind, payload, ok := classifyWriteTarget(a.filePath(), roots); !ok {
 			return kind, payload
 		}
 		return contracts.KindPatch, PatchPayload{
-			Path:  a.Path,
+			Path:  a.filePath(),
 			Lines: editDiffLines(a.OldString, a.NewString),
 		}
 

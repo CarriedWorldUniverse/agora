@@ -220,8 +220,8 @@ func TestEndToEnd_ParentSpawnsChild_ResultRoundTrips(t *testing.T) {
 	if toolNames[toolAgentName] {
 		t.Fatalf("child's tool set includes %q — depth guard failed, child must not get the agent tool", toolAgentName)
 	}
-	if !toolNames["read_file"] { // sanity: the child DID get a real, non-empty tool surface (fs family)
-		t.Fatalf("child's tool set = %v; want it to at least include the fs family's read_file", toolNames)
+	if !toolNames["Read"] { // sanity: the child DID get a real, non-empty tool surface (fs family)
+		t.Fatalf("child's tool set = %v; want it to at least include the fs family's Read", toolNames)
 	}
 }
 

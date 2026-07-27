@@ -44,7 +44,7 @@ algorithm is a view, idempotent by construction). Four tiers, in order:
 
 The unit of retention is the **key** — an artifact identity, not a message:
 `(tool_class, key)`, e.g. `(file, "src/a.py")`. Config maps tool names into
-classes: reads (`read_file→path`), full-content writes (`write_file→path`),
+classes: reads (`Read→file_path`), full-content writes (`Write→file_path`),
 mutations-without-content (edit/patch tools), commands (unkeyed). Per key the
 ledger tracks:
 
@@ -206,8 +206,11 @@ span_indexer         = "codemap" # optional; "" = line-window fallback
 reasoning_keep_turns = 2         # where provider allows dropping
 dialogue_keep_turns  = 8         # summarization threshold (last resort)
 [context.keys]                   # tool → class/key-arg mapping
-read_file  = { class = "read",  key = "path" }
-write_file = { class = "write", key = "path" }
+Read  = { class = "read",  key = ["file_path", "path"] }
+Write = { class = "write", key = ["file_path", "path"] }
+# legacy spellings stay mapped so pre-rename threads keep keying
+read_file  = { class = "read",  key = ["path", "file_path"] }
+write_file = { class = "write", key = ["path", "file_path"] }
 apply_patch= { class = "edit",  key = "path" }   # invalidates, never carries truth
 ```
 
