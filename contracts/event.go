@@ -66,7 +66,28 @@ const (
 	EvRateLimit EventType = "rate_limit"
 
 	EvError EventType = "error"
+
+	// EvWarning is a non-terminal note: something the operator should know
+	// about, on a turn that still succeeds. It exists because the
+	// alternative for bridle's benign TurnError stages was a false choice
+	// between rendering them as a terminal "error:" (a successful turn
+	// looks broken) and dropping them (the operator is told nothing).
+	//
+	// The motivating case is a resume fallback: a stale provider session
+	// cannot be resumed, the turn silently restarts on a fresh one, and the
+	// prior provider-side context is GONE. The turn succeeds either way, so
+	// nothing else in the stream says so — see agora#120.
+	EvWarning EventType = "warning"
 )
+
+// WarningPayload is EvWarning's payload. Stage carries bridle's
+// TurnErrorStage verbatim ("resume_fallback", "retry",
+// "provider_api_error") so a consumer can filter by cause rather than
+// pattern-matching prose.
+type WarningPayload struct {
+	Message string `json:"message"`
+	Stage   string `json:"stage,omitempty"`
+}
 
 // ItemType enumerates transcript item kinds carried by item.* events.
 // Spec: agora-spec-io.md §1; plan added per agora-spec-planning-questions.md §1.

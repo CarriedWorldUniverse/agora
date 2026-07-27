@@ -57,6 +57,24 @@ rename replay unchanged. They are simply no longer advertised.
 `tool_name`) now carry the advertised name, so a user hook matcher keyed on
 `write_file` must be updated to `Write`.
 
+### `warning` wire event for non-terminal notes (2026-07-27)
+
+Adds `EvWarning` (`"warning"`) with a `{message, stage}` payload, carrying
+bridle's benign `TurnError` stages (`retry`, `provider_api_error`,
+`resume_fallback`) and `bridle.Warning`.
+
+Previously these were DROPPED, to stop a successful turn rendering agora's
+terminal red `error:`. Silence was wrong for the resume fallback: the turn
+quietly restarts on a fresh provider session and the prior provider-side
+context is gone, with nothing in the stream saying so (agora#120). The
+choice was never error-vs-silence; it needed a third severity.
+
+`stage` carries bridle's `TurnErrorStage` verbatim so a consumer can filter
+by cause rather than pattern-matching prose. The TUI renders it as
+`note: …` in the idle status row, strictly BELOW `error:` in precedence,
+and clears it on the next `turn.started` so a note cannot misattribute
+itself to a later turn.
+
 ## 2. Conformance (U18): structural, not byte-exact, comparison for two flows
 `TestFlowQuestionParkResume` and `TestFlowPodProvision` assert **structural
 equivalence** (event-type sequence + id self-consistency + byte-exact on all other
