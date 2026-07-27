@@ -286,6 +286,12 @@ var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 // when a tick lands while idle, so a chain from turn N can survive into
 // turn N+1 (which schedules its own) and double the tick rate — stale-gen
 // ticks are dropped instead (review fix on the look-pass).
+// statusErrMsg carries an error raised by work running on a tea.Cmd
+// goroutine back into Update, which owns the Model and is the only place
+// m.statusErr may be assigned. A Cmd that wrote the field directly would
+// race the render loop (agora#138).
+type statusErrMsg string
+
 type spinnerTickMsg struct{ gen int }
 
 func spinnerTick(gen int) tea.Cmd {
@@ -316,6 +322,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds := m.handleEvent(msg.ev)
 		cmds = append(cmds, waitForEvent(m.cfg.Backend))
 		return m, tea.Batch(cmds...)
+	case statusErrMsg:
+		m.statusErr = string(msg)
+		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case spinnerTickMsg:
@@ -1128,25 +1137,36 @@ func (m *Model) handleResumeCommand(text string) (cmd tea.Cmd, handled bool) {
 	if trimmed == "/resume all" {
 		wd, scope = "", "all directories"
 	}
-	metas, err := lister.ThreadSummaries(wd)
-	if err != nil {
-		m.statusErr = "list threads: " + err.Error()
-		return nil, true
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "sessions (%s):", scope)
-	if len(metas) == 0 {
-		b.WriteString(" none")
-	}
-	for _, meta := range metas {
-		marker := "  "
-		if meta.ThreadID == m.cfg.ThreadID {
-			marker = "* "
+	// ThreadSummaries walks the whole thread store and scales with how many
+	// threads have ever been persisted, so it runs on the Cmd goroutine
+	// rather than in Update's call stack (agora#138). The closure captures
+	// what it needs by value and never touches the Model — the error path
+	// therefore returns a statusErrMsg for Update to apply, instead of
+	// assigning m.statusErr from another goroutine.
+	current, p := m.cfg.ThreadID, m.cfg.Printer
+	return func() tea.Msg {
+		metas, err := lister.ThreadSummaries(wd)
+		if err != nil {
+			return statusErrMsg("list threads: " + err.Error())
 		}
-		fmt.Fprintf(&b, "\n%s%-28s %s  %s", marker, meta.ThreadID, meta.CreatedAt.Format("2006-01-02 15:04"), meta.WorkingDir)
-	}
-	b.WriteString("\nopen one: agora -thread <id>   (in its directory)")
-	return m.cfg.Printer(b.String()), true
+		var b strings.Builder
+		fmt.Fprintf(&b, "sessions (%s):", scope)
+		if len(metas) == 0 {
+			b.WriteString(" none")
+		}
+		for _, meta := range metas {
+			marker := "  "
+			if meta.ThreadID == current {
+				marker = "* "
+			}
+			fmt.Fprintf(&b, "\n%s%-28s %s  %s", marker, meta.ThreadID, meta.CreatedAt.Format("2006-01-02 15:04"), meta.WorkingDir)
+		}
+		b.WriteString("\nopen one: agora -thread <id>   (in its directory)")
+		if cmd := p(b.String()); cmd != nil {
+			return cmd()
+		}
+		return nil
+	}, true
 }
 
 func (m *Model) submitComposer() tea.Cmd {
