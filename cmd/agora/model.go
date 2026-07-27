@@ -21,12 +21,23 @@ import (
 
 // resolveModel picks the session's model name from, in precedence order:
 // an explicit flag, then default_model in .agora/config.json (project over
-// user), then "" meaning the engine's own default.
+// user), then the models.json entry flagged `"default": true`, then ""
+// meaning the engine's own default.
+//
+// The registry flag sits BELOW config.json deliberately: models.json is a
+// shared catalog (often checked in), config.json is where a given machine
+// or repo states its preference, so the more specific file wins. It sits
+// here rather than in the TUI so `agora pipe` honours it too — the TUI
+// used to fall back to a hardcoded "sonnet" lookup and pipe had no default
+// at all, which is the asymmetry this closes.
 func resolveModel(flagValue, workingDir string) string {
 	if flagValue != "" {
 		return flagValue
 	}
-	return turnengine.LoadDefaultModel(userHomeOrDot(), workingDir)
+	if fromConfig := turnengine.LoadDefaultModel(userHomeOrDot(), workingDir); fromConfig != "" {
+		return fromConfig
+	}
+	return tui.LoadModelRegistry(userHomeOrDot(), workingDir).Default()
 }
 
 // resolveModelSpec turns a model NAME into the (id, provider) pair a turn

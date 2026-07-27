@@ -231,8 +231,12 @@ func NewModel(cfg Config) *Model {
 		currentProvider = entry.ProviderSpec()
 	}
 	if currentModel == "" {
-		// Convenience: if the config defines a "sonnet" name, start on it;
-		// otherwise start empty and the engine's default model applies.
+		// Last-resort convenience only. The real default now comes from
+		// the models.json `"default": true` flag, applied upstream in
+		// cmd/agora's resolveModel so `agora pipe` honours it too; this
+		// hardcoded name is kept so a config that predates the flag keeps
+		// its old behaviour. Otherwise start empty and the engine's
+		// default model applies.
 		currentModel = cfg.ModelRegistry["sonnet"].Model
 	}
 	return &Model{cfg: cfg, composer: NewComposer(), currentModel: currentModel, currentProvider: currentProvider}
