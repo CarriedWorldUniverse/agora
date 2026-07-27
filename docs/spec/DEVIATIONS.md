@@ -156,7 +156,11 @@ carried the pre-fix wording — one reason the duplicates were retired.)
 - **`go.starlark.net`** (U14) must be added to the **go-gate proxy allowlist** for
   sovereign builds on croft/dMon. GitHub CI uses the public proxy, so CI is fine.
 - The **v0-legacy TUI** (`internal/ui`) was retired at U15; **`internal/opclient`**
-  is now orphaned (nothing imports it) pending a cleanup pass.
+  was orphaned by the same cut and is **deleted** as of 2026-07-27 (agora#139).
+  It was the last importer of the `github.com/CarriedWorldUniverse/nexus`
+  module, which is dropped from `go.mod` with it — agora is no longer a
+  cluster client in the build graph, not just in the README. The `v0-legacy`
+  line remains the runnable reference per the U1 cut.
 - `EvProvisioned` was registered in the `contracts` known-events test at U18 (a
   pre-existing gap).
 
