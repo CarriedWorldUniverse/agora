@@ -138,6 +138,49 @@ func TestTempRoots_SymlinkOutOfTempStillEscapes(t *testing.T) {
 	}
 }
 
+// A symlinked temp dir must be recorded under BOTH spellings. This is
+// macOS's real shape — TMPDIR is /var/folders/... but resolves to
+// /private/var/folders/... — and it is reproduced on any platform by
+// pointing TMPDIR at a symlink.
+//
+// Asserted on tempDirs() directly rather than through ContainsLexical: on
+// Linux the fixtures live under /tmp, which is itself a temp root, so a
+// containment assertion passes either way and cannot see the bug. With
+// only the resolved form recorded, ContainsLexical — symlink-blind by
+// design, being the classifier's cheap pre-check — judges the unresolved
+// path outside the roots and a scratch write wrongly demands approval.
+func TestTempRoots_SymlinkedTempDirRecordedUnderBothSpellings(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix symlink semantics")
+	}
+	realDir := t.TempDir()
+	link := filepath.Join(t.TempDir(), "tmplink")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	t.Setenv("TMPDIR", link)
+
+	got := tempDirs()
+	has := func(want string) bool {
+		for _, d := range got {
+			if d == want {
+				return true
+			}
+		}
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(link)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	if !has(resolved) {
+		t.Errorf("tempDirs() = %v; missing the RESOLVED spelling %q", got, resolved)
+	}
+	if !has(filepath.Clean(link)) {
+		t.Errorf("tempDirs() = %v; missing the UNRESOLVED spelling %q — a caller naming TMPDIR directly would be judged outside the roots", got, link)
+	}
+}
+
 // Protected dirs stay protected inside a temp root — a .git or .cairn
 // store under /tmp is no more agent-writable than one in the working dir.
 func TestTempRoots_ProtectedDirsStillProtectedUnderTemp(t *testing.T) {

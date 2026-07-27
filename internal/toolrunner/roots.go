@@ -72,16 +72,33 @@ func NewRoots(workingDir string, addDirs ...string) (Roots, error) {
 func tempDirs() []string {
 	var out []string
 	seen := map[string]bool{}
+	add := func(p string) {
+		if p == "" || seen[p] {
+			return
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
 	for _, d := range []string{os.TempDir(), "/tmp"} {
 		if d == "" {
 			continue
 		}
 		resolved, err := canonDir(d)
-		if err != nil || seen[resolved] {
+		if err != nil {
 			continue
 		}
-		seen[resolved] = true
-		out = append(out, resolved)
+		// BOTH spellings are recorded: the resolved path and, when it
+		// differs, the unresolved one. ContainsLexical is deliberately
+		// symlink-blind (it is the cheap pre-check the classifier uses),
+		// so with only the resolved form a caller naming the unresolved
+		// path is judged outside the roots. That is the normal spelling
+		// on macOS, where TMPDIR is /var/folders/... but resolves to
+		// /private/var/folders/..., and likewise /tmp -> /private/tmp:
+		// a scratch write wrongly demanded approval. resolveContained
+		// still does the real symlink-aware check on top, and it lands
+		// on the resolved form, which is also present.
+		add(resolved)
+		add(filepath.Clean(d))
 	}
 	return out
 }
