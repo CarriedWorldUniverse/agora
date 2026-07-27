@@ -89,6 +89,7 @@ vessel TTS ◀──agent_message items ──────┘        ◀──�
 
 Default execution policy = **write limited to the working dir** (+ scratch/tmp + declared add_dirs), **read allowed everywhere** — codex's workspace-write profile, adopted. Refinements:
 - Write outside wd ⇒ approval (escalation, not denial).
+- **Scratch/tmp is writable but NOT searched by default.** The temp roots (`TMPDIR` and `/tmp`) count for containment — reads, writes and an explicitly-pathed `grep`/`glob` all work — but they are excluded from the root set a *bare* `glob`/`grep` walks. A shared `/tmp` is large and full of other processes' files: walking it is slow (a fixture test went 1.3s → 16.7s when temp leaked into the walk set) and drags unrelated content into the model's context. Scratch is somewhere to WRITE, not somewhere to search blind.
 - Protected even inside wd: `.git` (approval for destructive ops), `.agora/`, `.cairn/` (the cairn VCS store — objects.git/cairn.db/wc.json must not be agent-writable except through cairn itself).
 - Protected from *read*: the identity key store and credentials (`~/.agora/identity`, `.credentials.json`, keyring-backed material) — the agent must never read key bytes, read-everywhere notwithstanding.
 - Network policy is orthogonal (per profile). Enforcement mechanism (bubblewrap port etc.) remains parked per the index; the *policy semantics* above are fixed now so approvals/hooks/execpolicy design against them.

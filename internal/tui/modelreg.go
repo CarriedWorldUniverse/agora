@@ -27,6 +27,12 @@ type ModelEntry struct {
 	// openai provider), that EXACT figure wins and this table is ignored —
 	// ccusage-style notional pricing is the fallback, not the truth.
 	Pricing *ModelPricing `json:"pricing,omitempty"`
+	// Default marks this entry as the session default when neither the
+	// -model flag nor default_model in .agora/config.json names one. It
+	// replaces a hardcoded "sonnet" lookup in the TUI (and gives `agora
+	// pipe`, which had no default at all, the same behaviour). At most
+	// one entry survives loading with this set — see LoadModelRegistry.
+	Default bool `json:"default,omitempty"`
 }
 
 // ModelPricing is USD per 1M tokens by class. The usage counts it prices
@@ -139,11 +145,72 @@ func LoadModelRegistry(home, cwd string) ModelRegistry {
 			fmt.Fprintf(os.Stderr, "agora: models config %s is unreadable and was SKIPPED (%v)\n", path, uerr)
 			continue
 		}
+		// A default declared by a LATER file supersedes an earlier one,
+		// matching the by-name override rule above: a repo pinning its own
+		// default must not have to un-flag the user-global one.
+		if fileDefault := soleDefault(m, path); fileDefault != "" {
+			clearDefaults(reg, "")
+			clearDefaults(m, fileDefault)
+		}
 		for name, entry := range m {
 			reg[name] = entry
 		}
 	}
 	return reg
+}
+
+// soleDefault returns the one entry in m flagged as default, warning when
+// several are. Ambiguity is resolved deterministically (alphabetically
+// first) rather than by map order, which would make the session's model
+// vary run to run. Warn-not-fatal matches the unparseable-file handling
+// above: a bad models.json should not stop agora from starting.
+func soleDefault(m ModelRegistry, path string) string {
+	var flagged []string
+	for name, entry := range m {
+		if entry.Default {
+			flagged = append(flagged, name)
+		}
+	}
+	if len(flagged) == 0 {
+		return ""
+	}
+	sort.Strings(flagged)
+	if len(flagged) > 1 {
+		fmt.Fprintf(os.Stderr, "agora: models config %s flags %d models as default (%s) — using %q\n",
+			path, len(flagged), strings.Join(flagged, ", "), flagged[0])
+	}
+	return flagged[0]
+}
+
+// clearDefaults un-flags every entry in r except keep, so at most one
+// entry in a loaded registry carries Default. Resolving this at LOAD time
+// keeps Default() a straight lookup and means callers can never observe
+// two defaults.
+func clearDefaults(r ModelRegistry, keep string) {
+	for name, entry := range r {
+		if entry.Default && name != keep {
+			entry.Default = false
+			r[name] = entry
+		}
+	}
+}
+
+// Default returns the name of the entry flagged as the session default,
+// or "" when none is. Loading guarantees at most one flagged entry; the
+// sort is for hand-constructed registries (tests) so the result is still
+// deterministic there.
+func (r ModelRegistry) Default() string {
+	var flagged []string
+	for name, entry := range r {
+		if entry.Default {
+			flagged = append(flagged, name)
+		}
+	}
+	if len(flagged) == 0 {
+		return ""
+	}
+	sort.Strings(flagged)
+	return flagged[0]
 }
 
 // Names returns the registry's names sorted alphabetically — the order

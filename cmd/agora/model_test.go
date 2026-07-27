@@ -3,8 +3,33 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
+
+// isolatedHome points userHomeOrDot at an empty temp dir so a test never
+// reads the developer's real ~/.agora. resolveModel consults models.json
+// (for the `"default": true` flag), so without this a default flagged in
+// the operator's own config silently changes what these tests resolve.
+func isolatedHome(t *testing.T) {
+	t.Helper()
+	setHome(t, t.TempDir())
+}
+
+// setHome points os.UserHomeDir at dir on every platform. Setting only
+// HOME silently does nothing on Windows — os.UserHomeDir reads
+// %USERPROFILE% there — so these tests read the developer's or the CI
+// runner's REAL profile and pass only because it happens to have no
+// .agora/models.json. resolveModel consults models.json for the
+// `"default": true` flag, so an unisolated home makes the result depend
+// on ambient config.
+func setHome(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", dir)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", dir)
+	}
+}
 
 func writeJSON(t *testing.T, dir, name, body string) {
 	t.Helper()
@@ -26,6 +51,7 @@ func TestResolveModel_FlagBeatsConfig(t *testing.T) {
 }
 
 func TestResolveModel_ConfigAppliesWithNoFlag(t *testing.T) {
+	isolatedHome(t)
 	cwd := t.TempDir()
 	writeJSON(t, cwd, "config.json", `{"default_model":"from-config"}`)
 	if got := resolveModel("", cwd); got != "from-config" {
@@ -34,6 +60,7 @@ func TestResolveModel_ConfigAppliesWithNoFlag(t *testing.T) {
 }
 
 func TestResolveModel_NeitherIsEmpty(t *testing.T) {
+	isolatedHome(t)
 	if got := resolveModel("", t.TempDir()); got != "" {
 		t.Fatalf("resolveModel = %q; want \"\" (engine default)", got)
 	}
@@ -42,6 +69,7 @@ func TestResolveModel_NeitherIsEmpty(t *testing.T) {
 // A registry key resolves to its real model id AND its provider spec —
 // this is what routes a turn to a non-default backend.
 func TestResolveModelSpec_RegistryKeyYieldsIDAndProvider(t *testing.T) {
+	isolatedHome(t)
 	cwd := t.TempDir()
 	writeJSON(t, cwd, "models.json",
 		`{"kimi":{"model":"kimi-k3","base_url":"http://gw:4000/v1"}}`)
@@ -61,6 +89,7 @@ func TestResolveModelSpec_RegistryKeyYieldsIDAndProvider(t *testing.T) {
 // A registry entry WITHOUT a base_url is a subscription-lane model: real
 // id, but no provider override.
 func TestResolveModelSpec_RegistryKeyWithoutBaseURLHasNoProvider(t *testing.T) {
+	isolatedHome(t)
 	cwd := t.TempDir()
 	writeJSON(t, cwd, "models.json", `{"opus":{"model":"claude-opus-5"}}`)
 
@@ -76,6 +105,7 @@ func TestResolveModelSpec_RegistryKeyWithoutBaseURLHasNoProvider(t *testing.T) {
 // An unknown name is a raw upstream model id, not an error — this is what
 // makes `-model claude-sonnet-5` work with no registry entry at all.
 func TestResolveModelSpec_UnknownNameIsARawModelID(t *testing.T) {
+	isolatedHome(t)
 	id, spec := resolveModelSpec("some-raw-model", t.TempDir())
 	if id != "some-raw-model" {
 		t.Errorf("id = %q; want the name passed through", id)

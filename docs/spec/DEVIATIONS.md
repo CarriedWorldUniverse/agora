@@ -36,6 +36,27 @@ Still open (the remainder of the original gap):
   `ItemMCPToolCall` wire events (sink.go), so the event shape is ready for
   the wiring ticket.
 
+
+### fs tool names match Claude's native surface (2026-07-26)
+
+The fs family advertises `Read`/`Write`/`Edit`/`Glob`/`Grep` with a
+`file_path` argument, rather than the snake_case `read_file`/`write_file`/
+`edit_file` with `path` the spec text describes. A model reaches for the
+tool it was trained on: with the old names, sessions repeatedly emitted a
+native-shaped call first, took an unknown-tool or bad-args error, and
+retried. Matching the native surface removes that retry class.
+
+`ListDir` has no native counterpart (Claude shells out), so that name is
+ours; it is PascalCase only for consistency.
+
+The legacy names and the `path` argument are still ACCEPTED — including
+mixed pairings such as `Write` + `path` — so threads persisted before the
+rename replay unchanged. They are simply no longer advertised.
+
+**External contract note:** hook payloads (`PreToolUse`/`PostToolUse`
+`tool_name`) now carry the advertised name, so a user hook matcher keyed on
+`write_file` must be updated to `Write`.
+
 ## 2. Conformance (U18): structural, not byte-exact, comparison for two flows
 `TestFlowQuestionParkResume` and `TestFlowPodProvision` assert **structural
 equivalence** (event-type sequence + id self-consistency + byte-exact on all other
@@ -72,7 +93,7 @@ turn-engine **must emit these exact shapes** or the modal renders blind:
 - `mcp_tool` → `{ "tool": "...", "args": ... }`
 - `escalation` → `{ "detail": "..." }`
 - `read` (NEX-782, post-spec addition — `contracts.KindRead`, read-only fs
-  tools) → `{ "detail": "..." }`: the path for read_file/list_dir, the
+  tools) → `{ "detail": "..." }`: the path for Read/ListDir, the
   pattern for glob/grep. This modal only ever renders under the `strict`
   preset — every other built-in preset auto-allows `read`.
 (U18's conformance approval flow emits the `exec` shape accordingly.)
@@ -128,11 +149,11 @@ into `item.started`/`item.completed`, keyed by the call ID so both share one
 recorded at Start and consumed once at Result). Two choices not spelled out by
 `agora-spec-io.md`:
 - **Tool name -> `contracts.ItemType`:** `run_command` -> `ItemCommandExecution`;
-  `write_file`/`edit_file` -> `ItemFileChange`; `mcp__`-prefixed ->
+  `Write`/`Edit` (and their legacy `write_file`/`edit_file` spellings) -> `ItemFileChange`; `mcp__`-prefixed ->
   `ItemMCPToolCall`; **everything else (the read-only fs tools —
-  `read_file`/`list_dir`/`glob`/`grep` — and any unrecognized tool name) falls
+  `Read`/`ListDir`/`Glob`/`Grep` — and any unrecognized tool name) falls
   back to `ItemCommandExecution`**, with a synthesized `"<tool> <key arg>"`
-  command summary (e.g. `read_file hello.txt`) — there is no dedicated
+  command summary (e.g. `Read hello.txt`) — there is no dedicated
   `ItemType` for read-only tool activity in the vocabulary yet, and
   `command_execution`'s shape (a readable command string) is the closest fit
   for v1. Args are decoded best-effort; a decode failure (or a tool with

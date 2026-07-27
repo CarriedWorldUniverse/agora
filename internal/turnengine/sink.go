@@ -148,7 +148,8 @@ func itemTypeForTool(name string) contracts.ItemType {
 	switch name {
 	case toolrunner.ToolRunCommand:
 		return contracts.ItemCommandExecution
-	case toolrunner.ToolWriteFile, toolrunner.ToolEditFile:
+	case toolrunner.ToolWriteFile, toolrunner.ToolEditFile,
+		toolrunner.LegacyWriteFile, toolrunner.LegacyEditFile:
 		return contracts.ItemFileChange
 	case contracts.ToolPlan:
 		return contracts.ItemPlan
@@ -179,12 +180,13 @@ func toolCommandSummary(name string, args json.RawMessage) string {
 		return name
 	}
 	var a struct {
-		Path    string `json:"path"`
-		Pattern string `json:"pattern"`
+		FilePath string `json:"file_path"`
+		Path     string `json:"path"` // legacy
+		Pattern  string `json:"pattern"`
 	}
 	if err := json.Unmarshal(args, &a); err == nil {
-		if a.Path != "" {
-			return name + " " + a.Path
+		if p := firstNonEmptyArg(a.FilePath, a.Path); p != "" {
+			return name + " " + p
 		}
 		if a.Pattern != "" {
 			return name + " " + a.Pattern
@@ -198,10 +200,19 @@ func toolCommandSummary(name string, args json.RawMessage) string {
 // field returns "" — never panics, same rationale as toolCommandSummary.
 func toolArgPath(args json.RawMessage) string {
 	var a struct {
-		Path string `json:"path"`
+		FilePath string `json:"file_path"`
+		Path     string `json:"path"` // legacy
 	}
 	_ = json.Unmarshal(args, &a)
-	return a.Path
+	return firstNonEmptyArg(a.FilePath, a.Path)
+}
+
+// firstNonEmptyArg prefers the advertised file_path over the legacy path.
+func firstNonEmptyArg(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 // toolResultText best-effort-renders a ToolCallResult.Result blob as

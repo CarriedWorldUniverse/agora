@@ -16,14 +16,37 @@ import (
 	"github.com/CarriedWorldUniverse/agora/contracts"
 )
 
-// Tool names for the fs family.
+// Tool names for the fs family. These deliberately MATCH the names and
+// argument shapes Claude uses natively (Read/Write/Edit/Glob/Grep with a
+// file_path argument), because a model reaches for the tool it was trained
+// on: with snake_case names and a "path" argument, sessions repeatedly
+// emitted a native-shaped call first, took an unknown-tool or bad-args
+// error, and only then retried with our spelling. Matching the native
+// surface removes that whole retry class.
+//
+// ListDir has no native counterpart — Claude shells out for it — so the
+// name is ours; it is PascalCase only for consistency with its siblings.
 const (
-	ToolReadFile  = "read_file"
-	ToolWriteFile = "write_file"
-	ToolEditFile  = "edit_file"
-	ToolListDir   = "list_dir"
-	ToolGlob      = "glob"
-	ToolGrep      = "grep"
+	ToolReadFile  = "Read"
+	ToolWriteFile = "Write"
+	ToolEditFile  = "Edit"
+	ToolListDir   = "ListDir"
+	ToolGlob      = "Glob"
+	ToolGrep      = "Grep"
+)
+
+// Legacy tool names, accepted but NOT advertised in Specs. Threads
+// persisted before the rename replay their tool calls through Execute, and
+// an in-flight turn may already have emitted one, so dropping these would
+// break resume for anything older than this change. They cost one map
+// entry and one switch case each.
+const (
+	LegacyReadFile  = "read_file"
+	LegacyWriteFile = "write_file"
+	LegacyEditFile  = "edit_file"
+	LegacyListDir   = "list_dir"
+	LegacyGlob      = "glob"
+	LegacyGrep      = "grep"
 )
 
 // fsMaxFileSize bounds read_file/grep against a huge file blowing out the
@@ -38,6 +61,13 @@ var fsToolNames = map[string]bool{
 	ToolListDir:   true,
 	ToolGlob:      true,
 	ToolGrep:      true,
+	// Legacy spellings — see the const block above.
+	LegacyReadFile:  true,
+	LegacyWriteFile: true,
+	LegacyEditFile:  true,
+	LegacyListDir:   true,
+	LegacyGlob:      true,
+	LegacyGrep:      true,
 }
 
 // FSFamily is the fs native tool family (agora-spec-mcp.md §5a): model-
@@ -94,11 +124,11 @@ func (f *FSFamily) Specs() []contracts.ToolSpec {
 			InputSchema: mustSchema(map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"path":   map[string]any{"type": "string", "description": "File path, relative to the working dir or absolute inside a writable root."},
-					"offset": map[string]any{"type": "integer", "description": "0-based line number to start from (default 0)."},
-					"limit":  map[string]any{"type": "integer", "description": "Max number of lines to return (default: all remaining)."},
+					"file_path": map[string]any{"type": "string", "description": "File path, relative to the working dir or absolute inside a writable root."},
+					"offset":    map[string]any{"type": "integer", "description": "0-based line number to start from (default 0)."},
+					"limit":     map[string]any{"type": "integer", "description": "Max number of lines to return (default: all remaining)."},
 				},
-				"required": []string{"path"},
+				"required": []string{"file_path"},
 			}),
 		},
 		{
@@ -107,10 +137,10 @@ func (f *FSFamily) Specs() []contracts.ToolSpec {
 			InputSchema: mustSchema(map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"path":    map[string]any{"type": "string"},
-					"content": map[string]any{"type": "string"},
+					"file_path": map[string]any{"type": "string"},
+					"content":   map[string]any{"type": "string"},
 				},
-				"required": []string{"path", "content"},
+				"required": []string{"file_path", "content"},
 			}),
 		},
 		{
@@ -119,12 +149,12 @@ func (f *FSFamily) Specs() []contracts.ToolSpec {
 			InputSchema: mustSchema(map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"path":        map[string]any{"type": "string"},
+					"file_path":   map[string]any{"type": "string"},
 					"old_string":  map[string]any{"type": "string"},
 					"new_string":  map[string]any{"type": "string"},
 					"replace_all": map[string]any{"type": "boolean", "description": "Replace every occurrence instead of requiring exactly one (default false)."},
 				},
-				"required": []string{"path", "old_string", "new_string"},
+				"required": []string{"file_path", "old_string", "new_string"},
 			}),
 		},
 		{
@@ -132,8 +162,8 @@ func (f *FSFamily) Specs() []contracts.ToolSpec {
 			Description: "List a directory's immediate entries (name + is_dir).",
 			InputSchema: mustSchema(map[string]any{
 				"type":       "object",
-				"properties": map[string]any{"path": map[string]any{"type": "string"}},
-				"required":   []string{"path"},
+				"properties": map[string]any{"file_path": map[string]any{"type": "string"}},
+				"required":   []string{"file_path"},
 			}),
 		},
 		{
@@ -170,17 +200,17 @@ func mustSchema(v any) json.RawMessage {
 
 func (f *FSFamily) Execute(ctx context.Context, call Call) (Result, error) {
 	switch call.Name {
-	case ToolReadFile:
+	case ToolReadFile, LegacyReadFile:
 		return f.readFile(call.Args), nil
-	case ToolWriteFile:
+	case ToolWriteFile, LegacyWriteFile:
 		return f.writeFile(call.Args), nil
-	case ToolEditFile:
+	case ToolEditFile, LegacyEditFile:
 		return f.editFile(call.Args), nil
-	case ToolListDir:
+	case ToolListDir, LegacyListDir:
 		return f.listDir(call.Args), nil
-	case ToolGlob:
+	case ToolGlob, LegacyGlob:
 		return f.glob(call.Args), nil
-	case ToolGrep:
+	case ToolGrep, LegacyGrep:
 		return f.grep(call.Args), nil
 	default:
 		return errorResult(fmt.Errorf("%w: %s", ErrUnknownTool, call.Name)), nil
@@ -208,18 +238,37 @@ func checkFileSize(resolved string) error {
 
 // --- read_file ---
 
+// readFileArgs carries BOTH spellings of the path argument: file_path is
+// the advertised one (matching Claude's native Read), path is the legacy
+// one. Go cannot put two json tags on one field, so the fallback is an
+// explicit second field plus filePath() — used by every fs args struct
+// below. offset/limit already matched the native shape and are unchanged.
 type readFileArgs struct {
-	Path   string `json:"path"`
-	Offset int    `json:"offset"`
-	Limit  int    `json:"limit"`
+	FilePath string `json:"file_path"`
+	Path     string `json:"path"` // legacy
+	Offset   int    `json:"offset"`
+	Limit    int    `json:"limit"`
+}
+
+// filePath returns the advertised file_path, falling back to the legacy
+// path. Empty means the caller supplied neither.
+func (a readFileArgs) filePath() string { return firstNonEmpty(a.FilePath, a.Path) }
+
+// firstNonEmpty is the shared file_path/path fallback for the fs args
+// structs.
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 func (f *FSFamily) readFile(raw json.RawMessage) Result {
 	var a readFileArgs
-	if err := json.Unmarshal(raw, &a); err != nil || a.Path == "" {
+	if err := json.Unmarshal(raw, &a); err != nil || a.filePath() == "" {
 		return errorResult(fmt.Errorf("%w: read_file", ErrBadArgs))
 	}
-	resolved, err := resolveContained(f.roots, a.Path)
+	resolved, err := resolveContained(f.roots, a.filePath())
 	if err != nil {
 		return errorResult(err)
 	}
@@ -256,16 +305,19 @@ func (f *FSFamily) readFile(raw json.RawMessage) Result {
 // --- write_file ---
 
 type writeFileArgs struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	FilePath string `json:"file_path"`
+	Path     string `json:"path"` // legacy
+	Content  string `json:"content"`
 }
+
+func (a writeFileArgs) filePath() string { return firstNonEmpty(a.FilePath, a.Path) }
 
 func (f *FSFamily) writeFile(raw json.RawMessage) Result {
 	var a writeFileArgs
-	if err := json.Unmarshal(raw, &a); err != nil || a.Path == "" {
+	if err := json.Unmarshal(raw, &a); err != nil || a.filePath() == "" {
 		return errorResult(fmt.Errorf("%w: write_file", ErrBadArgs))
 	}
-	resolved, err := resolveContained(f.roots, a.Path)
+	resolved, err := resolveContained(f.roots, a.filePath())
 	if err != nil {
 		return errorResult(err)
 	}
@@ -301,7 +353,7 @@ func (f *FSFamily) writeFile(raw json.RawMessage) Result {
 	f.mu.Lock()
 	f.readHash[resolved] = hashBytes([]byte(a.Content))
 	f.mu.Unlock()
-	return Result{Content: "wrote " + a.Path}
+	return Result{Content: "wrote " + a.filePath()}
 }
 
 // checkStale enforces the read-before-write guard: resolved must have been
@@ -323,18 +375,21 @@ func (f *FSFamily) checkStale(resolved string, onDisk []byte) error {
 // --- edit_file ---
 
 type editFileArgs struct {
-	Path       string `json:"path"`
+	FilePath   string `json:"file_path"`
+	Path       string `json:"path"` // legacy
 	OldString  string `json:"old_string"`
 	NewString  string `json:"new_string"`
 	ReplaceAll bool   `json:"replace_all"`
 }
 
+func (a editFileArgs) filePath() string { return firstNonEmpty(a.FilePath, a.Path) }
+
 func (f *FSFamily) editFile(raw json.RawMessage) Result {
 	var a editFileArgs
-	if err := json.Unmarshal(raw, &a); err != nil || a.Path == "" {
+	if err := json.Unmarshal(raw, &a); err != nil || a.filePath() == "" {
 		return errorResult(fmt.Errorf("%w: edit_file", ErrBadArgs))
 	}
-	resolved, err := resolveContained(f.roots, a.Path)
+	resolved, err := resolveContained(f.roots, a.filePath())
 	if err != nil {
 		return errorResult(err)
 	}
@@ -379,21 +434,24 @@ func (f *FSFamily) editFile(raw json.RawMessage) Result {
 	f.mu.Lock()
 	f.readHash[resolved] = hashBytes([]byte(updated))
 	f.mu.Unlock()
-	return Result{Content: "edited " + a.Path}
+	return Result{Content: "edited " + a.filePath()}
 }
 
 // --- list_dir ---
 
 type listDirArgs struct {
-	Path string `json:"path"`
+	FilePath string `json:"file_path"`
+	Path     string `json:"path"` // legacy
 }
+
+func (a listDirArgs) filePath() string { return firstNonEmpty(a.FilePath, a.Path) }
 
 func (f *FSFamily) listDir(raw json.RawMessage) Result {
 	var a listDirArgs
-	if err := json.Unmarshal(raw, &a); err != nil || a.Path == "" {
+	if err := json.Unmarshal(raw, &a); err != nil || a.filePath() == "" {
 		return errorResult(fmt.Errorf("%w: list_dir", ErrBadArgs))
 	}
-	resolved, err := resolveContained(f.roots, a.Path)
+	resolved, err := resolveContained(f.roots, a.filePath())
 	if err != nil {
 		return errorResult(err)
 	}
@@ -442,7 +500,7 @@ func (f *FSFamily) glob(raw json.RawMessage) Result {
 	patParts := strings.Split(a.Pattern, "/")
 
 	var matches []string
-	for _, root := range f.roots.DedupedAll() {
+	for _, root := range f.roots.SearchRoots() {
 		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return nil //nolint:nilerr // best-effort walk, unreadable entries are skipped
@@ -536,7 +594,7 @@ func (f *FSFamily) grep(raw json.RawMessage) Result {
 		}
 		searchRoots = []string{resolved}
 	} else {
-		searchRoots = f.roots.DedupedAll()
+		searchRoots = f.roots.SearchRoots()
 	}
 
 	var matches []string

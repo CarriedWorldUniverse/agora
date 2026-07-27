@@ -213,8 +213,8 @@ func TestManager_ToolCall_ReadFile_CommandExecutionSummary(t *testing.T) {
 	if err := json.Unmarshal(itemStarted.Payload, &startedPayload); err != nil {
 		t.Fatalf("decode item.started payload: %v", err)
 	}
-	if startedPayload.Command != "read_file hello.txt" {
-		t.Fatalf("item.started command = %q; want %q", startedPayload.Command, "read_file hello.txt")
+	if startedPayload.Command != "Read hello.txt" {
+		t.Fatalf("item.started command = %q; want %q", startedPayload.Command, "Read hello.txt")
 	}
 
 	itemCompleted := recvWithin(t, out, testTimeout)
@@ -225,8 +225,8 @@ func TestManager_ToolCall_ReadFile_CommandExecutionSummary(t *testing.T) {
 	if err := json.Unmarshal(itemCompleted.Payload, &completedPayload); err != nil {
 		t.Fatalf("decode item.completed payload: %v", err)
 	}
-	if completedPayload.Command != "read_file hello.txt" {
-		t.Fatalf("item.completed command = %q; want %q", completedPayload.Command, "read_file hello.txt")
+	if completedPayload.Command != "Read hello.txt" {
+		t.Fatalf("item.completed command = %q; want %q", completedPayload.Command, "Read hello.txt")
 	}
 	if completedPayload.Output != "hello from disk" {
 		t.Fatalf("item.completed output = %q; want the file's real content", completedPayload.Output)
