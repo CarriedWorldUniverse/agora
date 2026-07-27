@@ -47,6 +47,10 @@ type Config struct {
 	ModelRegistry ModelRegistry
 	// ThreadID is the attached thread — `/resume` marks it in its listing.
 	ThreadID string
+	// ClientID is this client's id on the session wire. Used to recognise
+	// our OWN client.attached event, which is where the server reports the
+	// capabilities it actually granted us — see handleEvent (agora#133).
+	ClientID string
 	// ListServers feeds /mcp: returns the operator's configured MCP
 	// servers (cmd/agora adapts the internal/mcp .mcp.json loader into
 	// []ServerInfo, keeping internal/tui free of an mcp dependency).
@@ -626,6 +630,33 @@ func (m *Model) handleEvent(ev contracts.Event) []tea.Cmd {
 	}
 	var cmds []tea.Cmd
 	switch ev.Type {
+	case contracts.EvClientAttached:
+		// The server reports the capabilities it ACTUALLY granted here,
+		// which need not be the ones we asked for: it derives them from the
+		// authenticated identity, never from our wire-declared request.
+		//
+		// Say so loudly when they cannot support interactive use. Before
+		// this, a daemon that granted CapObserver produced a TUI that
+		// rendered normally and silently dropped every message typed into
+		// it — and dialBackend PREFERS a listening daemon, so hitting that
+		// took no more than leaving one running (agora#133).
+		var p struct {
+			ClientID     string                 `json:"client_id"`
+			Capabilities []contracts.Capability `json:"capabilities"`
+		}
+		if json.Unmarshal(ev.Payload, &p) == nil && p.ClientID != "" && p.ClientID == m.cfg.ClientID {
+			interactive := false
+			for _, c := range p.Capabilities {
+				if c == contracts.CapInteractive {
+					interactive = true
+					break
+				}
+			}
+			if !interactive {
+				m.statusErr = "attached read-only: the backend granted " + capsText(p.Capabilities) +
+					", so messages you type will be refused — this daemon has no identity configured for you"
+			}
+		}
 	case contracts.EvThreadStarted:
 		cmds = append(cmds, m.cfg.Printer(Cell{Kind: CellSessionHeader, AgentID: m.cfg.AgentID, Model: m.cfg.Model}.Render(m.width, m.cfg.Theme)[0]))
 	case contracts.EvTurnStarted:
@@ -1297,4 +1328,16 @@ type errPayload struct {
 func mustMarshalTUI(v any) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return b
+}
+
+// capsText renders a capability set for the read-only warning above.
+func capsText(caps []contracts.Capability) string {
+	if len(caps) == 0 {
+		return "no capabilities"
+	}
+	parts := make([]string, len(caps))
+	for i, c := range caps {
+		parts[i] = string(c)
+	}
+	return strings.Join(parts, "+")
 }

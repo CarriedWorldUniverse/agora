@@ -34,7 +34,7 @@ func TestAuthenticate_NilRegistry_FailsClosedByDefault(t *testing.T) {
 		ClientID:     "attacker",
 		Kind:         "tui",
 		Capabilities: []contracts.Capability{contracts.CapAdmin, contracts.CapApprover, contracts.CapInteractive},
-	})
+	}, false)
 	if err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestAuthenticate_NilRegistry_InsecureOptIn_TrustsWireCaps(t *testing.T) {
 	})
 
 	want := []contracts.Capability{contracts.CapAdmin, contracts.CapApprover}
-	info, err := d.authenticate(agoraio.AttachRequest{ClientID: "dev-box", Kind: "tui", Capabilities: want})
+	info, err := d.authenticate(agoraio.AttachRequest{ClientID: "dev-box", Kind: "tui", Capabilities: want}, false)
 	if err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
@@ -101,7 +101,21 @@ func TestServeConn_NilRegistry_SelfDeclaredCapApprover_CannotResolveApproval(t *
 		t.Fatalf("ListenUnix: %v", err)
 	}
 	defer ln.Close()
-	go func() { _ = d.ServeUnix(ctx, ln) }()
+	// ServeConn, NOT ServeUnix: this test's threat model is a REMOTE client
+	// (the ws lane), and ServeUnix now grants the local owner interactive
+	// capability because the 0700 socket already restricts it to the
+	// daemon's own uid (agora#133). The unix socket here is just a
+	// convenient pipe; the lane under test is the remote one, which still
+	// fails closed to CapObserver.
+	go func() {
+		for {
+			conn, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			go func() { _ = d.ServeConn(ctx, conn) }()
+		}
+	}()
 
 	attacker, err := tui.DialUnixBackend(sockPath, agoraio.AttachRequest{
 		ThreadID:     threadID,
@@ -430,5 +444,149 @@ func TestServeConn_ExitsOnCtxCancel_EvenWithIdleClient(t *testing.T) {
 		// connection, i.e. ServeConn actually returned (no leak).
 	case <-time.After(3 * time.Second):
 		t.Fatal("server never closed the idle connection after ctx cancel — ServeConn's read loop leaked (finding #4)")
+	}
+}
+
+// TestAuthenticate_LocalOwner_GetsInteractiveAndApprover covers agora#133.
+//
+// The shipped `agora daemon` never configures a Registry, so every client
+// fell to CapObserver and Session.handleInput refused every user message —
+// the lane could not serve a turn to anyone, including the operator who
+// started it. A connection arriving on the unix socket is already
+// restricted to that operator's uid (io.ListenUnix chmods it 0700, so the
+// kernel refuses any other user's connect), which is the same trust
+// boundary the in-process lane already runs at.
+func TestAuthenticate_LocalOwner_GetsInteractiveAndApprover(t *testing.T) {
+	d := NewDaemon(context.Background(), Config{EngineFactory: constFactory(&agoraio.ScriptedEngine{})})
+
+	info, err := d.authenticate(agoraio.AttachRequest{ClientID: "operator-tui", Kind: "tui"}, true)
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	has := func(c contracts.Capability) bool {
+		for _, got := range info.Capabilities {
+			if got == c {
+				return true
+			}
+		}
+		return false
+	}
+	for _, want := range []contracts.Capability{contracts.CapObserver, contracts.CapInteractive, contracts.CapApprover} {
+		if !has(want) {
+			t.Errorf("local owner missing %s (got %v) — the daemon lane cannot serve a turn without it (agora#133)", want, info.Capabilities)
+		}
+	}
+	// CapAdmin stays behind a real registry identity: "is the local uid" is
+	// a weaker claim than it looks once anything else runs as that user.
+	if has(contracts.CapAdmin) {
+		t.Errorf("local owner was granted CapAdmin (%v); want admin to require a registry identity", info.Capabilities)
+	}
+}
+
+// TestAuthenticate_RemoteStillFailsClosed guards the other direction: the
+// local-owner grant must key on the TRANSPORT, not leak to the ws lane,
+// which has no uid restriction behind it.
+func TestAuthenticate_RemoteStillFailsClosed(t *testing.T) {
+	d := NewDaemon(context.Background(), Config{EngineFactory: constFactory(&agoraio.ScriptedEngine{})})
+
+	info, err := d.authenticate(agoraio.AttachRequest{
+		ClientID:     "attacker",
+		Kind:         "tui",
+		Capabilities: []contracts.Capability{contracts.CapAdmin, contracts.CapApprover, contracts.CapInteractive},
+	}, false)
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if len(info.Capabilities) != 1 || info.Capabilities[0] != contracts.CapObserver {
+		t.Fatalf("remote (ws) with nil Registry: got %v, want exactly [CapObserver] — agora#133's local grant must not reach this lane", info.Capabilities)
+	}
+}
+
+// TestServeUnix_LocalOwnerCanActuallySendATurn is the test agora#133 asked
+// for: build the daemon the way cmd/agora's runDaemon does — no Registry,
+// no InsecureTrustWireCaps — attach over the unix socket, and assert a user
+// message is ACCEPTED.
+//
+// The suite could not previously catch this. Every conformance drive that
+// exercises capability enforcement configures a real *remote.Registry, so
+// the POLICY was tested thoroughly and the CONFIGURATION the binary
+// actually produces was never tested at all — which is how a daemon that
+// could not serve a turn to anyone shipped.
+func TestServeUnix_LocalOwnerCanActuallySendATurn(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	seen := make(chan contracts.Input, 4)
+	factory := func(threadID string, meta contracts.ThreadMeta) agoraio.Engine {
+		return &recordingEngine{threadID: threadID, seen: seen}
+	}
+	// The exact shipped runDaemon wiring.
+	d := NewDaemon(ctx, Config{EngineFactory: factory})
+	defer d.Close()
+
+	threadID, err := d.CreateThread(contracts.ThreadMeta{ThreadID: "th_local", Profile: "dev"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+
+	sockPath := shortSockPath(t, "local.sock")
+	ln, err := agoraio.ListenUnix(sockPath)
+	if err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("unix sockets unsupported: %v", err)
+		}
+		t.Fatalf("ListenUnix: %v", err)
+	}
+	defer ln.Close()
+	go func() { _ = d.ServeUnix(ctx, ln) }()
+
+	// Exactly what cmd/agora's dialBackend requests.
+	client, err := tui.DialUnixBackend(sockPath, agoraio.AttachRequest{
+		ThreadID:     threadID,
+		ClientID:     "operator-tui",
+		Kind:         "tui",
+		Capabilities: []contracts.Capability{contracts.CapInteractive, contracts.CapApprover},
+		Replay:       16,
+	})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer client.Close()
+
+	if err := client.Send(ctx, contracts.Input{Type: contracts.InUserMessage, Text: "hello"}); err != nil {
+		t.Fatalf("send user_message: %v", err)
+	}
+
+	select {
+	case got := <-seen:
+		if got.Type != contracts.InUserMessage || got.Text != "hello" {
+			t.Fatalf("engine saw %+v; want the user_message", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the engine never received the user message — the daemon lane rejected it on capability grounds, which is agora#133: a shipped `agora daemon` that cannot serve a turn to anyone, including the operator who started it")
+	}
+}
+
+// recordingEngine forwards every Input it receives to seen.
+type recordingEngine struct {
+	threadID string
+	seen     chan<- contracts.Input
+}
+
+func (e *recordingEngine) Run(ctx context.Context, in <-chan contracts.Input, out chan<- contracts.Event) error {
+	defer close(out)
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case i, ok := <-in:
+			if !ok {
+				return nil
+			}
+			select {
+			case e.seen <- i:
+			default:
+			}
+		}
 	}
 }

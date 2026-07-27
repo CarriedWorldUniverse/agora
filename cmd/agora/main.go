@@ -187,6 +187,9 @@ func main() {
 		// duplicate that work rather than save it).
 		Model:       resolveModel(*model, mustGetwd()),
 		ThreadID:    *threadID,
+		// Lets the TUI recognise its OWN client.attached event and warn if
+		// the backend granted capabilities that cannot send input.
+		ClientID:    *clientID,
 		ListServers: listMCPServers,
 		// /hooks: which lifecycle hooks were discovered and whether trust
 		// lets them fire — fail-closed trust is invisible without this.

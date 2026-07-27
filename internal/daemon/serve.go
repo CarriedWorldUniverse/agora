@@ -46,10 +46,41 @@ const maxFrameBytes = 1 << 20
 // (cmd/agora/daemon.go's runDaemon leaves it false). Every conformance
 // drive that exercises capability enforcement configures a real
 // *remote.Registry instead of relying on either nil-Registry path.
-func (d *Daemon) authenticate(req agoraio.AttachRequest) (agoraio.AttachInfo, error) {
+func (d *Daemon) authenticate(req agoraio.AttachRequest, local bool) (agoraio.AttachInfo, error) {
 	if d.registry == nil {
 		if d.insecureTrustWireCaps {
 			return agoraio.AttachInfo{ClientID: req.ClientID, Kind: req.Kind, Capabilities: req.Capabilities}, nil
+		}
+		if local {
+			// LOCAL OWNER (agora#133). A connection that arrived on the
+			// unix socket is already restricted to the uid that started
+			// the daemon: io.ListenUnix chmods the socket to 0700 at
+			// creation, so the KERNEL refuses any other user's connect().
+			// That is a real enforced control, not a wire-declared claim,
+			// and it is the same trust boundary the in-process lane
+			// already runs at — `agora` with no daemon gives the operator
+			// full interactive control of their own threads.
+			//
+			// Without this the shipped `agora daemon` was unusable by
+			// anyone, including the operator: cmd/agora never configures a
+			// Registry, so every client fell to CapObserver below and
+			// Session.handleInput refused every user message. Worse, it
+			// was silent — dialBackend PREFERS a listening daemon, so
+			// starting one turned the TUI into a window that renders
+			// normally and drops everything typed into it.
+			//
+			// CapAdmin is deliberately NOT granted: admin operations
+			// (revoking devices, killing others' sessions) should stay
+			// behind a real registry identity rather than "is the local
+			// user", which is a weaker claim than it looks once anything
+			// else runs as that uid.
+			return agoraio.AttachInfo{
+				ClientID: req.ClientID,
+				Kind:     req.Kind,
+				Capabilities: []contracts.Capability{
+					contracts.CapObserver, contracts.CapInteractive, contracts.CapApprover,
+				},
+			}, nil
 		}
 		return agoraio.AttachInfo{ClientID: req.ClientID, Kind: req.Kind, Capabilities: []contracts.Capability{contracts.CapObserver}}, nil
 	}
@@ -70,6 +101,13 @@ func (d *Daemon) authenticate(req agoraio.AttachRequest) (agoraio.AttachInfo, er
 // by-attribution (approvals.go's byLookup) for approval_response/
 // question_response Input right after a successful forward.
 func (d *Daemon) ServeConn(ctx context.Context, rw stdio.ReadWriteCloser) error {
+	// Remote by default: a caller holding only an io.ReadWriteCloser has
+	// not established that the peer is the local owner. ServeUnix, which
+	// has, calls serveConn directly.
+	return d.serveConn(ctx, rw, false)
+}
+
+func (d *Daemon) serveConn(ctx context.Context, rw stdio.ReadWriteCloser, local bool) error {
 	defer rw.Close()
 	sc := bufio.NewScanner(rw)
 	sc.Buffer(make([]byte, 0, 64*1024), maxFrameBytes)
@@ -88,7 +126,7 @@ func (d *Daemon) ServeConn(ctx context.Context, rw stdio.ReadWriteCloser) error 
 		return ErrExpectedAttach
 	}
 
-	info, err := d.authenticate(*first.Attach)
+	info, err := d.authenticate(*first.Attach, local)
 	if err != nil {
 		return err
 	}
@@ -196,7 +234,9 @@ func (d *Daemon) ServeUnix(ctx context.Context, ln net.Listener) error {
 				return fmt.Errorf("daemon: accept: %w", err)
 			}
 		}
-		go func() { _ = d.ServeConn(ctx, conn) }()
+		// local=true: io.ListenUnix chmods the socket 0700, so the kernel
+		// has already restricted this connection to the daemon's own uid.
+		go func() { _ = d.serveConn(ctx, conn, true) }()
 	}
 }
 
