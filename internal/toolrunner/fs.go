@@ -442,7 +442,7 @@ func (f *FSFamily) glob(raw json.RawMessage) Result {
 	patParts := strings.Split(a.Pattern, "/")
 
 	var matches []string
-	for _, root := range f.roots.DedupedAll() {
+	for _, root := range f.roots.SearchRoots() {
 		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return nil //nolint:nilerr // best-effort walk, unreadable entries are skipped
@@ -536,7 +536,7 @@ func (f *FSFamily) grep(raw json.RawMessage) Result {
 		}
 		searchRoots = []string{resolved}
 	} else {
-		searchRoots = f.roots.DedupedAll()
+		searchRoots = f.roots.SearchRoots()
 	}
 
 	var matches []string

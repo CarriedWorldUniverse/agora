@@ -22,6 +22,21 @@ func newTestRoots(t *testing.T) Roots {
 // on Windows, so filepath.IsAbs treats it as relative and joins it INTO the
 // root — making a would-be "outside" fixture land inside. t.TempDir lives
 // under the temp dir on every OS, never under C:\Windows.
+// newTestRootsNoTemp builds Roots with NO temp dirs. The containment
+// MECHANICS tests (dotdot collapse, symlink resolution, ancestor walk) use
+// this because their fixtures put the working dir under t.TempDir(), which
+// is itself inside a temp root in production shape — so "../escape.txt"
+// lands in /tmp and is legitimately contained, leaving nothing to detect.
+// Stripping temp keeps those tests about the ALGORITHM. The temp POLICY is
+// covered separately by the TestTempRoots_* tests, which deliberately do
+// use production-shaped roots.
+func newTestRootsNoTemp(t *testing.T) Roots {
+	t.Helper()
+	roots := newTestRoots(t)
+	roots.TempDirs = nil
+	return roots
+}
+
 func absOutsideRoots() string {
 	if runtime.GOOS == "windows" {
 		return `C:\Windows\System32\drivers\etc\hosts`
@@ -30,7 +45,7 @@ func absOutsideRoots() string {
 }
 
 func TestContainsLexical(t *testing.T) {
-	roots := newTestRoots(t)
+	roots := newTestRootsNoTemp(t)
 
 	cases := []struct {
 		name string
@@ -76,7 +91,7 @@ func TestIsProtected(t *testing.T) {
 }
 
 func TestResolveContainedDotDotEscape(t *testing.T) {
-	roots := newTestRoots(t)
+	roots := newTestRootsNoTemp(t)
 	if _, err := resolveContained(roots, "../../etc/passwd"); err == nil {
 		t.Fatal("expected ErrPathEscape, got nil")
 	} else if got := err; got != ErrPathEscape {
@@ -91,6 +106,9 @@ func TestResolveContainedSymlinkEscape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRoots: %v", err)
 	}
+	// `outside` is itself under a temp root in production shape; strip
+	// them so it is genuinely outside and the symlink is a real escape.
+	roots.TempDirs = nil
 
 	// A symlinked directory inside wd pointing outside every root.
 	link := filepath.Join(wd, "escape")
