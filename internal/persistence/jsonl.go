@@ -137,40 +137,116 @@ func healTornTail(f *os.File) error {
 	return nil
 }
 
-// appendItems appends items to an existing thread file, one JSON line per
-// item, honoring the fsync mode. Before writing it HEALS any torn trailing
-// line from a prior crash (spec §1 crash-safety) so items never glue onto a
-// partial fragment. Spec §1: "append + fsync on turn boundaries (config:
-// per-item for paranoid mode)."
-func appendItems(path string, items []contracts.ThreadItem, mode FsyncMode) error {
+// lastSeqInFile returns the Seq of the file's final item line, or 0 for a
+// file holding only its meta line. It reads just the tail rather than the
+// whole file, so Seq allocation stays O(1) in thread length.
+//
+// Callers must heal the torn tail FIRST (healTornTail): this reads the last
+// complete line and assumes it is complete.
+func lastSeqInFile(f *os.File) (int64, error) {
+	fi, err := f.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("persistence: stat for last seq: %w", err)
+	}
+	size := fi.Size()
+	if size == 0 {
+		return 0, nil
+	}
+	// Read backwards in chunks until two newlines are in view: the one
+	// terminating the last line and the one before it (the line's start).
+	// maxLineBytes bounds a single line, so one chunk of that size is
+	// normally enough; the loop covers a pathological long line.
+	const chunk = 64 << 10
+	var tail []byte
+	for read := int64(0); ; {
+		read += chunk
+		if read > size {
+			read = size
+		}
+		tail = make([]byte, read)
+		if _, err := f.ReadAt(tail, size-read); err != nil {
+			return 0, fmt.Errorf("persistence: read tail for last seq: %w", err)
+		}
+		trimmed := bytes.TrimRight(tail, "\n")
+		if idx := bytes.LastIndexByte(trimmed, '\n'); idx >= 0 {
+			tail = trimmed[idx+1:]
+			break
+		}
+		if read == size {
+			// Whole file in view and only one line: that is the meta line,
+			// which carries no Seq.
+			return 0, nil
+		}
+	}
+	if len(tail) == 0 {
+		return 0, nil
+	}
+	var it contracts.ThreadItem
+	if err := json.Unmarshal(tail, &it); err != nil {
+		return 0, fmt.Errorf("persistence: decode last item line for seq: %w", err)
+	}
+	return it.Seq, nil
+}
+
+// appendItems stamps each item's Seq and appends them to an existing thread
+// file, one JSON line per item, honoring the fsync mode. Before writing it
+// HEALS any torn trailing line from a prior crash (spec §1 crash-safety) so
+// items never glue onto a partial fragment. Spec §1: "append + fsync on
+// turn boundaries (config: per-item for paranoid mode)."
+//
+// Seq is allocated from max(baseSeq, the file's own last Seq) — NOT from
+// baseSeq alone. baseSeq comes from the SQLite mirror, and the mirror is
+// updated AFTER this function's fsync returns; a crash in that window
+// leaves the mirror behind a healthy JSONL, and trusting it would mint Seq
+// values that already exist earlier in the same file (agora#135). Duplicate
+// Seq breaks the monotonicity that ItemIterator's replay order and Fork's
+// bounds check both rely on, and nothing downstream detects it. The JSONL
+// is the source of truth, so it is what allocation reads.
+//
+// items is stamped IN PLACE; the caller sees the assigned Seq values.
+// Returns the last Seq assigned, for the mirror update.
+func appendItems(path string, items []contracts.ThreadItem, mode FsyncMode, baseSeq int64) (int64, error) {
 	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
 	if err != nil {
-		return fmt.Errorf("persistence: open thread file for append: %w", err)
+		return 0, fmt.Errorf("persistence: open thread file for append: %w", err)
 	}
 	defer f.Close()
 
 	if err := healTornTail(f); err != nil {
-		return err
+		return 0, err
+	}
+	onDisk, err := lastSeqInFile(f)
+	if err != nil {
+		return 0, err
+	}
+	next := baseSeq
+	if onDisk > next {
+		// The mirror lags the file. Continue from the file.
+		next = onDisk
+	}
+	for i := range items {
+		next++
+		items[i].Seq = next
 	}
 	if _, err := f.Seek(0, os.SEEK_END); err != nil {
-		return fmt.Errorf("persistence: seek to end: %w", err)
+		return 0, fmt.Errorf("persistence: seek to end: %w", err)
 	}
 
 	enc := json.NewEncoder(f)
 	for _, it := range items {
 		if err := enc.Encode(it); err != nil {
-			return fmt.Errorf("persistence: encode item: %w", err)
+			return 0, fmt.Errorf("persistence: encode item: %w", err)
 		}
 		if mode == FsyncItem {
 			if err := f.Sync(); err != nil {
-				return fmt.Errorf("persistence: fsync item: %w", err)
+				return 0, fmt.Errorf("persistence: fsync item: %w", err)
 			}
 		}
 	}
 	if mode == FsyncTurn {
 		if err := f.Sync(); err != nil {
-			return fmt.Errorf("persistence: fsync turn: %w", err)
+			return 0, fmt.Errorf("persistence: fsync turn: %w", err)
 		}
 	}
-	return nil
+	return next, nil
 }
