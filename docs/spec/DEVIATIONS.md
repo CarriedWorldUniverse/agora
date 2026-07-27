@@ -152,6 +152,36 @@ project root** (an untrusted clone can't symlink out to read arbitrary host file
 User/Admin roots roam; System never follows. (The retired home-dir spec copy still
 carried the pre-fix wording — one reason the duplicates were retired.)
 
+### run_command escalates egress to INTERNAL addresses (2026-07-27, agora#136)
+
+`commandNamesOutsidePath` exempts any token containing `://` — a URL is not
+a filesystem path. The consequence was that `curl http://169.254.169.254/…`
+named no offending path, classified as plain `KindExec`, and auto-ran under
+`auto-safe` and `never-escalate`, walking straight around the SSRF guard
+`web_fetch` implements carefully. The invariant Classify states for
+web_fetch ("approving a fetch grants reaching a PUBLIC url, never an
+internal one") held for exactly one of the two egress paths.
+
+`run_command`/`run_background` now classify as `KindEscalation` when the
+command names an internal host (IP literal in a loopback/private/link-local/
+CGNAT range, or a well-known internal name such as `metadata.google.internal`).
+
+**The bar is parity with `web_fetch`, not "no egress from exec".** web_fetch
+itself permits public URLs, so escalating every outbound command would be
+STRICTER than the path being restored parity with, and under
+`never-escalate` — which denies escalation outright — it would break
+ordinary headless work (`git clone https://…`, `go mod download`). Public
+egress stays `KindExec`; only internal egress escalates.
+
+**Behaviour change:** under `never-escalate` a command naming an internal
+address is now DENIED rather than run. Under `auto-safe` it prompts.
+`prompt`/`strict` are unchanged (exec already prompted there).
+
+**Known limit:** the check is LEXICAL. A DNS name resolving to an internal
+address still walks through, where web_fetch catches it at dial time via
+the resolved IP in `Dialer.Control`. Closing that for exec needs the parked
+sandbox (§3a) or a resolving pre-check with its own TOCTOU window.
+
 ## 10. Environment / housekeeping notes
 - **`go.starlark.net`** (U14) must be added to the **go-gate proxy allowlist** for
   sovereign builds on croft/dMon. GitHub CI uses the public proxy, so CI is fine.
