@@ -60,6 +60,9 @@ type Manager struct {
 
 	lastEstimate int64
 	lastRawChars int
+	// trimDialogue is armed by Compact and honoured by Assemble — see
+	// dialogueStubIndices (agora#134).
+	trimDialogue bool
 	lastEvents   []contracts.Event
 }
 
@@ -257,6 +260,14 @@ func (m *Manager) Assemble(threadID string, turnInput []contracts.ThreadItem) ([
 
 	recentRank := unkeyedRecentRank(turnInput, m.cfg.Keys)
 
+	// Dialogue trim, armed by a compaction episode (agora#134). Off until
+	// then: normal operation renders dialogue verbatim, and only a thread
+	// that has actually hit the window pays the fidelity cost.
+	var dialogueStub map[int]bool
+	if m.trimDialogue {
+		dialogueStub = dialogueStubIndices(turnInput, m.cfg.DialogueKeepTurns)
+	}
+
 	emit := func(i int, role contracts.Role, content string) {
 		out = append(out, contracts.AssembledMessage{Role: role, Content: content + appendix[i]})
 	}
@@ -267,6 +278,10 @@ func (m *Manager) Assemble(threadID string, turnInput []contracts.ThreadItem) ([
 			role := contracts.RoleUser
 			if item.Type == contracts.TIAgentMessage {
 				role = contracts.RoleAssistant
+			}
+			if dialogueStub[i] {
+				emit(i, role, fmt.Sprintf("[older message — %d chars, stubbed by compaction]", len(messageText(item))))
+				continue
 			}
 			emit(i, role, messageText(item))
 
@@ -473,18 +488,82 @@ func (m *Manager) Compact(trigger contracts.CompactionTrigger) (contracts.Compac
 	halted := m.hooks.RunPreCompact(trigger)
 	m.mu.Lock()
 	before := m.lastEstimate
+	already := m.trimDialogue
+	if !halted {
+		// Arm the dialogue trim for every subsequent Assemble. Sticky on
+		// purpose: a thread that has once blown the window should stay
+		// trimmed rather than re-grow into the same failure next turn.
+		m.trimDialogue = true
+	}
 	m.mu.Unlock()
 	result := contracts.CompactionResult{
 		Trigger:      trigger,
 		TokensBefore: before,
-		TokensAfter:  before,
-		NoOp:         true,
+		// TokensAfter is only knowable once the caller REASSEMBLES — this
+		// manager curates inside Assemble, so arming the trim changes
+		// nothing until the next assembly. turnengine's compaction episode
+		// re-reads the estimate after reassembling and reports the real
+		// figure; this is the honest "not measured yet" placeholder.
+		TokensAfter: before,
+		// NoOp only when the trim was ALREADY armed — i.e. this call really
+		// did change nothing.
+		NoOp: already || halted,
 	}
 	if halted {
 		return result, nil
 	}
 	m.hooks.RunPostCompact(result)
 	return result, nil
+}
+
+// TrimArmed reports whether a compaction episode has armed the dialogue
+// trim.
+func (m *Manager) TrimArmed() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.trimDialogue
+}
+
+// dialogueStubIndices returns the turnInput indices whose dialogue text
+// should be stubbed, once the trim is armed.
+//
+// §5 calls dialogue summarization the last resort, and DialogueKeepTurns
+// has sat in Config (and DefaultConfig) with NOTHING reading it — so a
+// thread dominated by conversation text had no eviction path at all, and
+// the context_length recovery that should have caught that could not shrink
+// anything (agora#134). This is the minimum that makes recovery real: keep
+// the last DialogueKeepTurns user messages and everything after the oldest
+// kept one, stub the dialogue before it.
+//
+// Stubbing rather than dropping keeps the turn structure intact — the model
+// still sees that an exchange happened, which matters when a later tool
+// call refers back to it.
+func dialogueStubIndices(turnInput []contracts.ThreadItem, keepTurns int) map[int]bool {
+	if keepTurns <= 0 {
+		return nil
+	}
+	seen, cut := 0, -1
+	for i := len(turnInput) - 1; i >= 0; i-- {
+		if turnInput[i].Type != contracts.TIUserMessage {
+			continue
+		}
+		seen++
+		if seen > keepTurns {
+			cut = i
+			break
+		}
+	}
+	if cut < 0 {
+		return nil // fewer turns than the threshold — nothing to trim
+	}
+	stub := make(map[int]bool)
+	for i := 0; i <= cut; i++ {
+		switch turnInput[i].Type {
+		case contracts.TIUserMessage, contracts.TIAgentMessage:
+			stub[i] = true
+		}
+	}
+	return stub
 }
 
 // Status implements contracts.ContextManager (contract 8).

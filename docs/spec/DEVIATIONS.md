@@ -157,9 +157,21 @@ turn-engine **must emit these exact shapes** or the modal renders blind:
 - `ctxmgr` gained `NewCompactionStartedEvent` / `NewCompactionCompletedEvent` (U18)
   — the spec named the `thread.compaction.started`/`.completed` wire shapes but the
   builders didn't exist until the conformance flow needed them.
-- `Manager.Compact` is a **documented no-op** (curation runs continuously inside
-  `Assemble`, per context-spec §1) — it fires the Pre/PostCompact hooks and reports
-  the estimate, not additional curation work.
+- **Revised 2026-07-27 (agora#134).** `Manager.Compact` was a documented no-op
+  (curation runs continuously inside `Assemble`, per context-spec §1). That reading
+  was locally correct and globally wrong: its ONLY production caller is the
+  context_length compact-and-retry, which needs the request to actually shrink — and
+  the working-set budget covers keyed tool artifacts only, so dialogue text had no
+  eviction path at all and `DialogueKeepTurns` sat in `DefaultConfig` unread.
+  `Compact` now **arms a sticky dialogue trim** that `Assemble` honours (keep the
+  last `DialogueKeepTurns` user messages, stub the dialogue before them). It is
+  still not a compaction episode in the spec's sense — it changes what the NEXT
+  assembly renders rather than curating in place — so `TokensAfter` is a measured
+  figure only once the caller reassembles. `runCompactionEpisode` therefore takes a
+  `reassemble` callback and reports the real number after it runs; the manual
+  `/compact` path passes nil (it runs between turns, with no request to rebuild)
+  and honestly reports no measured reduction, the trim landing on the next turn.
+  §5's real dialogue *summarization*, as opposed to stubbing, remains future work.
 
 ## 8. Prompt (U4 / U15): Compile deferred
 `prompt` verbs `Compile()` returns `ErrNotImplemented` — an **interactive
