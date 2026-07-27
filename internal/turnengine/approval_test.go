@@ -631,19 +631,90 @@ func TestScopeKeyFor_RefusesExecDelegatingFlags(t *testing.T) {
 // denylist must not swallow the ordinary invocations prefix scope exists
 // for, or every grant degrades into prompt-every-time.
 func TestScopeKeyFor_StillKeysOrdinaryCommands(t *testing.T) {
+	// NOTE (agora#137 follow-up): `npm install` USED to be in this list.
+	// It was moved out deliberately — install runs arbitrary preinstall/
+	// postinstall lifecycle scripts from the package and its dependencies,
+	// which is the same "the program name does not bound what runs" problem
+	// as sudo, and a well-known supply-chain execution vector. Refusing the
+	// KEY does not block the command; it means each one is approved on its
+	// own rather than riding a grant made for `npm ls`.
 	ok := []struct{ command, want string }{
 		{"git status", "git"},
 		{"git log --oneline -n 5", "git"},
 		{"tar -czf out.tgz dir", "tar"},
 		{"find . -name '*.go'", "find"},
 		{"go test ./...", "go"},
-		{"npm install", "npm"},
+		{"npm ls", "npm"},
 		{"rsync -av a b", "rsync"},
 		{"ls -la", "ls"},
 	}
 	for _, tc := range ok {
 		if got := scopeKeyFor(contracts.KindExec, toolrunner.ExecPayload{Command: tc.command}); got != tc.want {
 			t.Errorf("scopeKeyFor(%q) = %q; want %q — ordinary commands must still key, or prefix scope is useless", tc.command, got, tc.want)
+		}
+	}
+}
+
+// TestScopeKeyFor_RefusesWrapperPrograms is the regression for the second
+// hole an adversarial review found (agora#137 follow-up): the flag denylist
+// asks "does THIS program have an escape flag", which never fires when
+// running another command IS the program's purpose.
+func TestScopeKeyFor_RefusesWrapperPrograms(t *testing.T) {
+	escapes := []string{
+		"env tar -cf x --checkpoint-action=exec=id .",
+		"sudo tar -cf x --checkpoint-action=exec=id .",
+		"stdbuf -oL id",
+		"setsid id",
+		"flock /tmp/l id",
+		"chroot / id",
+		"unshare id",
+		"strace id",
+		"script -c id /dev/null",
+		"ionice id",
+		"taskset 1 id",
+		"time id",
+		"busybox sh -c id",
+		"sqlite3 x.db .shell id",
+		"timeout 5 id",
+		"/usr/bin/env id",
+	}
+	for _, cmd := range escapes {
+		if got := scopeKeyFor(contracts.KindExec, toolrunner.ExecPayload{Command: cmd}); got != "" {
+			t.Errorf("scopeKeyFor(%q) = %q; want \"\" — the head program runs whatever its arguments say, so keying on it grants far more than it reads (agora#137)", cmd, got)
+		}
+	}
+}
+
+// TestScopeKeyFor_RefusesBuildToolCodeExecution covers build/package tools,
+// which execute project-controlled code by design.
+func TestScopeKeyFor_RefusesBuildToolCodeExecution(t *testing.T) {
+	escapes := []string{
+		"go test -exec id ./...",
+		"go run ./cmd/x",
+		"go generate ./...",
+		"cargo run",
+		"npm run anything",
+		"pip install .",
+		"gcc -fplugin=/tmp/evil.so x.c",
+		"clang -load /tmp/evil.so x.c",
+		"openssl req -engine /tmp/evil.so",
+		"ssh-keygen -D /tmp/evil.so",
+		"jq -f /tmp/prog.jq .",
+	}
+	for _, cmd := range escapes {
+		if got := scopeKeyFor(contracts.KindExec, toolrunner.ExecPayload{Command: cmd}); got != "" {
+			t.Errorf("scopeKeyFor(%q) = %q; want \"\"", cmd, got)
+		}
+	}
+	// Ordinary build invocations must STILL key, or the grant is useless.
+	for cmd, want := range map[string]string{
+		"go build ./...":   "go",
+		"go vet ./...":     "go",
+		"npm ls":           "npm",
+		"gcc -O2 -o x x.c": "gcc",
+	} {
+		if got := scopeKeyFor(contracts.KindExec, toolrunner.ExecPayload{Command: cmd}); got != want {
+			t.Errorf("scopeKeyFor(%q) = %q; want %q — over-blocking turns every grant into prompt-every-time", cmd, got, want)
 		}
 	}
 }

@@ -504,6 +504,84 @@ var internalHostSuffixes = []string{".internal", ".local", ".localdomain", ".svc
 // Closing that for exec needs the parked sandbox (agora-spec-io.md §3a), or
 // a resolving pre-check with its own TOCTOU window; the well-known-name
 // list above covers the cases that matter in practice.
+// parseHostIP resolves a host token to an IP the way a C resolver does,
+// not the way net.ParseIP does.
+//
+// SECURITY (agora#136 follow-up, found by adversarial review of the
+// original fix). net.ParseIP accepts ONLY the canonical dotted-quad and
+// IPv6 forms. inet_aton — which is what curl, wget, nc and anything else
+// going through getaddrinfo/gethostbyname actually use — also accepts
+// decimal, hex and octal integers, and 1-, 2- or 3-part short forms. All of
+// these reach the cloud metadata endpoint, and every one of them walked
+// straight past the first version of this check:
+//
+//	curl http://2852039166/latest/meta-data/          -> 169.254.169.254
+//	curl http://0xA9FEA9FE/latest/meta-data/          -> 169.254.169.254
+//	curl http://0251.0376.0251.0376/latest/meta-data/ -> 169.254.169.254
+//	curl http://127.1/admin                           -> 127.0.0.1
+//	curl http://10.1/x                                -> 10.0.0.1
+//	curl http://0/admin                               -> 0.0.0.0
+//
+// (verified against libc's own resolver, not assumed.) A guard that only
+// understands the canonical form is not a guard — it just asks the attacker
+// to write the address differently.
+//
+// inet_aton's part semantics: with N parts, the first N-1 are single bytes
+// and the LAST absorbs the remaining low-order bytes (a.b -> a.BBB,
+// a.b.c -> a.b.CC). Each part is C-style: 0x hex, leading-0 octal, else
+// decimal — which is exactly strconv.ParseUint's base-0 behaviour.
+func parseHostIP(host string) net.IP {
+	// A single trailing dot is a fully-qualified-name marker, not part of
+	// the address.
+	host = strings.TrimSuffix(host, ".")
+	if host == "" {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip
+	}
+	parts := strings.Split(host, ".")
+	if len(parts) > 4 {
+		return nil
+	}
+	vals := make([]uint64, len(parts))
+	for i, part := range parts {
+		if part == "" {
+			return nil
+		}
+		// ParseUint base 0 reads 0x as hex and a leading 0 as octal, but it
+		// also accepts a leading sign and underscores; reject those, since
+		// no resolver would take them and accepting them would only widen
+		// what we treat as an address.
+		if strings.ContainsAny(part, "+-_") {
+			return nil
+		}
+		v, err := strconv.ParseUint(part, 0, 64)
+		if err != nil {
+			return nil
+		}
+		vals[i] = v
+	}
+	// Every part but the last must fit in one byte; the last takes the rest.
+	var addr uint64
+	last := len(vals) - 1
+	for i := 0; i < last; i++ {
+		if vals[i] > 0xFF {
+			return nil
+		}
+		addr |= vals[i] << uint(8*(3-i))
+	}
+	maxLast := uint64(1)<<uint(8*(4-len(vals)+1)) - 1
+	if vals[last] > maxLast {
+		return nil
+	}
+	addr |= vals[last]
+	if addr > 0xFFFFFFFF {
+		return nil
+	}
+	return net.IPv4(byte(addr>>24), byte(addr>>16), byte(addr>>8), byte(addr))
+}
+
 func commandNamesInternalHost(command string) (offending string, internal bool) {
 	judgeHost := func(host string) bool {
 		// SplitHostPort FIRST: it understands the bracketed IPv6 form
@@ -523,7 +601,7 @@ func commandNamesInternalHost(command string) (offending string, internal bool) 
 				return true
 			}
 		}
-		if ip := net.ParseIP(host); ip != nil {
+		if ip := parseHostIP(host); ip != nil {
 			return !isPublicIP(ip)
 		}
 		return false
@@ -554,14 +632,14 @@ func commandNamesInternalHost(command string) (offending string, internal bool) 
 		// bare word is far more likely a filename than a hostname, and
 		// treating every word as a host would escalate nearly everything.
 		trimmed := strings.Trim(tok, "[]")
-		if ip := net.ParseIP(trimmed); ip != nil {
+		if ip := parseHostIP(trimmed); ip != nil {
 			if !isPublicIP(ip) {
 				return raw, true
 			}
 			continue
 		}
 		if h, _, err := net.SplitHostPort(tok); err == nil {
-			if ip := net.ParseIP(strings.Trim(h, "[]")); ip != nil && !isPublicIP(ip) {
+			if ip := parseHostIP(strings.Trim(h, "[]")); ip != nil && !isPublicIP(ip) {
 				return raw, true
 			}
 		}
