@@ -89,6 +89,33 @@ type slashCommand struct {
 	run  func(m *Model, args string) tea.Cmd
 }
 
+// printAsync defers a handler's real work off the bubbletea Update
+// goroutine and prints whatever it produces.
+//
+// Bubble Tea's contract is that Update returns PROMPTLY and the tea.Cmd it
+// returns does the blocking work on its own goroutine. A slash handler that
+// reads the disk, walks the thread store, or spawns a subprocess BEFORE
+// constructing its Cmd runs that work inside Update's call stack, and for
+// as long as it takes the program renders nothing and processes no
+// keystrokes — the terminal is frozen (agora#138: /diff's git subprocess is
+// bounded only by a 5s timeout, so index-lock contention froze the UI for
+// the full five seconds).
+//
+// work MUST NOT touch Model state: it runs on another goroutine, and the
+// Model belongs to Update. Capture the specific config values it needs
+// (theme, a lookup func) by value at call time, as the handlers here do —
+// never close over m. State changes belong in a tea.Msg the Update loop
+// applies (see statusErrMsg).
+func printAsync(p Printer, work func() string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := p(work())
+		if cmd == nil {
+			return nil
+		}
+		return cmd()
+	}
+}
+
 // slashCommandTable is the dispatch table, built per call (not a
 // package-level var) because runSlashHelp itself iterates the table — a
 // package var would be an initialization cycle. §6's full v1 set (/model,
@@ -181,15 +208,26 @@ func runSlashHelp(m *Model, _ string) tea.Cmd {
 
 // runSlashMCP prints the configured-MCP-servers report as one block.
 func runSlashMCP(m *Model, _ string) tea.Cmd {
-	return m.cfg.Printer(strings.Join(renderMCPReport(m.cfg.ListServers, m.cfg.Theme), "\n"))
+	// .mcp.json is read on the Cmd goroutine, not in Update — see printAsync.
+	list, th := m.cfg.ListServers, m.cfg.Theme
+	return printAsync(m.cfg.Printer, func() string {
+		return strings.Join(renderMCPReport(list, th), "\n")
+	})
 }
 
-// renderMCPReport builds the /mcp transcript block. Honest v1: the engine
-// exposes no LIVE MCP connection state yet — no mcp.Manager is constructed
-// in the turn path, and no server-status event exists on the session wire
-// — so this reports CONFIGURED servers (via cfg.ListServers, which
-// cmd/agora wires to the .mcp.json loader) and says so plainly, rather
-// than implying a connection that was never attempted.
+// renderMCPReport builds the /mcp transcript block. Honest v1: this
+// reports CONFIGURED servers (via cfg.ListServers, which cmd/agora wires
+// to the .mcp.json loader) and says so plainly, rather than implying a
+// connection that was never attempted.
+//
+// The reason is NOT that MCP is unwired — it is (buildMCPSource ->
+// WithMCPSource -> toolrunner.NewSurface, at the shared engine seam). The
+// reason is that no server-status event exists on the SESSION WIRE, so a
+// client — which is what the TUI is, even in the in-process lane — has no
+// way to learn whether a given server actually started, or is still up.
+// Surfacing live state means adding that event, not reaching for the
+// source; a client that read the source directly would report the daemon
+// lane's servers wrongly (they live in the daemon's process, not this one).
 func renderMCPReport(list func() ([]ServerInfo, error), th Theme) []string {
 	header := th.Header.Render("MCP servers")
 	if list == nil {
@@ -215,7 +253,12 @@ func renderMCPReport(list func() ([]ServerInfo, error), th Theme) []string {
 }
 
 func runSlashHooks(m *Model, _ string) tea.Cmd {
-	return m.cfg.Printer(strings.Join(renderHooksReport(m.cfg.ListHooks, m.cfg.Theme), "\n"))
+	// Hook discovery walks the config layers and content-hashes each
+	// handler — real disk work, so it runs on the Cmd goroutine.
+	list, th := m.cfg.ListHooks, m.cfg.Theme
+	return printAsync(m.cfg.Printer, func() string {
+		return strings.Join(renderHooksReport(list, th), "\n")
+	})
 }
 
 // renderHooksReport builds the /hooks transcript block.
@@ -299,16 +342,28 @@ func runSlashPermissions(m *Model, args string) tea.Cmd {
 		return m.revokePermission(fields[1:], header)
 	}
 
-	grants, err := m.cfg.ListPermissions()
+	// permissions.json is read on the Cmd goroutine — see printAsync.
+	listPermissions := m.cfg.ListPermissions
+	return printAsync(m.cfg.Printer, func() string {
+		return renderPermissionsReport(listPermissions, th, header)
+	})
+}
+
+// renderPermissionsReport builds the /permissions listing. Split out of
+// runSlashPermissions so the store read happens inside a tea.Cmd rather
+// than in Update's call stack (agora#138); it takes everything it needs by
+// value and never touches the Model.
+func renderPermissionsReport(listPermissions func() ([]PermissionInfo, error), th Theme, header string) string {
+	grants, err := listPermissions()
 	if err != nil {
-		return m.cfg.Printer(strings.Join([]string{
+		return strings.Join([]string{
 			header, th.Danger.Render("  error reading saved permissions: " + err.Error()),
-		}, "\n"))
+		}, "\n")
 	}
 	if len(grants) == 0 {
-		return m.cfg.Printer(strings.Join([]string{
+		return strings.Join([]string{
 			header, th.Muted.Render("  none saved — approvals granted with a wider scope than once appear here"),
-		}, "\n"))
+		}, "\n")
 	}
 
 	out := []string{header}
@@ -323,7 +378,7 @@ func runSlashPermissions(m *Model, args string) tea.Cmd {
 		out = append(out, line)
 	}
 	out = append(out, th.Muted.Render("  revoke with: /permissions revoke <kind> <scope> <key>"))
-	return m.cfg.Printer(strings.Join(out, "\n"))
+	return strings.Join(out, "\n")
 }
 
 // revokePermission handles the `revoke` subcommand's arguments.
@@ -344,25 +399,36 @@ func (m *Model) revokePermission(rest []string, header string) tea.Cmd {
 	kind, scope := rest[0], rest[1]
 	key := strings.Join(rest[2:], " ")
 
-	removed, err := m.cfg.RevokePermission(kind, scope, key)
+	// The revoke rewrites permissions.json — done on the Cmd goroutine.
+	revoke := m.cfg.RevokePermission
+	return printAsync(m.cfg.Printer, func() string {
+		return renderRevokeResult(revoke, th, header, kind, scope, key)
+	})
+}
+
+// renderRevokeResult performs the revoke and renders its outcome. Split out
+// of revokePermission so the store write happens inside a tea.Cmd rather
+// than in Update's call stack (agora#138).
+func renderRevokeResult(revoke func(kind, scope, key string) (bool, error), th Theme, header, kind, scope, key string) string {
+	removed, err := revoke(kind, scope, key)
 	switch {
 	case err != nil:
-		return m.cfg.Printer(strings.Join([]string{
+		return strings.Join([]string{
 			header, th.Danger.Render("  error revoking: " + err.Error()),
-		}, "\n"))
+		}, "\n")
 	case !removed:
-		return m.cfg.Printer(strings.Join([]string{
+		return strings.Join([]string{
 			header, th.Muted.Render(fmt.Sprintf("  no saved grant matches %s %s %s", kind, scope, key)),
-		}, "\n"))
+		}, "\n")
 	}
-	return m.cfg.Printer(strings.Join([]string{
+	return strings.Join([]string{
 		header,
 		fmt.Sprintf("  revoked %s %s %s", kind, scope, key),
 		// Say plainly that this session is unchanged — the store keeps the
 		// grant live in memory on purpose, and a message implying otherwise
 		// would misrepresent what just happened.
 		th.Muted.Render("  takes effect in the next session; this one keeps the grant it already resolved against"),
-	}, "\n"))
+	}, "\n")
 }
 
 // runSlashMode reports the approval posture in force.
@@ -582,17 +648,25 @@ func runSlashNew(m *Model, _ string) tea.Cmd {
 // this is a local convenience command, not something that should ever take
 // the TUI down.
 func runSlashInit(m *Model, _ string) tea.Cmd {
+	// Stat + write happen on the Cmd goroutine — see printAsync.
+	return printAsync(m.cfg.Printer, writeAgentsMD)
+}
+
+// writeAgentsMD creates AGENTS.md and reports what happened. Split out of
+// runSlashInit so the filesystem work happens inside a tea.Cmd rather than
+// in Update's call stack (agora#138).
+func writeAgentsMD() string {
 	dir := cwdOrDot()
 	path := filepath.Join(dir, "AGENTS.md")
 	if _, err := os.Stat(path); err == nil {
-		return m.cfg.Printer("AGENTS.md already exists")
+		return "AGENTS.md already exists"
 	} else if !os.IsNotExist(err) {
-		return m.cfg.Printer("AGENTS.md: " + err.Error())
+		return "AGENTS.md: " + err.Error()
 	}
 	if err := os.WriteFile(path, []byte(agentsMDTemplate(filepath.Base(dir))), 0o644); err != nil {
-		return m.cfg.Printer("AGENTS.md: " + err.Error())
+		return "AGENTS.md: " + err.Error()
 	}
-	return m.cfg.Printer("created AGENTS.md — edit it, then /new or restart to pick it up")
+	return "created AGENTS.md — edit it, then /new or restart to pick it up"
 }
 
 // agentsMDTemplate builds the starter AGENTS.md body. name is the project
