@@ -354,7 +354,11 @@ type compactionMarkerPayload struct {
 // process sees the marker too. Used by BOTH the manual /compact backend
 // seam (InConfig{Key:"compact"}) and the automatic context_length retry
 // path in runOneTurn.
-func (m *Manager) runCompactionEpisode(trigger contracts.CompactionTrigger, turnID string, ts time.Time, emit func(contracts.Event)) contracts.CompactionResult {
+//
+// reassemble, when non-nil, rebuilds the request the caller is about to
+// send. It runs BETWEEN Compact and the completed event on purpose — see
+// the comment at the call below.
+func (m *Manager) runCompactionEpisode(trigger contracts.CompactionTrigger, turnID string, ts time.Time, emit func(contracts.Event), reassemble func()) contracts.CompactionResult {
 	cm := m.ensureCtxManager()
 	started := ctxmgr.NewCompactionStartedEvent(m.threadID, trigger)
 	started.TurnID = turnID
@@ -363,6 +367,23 @@ func (m *Manager) runCompactionEpisode(trigger contracts.CompactionTrigger, turn
 	result, err := cm.Compact(trigger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "turnengine: ctxmgr Compact failed for thread %s: %v\n", m.threadID, err)
+	}
+
+	// Compact ARMS the trim; this manager curates inside Assemble, so the
+	// reduction does not exist until the caller reassembles. Doing that here
+	// — before the completed event and the persisted marker — is what makes
+	// TokensAfter a measured number instead of a placeholder equal to
+	// TokensBefore, which is what the marker used to record (agora#134).
+	//
+	// nil for the manual /compact path: it runs BETWEEN turns, with no
+	// request in hand to rebuild, so the trim lands on the next turn's
+	// assembly and this episode honestly reports no measured reduction.
+	if reassemble != nil {
+		reassemble()
+		if after := cm.Status().CurrentEstimate; after > 0 {
+			result.TokensAfter = after
+			result.NoOp = after >= result.TokensBefore
+		}
 	}
 
 	completed := ctxmgr.NewCompactionCompletedEvent(m.threadID, result)
@@ -402,5 +423,5 @@ func (m *Manager) runManualCompact(ctx context.Context, out chan<- contracts.Eve
 		case <-ctx.Done():
 		}
 	}
-	m.runCompactionEpisode(contracts.CompactManual, "", m.now(), emit)
+	m.runCompactionEpisode(contracts.CompactManual, "", m.now(), emit, nil)
 }
