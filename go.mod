@@ -15,7 +15,6 @@ toolchain go1.26.5
 
 require (
 	github.com/CarriedWorldUniverse/bridle v0.2.1-0.20260726024941-da1eb6c2ceed
-	github.com/CarriedWorldUniverse/nexus v0.2.1-0.20260529191407-d8a3450956ea
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
