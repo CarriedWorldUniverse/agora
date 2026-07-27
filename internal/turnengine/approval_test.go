@@ -592,3 +592,58 @@ func TestManager_RecordScopeGrant_SessionKeysOnThreadID(t *testing.T) {
 		t.Fatalf("matched allow scope = %v; want session", allow.Scope)
 	}
 }
+
+// TestScopeKeyFor_RefusesExecDelegatingFlags covers agora#137: a prefix
+// grant ("allow tar for this session") must not be reusable by a command
+// that asks the granted program to spawn something else. These payloads
+// carry NO shell metacharacter, so the pre-existing metacharacter guard
+// does not see them.
+func TestScopeKeyFor_RefusesExecDelegatingFlags(t *testing.T) {
+	escapes := []struct{ name, command string }{
+		{"tar checkpoint-action", "tar -cf /dev/null --checkpoint=1 --checkpoint-action=exec=sh -c id ."},
+		{"tar to-command", "tar -xf a.tar --to-command=id"},
+		{"tar -I", "tar -I /tmp/evil -cf out.tar ."},
+		{"git ext transport", "git clone ext::sh -c id /tmp/x"},
+		{"git -c", "git -c core.pager=id log"},
+		{"git upload-pack", "git clone --upload-pack=id host:repo"},
+		{"find -exec", "find . -name x -exec id +"},
+		{"find -delete", "find . -name x -delete"},
+		{"rsync -e", "rsync -e id a b"},
+		{"rsync --rsync-path", "rsync --rsync-path=id a b"},
+		{"ssh ProxyCommand", "ssh -o ProxyCommand=id host"},
+		{"sed -e", "sed -e s/a/b/ f"},
+		{"xargs -I", "xargs -I{} id"},
+		{"python -c", "python3 -c import os"},
+		{"node --eval", "node --eval 1"},
+		{"nohup", "nohup anything"},
+		{"absolute path still matched", "/usr/bin/find . -exec id +"},
+	}
+	for _, tc := range escapes {
+		got := scopeKeyFor(contracts.KindExec, toolrunner.ExecPayload{Command: tc.command})
+		if got != "" {
+			t.Errorf("%s: scopeKeyFor(%q) = %q; want \"\" — a prefix grant for %q would auto-allow arbitrary execution (agora#137)",
+				tc.name, tc.command, got, got)
+		}
+	}
+}
+
+// TestScopeKeyFor_StillKeysOrdinaryCommands guards the other direction: the
+// denylist must not swallow the ordinary invocations prefix scope exists
+// for, or every grant degrades into prompt-every-time.
+func TestScopeKeyFor_StillKeysOrdinaryCommands(t *testing.T) {
+	ok := []struct{ command, want string }{
+		{"git status", "git"},
+		{"git log --oneline -n 5", "git"},
+		{"tar -czf out.tgz dir", "tar"},
+		{"find . -name '*.go'", "find"},
+		{"go test ./...", "go"},
+		{"npm install", "npm"},
+		{"rsync -av a b", "rsync"},
+		{"ls -la", "ls"},
+	}
+	for _, tc := range ok {
+		if got := scopeKeyFor(contracts.KindExec, toolrunner.ExecPayload{Command: tc.command}); got != tc.want {
+			t.Errorf("scopeKeyFor(%q) = %q; want %q — ordinary commands must still key, or prefix scope is useless", tc.command, got, tc.want)
+		}
+	}
+}
