@@ -8,7 +8,7 @@ living only in PR bodies. Keep it current as the specs and code converge.
 
 Status as of main `7ef1b47` (2026-07-17), agora epic NEX-743, units U0–U18 merged.
 
-## 1. The turn engine is BUILT (Phase 2) — plan/question special-casing + MCP wiring remain
+## 1. The turn engine is BUILT (Phase 2) — this entry is now historical
 **Revised 2026-07-20** — the original entry here ("the real turn engine is
 unbuilt", the largest deliberate gap) was true at U18 but is stale: Phase 2
 (NEX-777 → NEX-789, plus live-turn fixes #68–#71) shipped
@@ -23,18 +23,41 @@ daily driver. The conformance suite (U18) still drives **scripted** engines
 (`io.ScriptedEngine`, `conformance/flow_engine.go`) by design — fixtures
 don't burn subscription tokens.
 
-Still open (the remainder of the original gap):
-- **plan/question special-casing** — no plan/question tools exist on the
-  fs/exec surface; `KindQuestion`/`KindPlan` sit in the policy table only
-  for completeness, and `question_response` input is currently a no-op
-  (turnengine/manager.go). A blocking question parking then resuming a turn
-  remains future work.
-- **MCP wiring** — `internal/mcp` (U8) is still unconsumed: the turn path
-  wires a nil MCPSource and leaves `TurnRequest.MCP` unset (claudesdk
-  `SupportsMCP=false` — MCP tools ride in `Tools`, not MCP;
-  turnengine/manager.go). `mcp__`-prefixed calls already classify into
-  `ItemMCPToolCall` wire events (sink.go), so the event shape is ready for
-  the wiring ticket.
+**Revised 2026-07-27 (agora#140)** — the two items this entry listed as
+"still open" have BOTH since landed. They are recorded here as closed
+rather than deleted, because this file's job is the design-vs-code ledger
+and a reader who remembers the gap needs to find out it is gone:
+
+- **plan/question special-casing — DONE.** `contracts.ToolQuestion` and
+  `contracts.ToolPlan` are real tools on the surface
+  (`toolrunner/planning.go`), wired via `toolrunner.NewPlanningFamily()`
+  (turnengine/manager.go). `question_response` is no longer a no-op: a
+  blocking `question` registers a waiter keyed by the question id the
+  `QuestionLog` mints, and `InQuestionResponse` resolves it
+  (turnengine/planning.go, `resolveQuestionWaiter`; Run's input loop in
+  manager.go). Park-then-resume is pinned by
+  `conformance/flow_question_park_resume_test.go`.
+- **MCP wiring — DONE.** `internal/mcp` (U8) is consumed: `buildMCPSource`
+  (cmd/agora/mcpsource.go) is passed to `turnengine.WithMCPSource` at the
+  shared engine seam (cmd/agora/engine.go), stored on the Manager, and
+  handed to `toolrunner.NewSurface` (turnengine/manager.go) — so all three
+  lanes (TUI, `agora pipe`, `agora daemon`) get it. Project-scoped servers
+  are fail-closed behind a user-layer content-hash trust gate
+  (cmd/agora/mcptrust.go). Covered by `cmd/agora/mcpsource_test.go`
+  (gating, startup-failure surfacing, `Close()` on run end).
+
+  Note the mechanism is still as described: claudesdk reports
+  `SupportsMCP=false`, so MCP tools ride in `Tools` rather than
+  `TurnRequest.MCP`, and `mcp__`-prefixed calls classify into
+  `ItemMCPToolCall` wire events (sink.go). "Unconsumed" was the stale part,
+  not the transport note.
+
+**Ledger hygiene:** this entry sat stale for a week and, during an
+evaluation pass, two independent readers took "MCP is unconsumed" as
+ground truth and nearly reported a live gap that did not exist. A stale
+entry here is worse than no entry, because this is the file people consult
+specifically to learn what is missing. When a gap closes, revise it in the
+same change that closes it.
 
 
 ### fs tool names match Claude's native surface (2026-07-26)
