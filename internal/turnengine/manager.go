@@ -1249,13 +1249,23 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 	result, err := ph.harness.RunTurn(turnCtx, req, newSurfaceRunner(m.surface), sink)
 
 	// C: context_length retry (context spec §2 contract 7) — one forced
-	// compaction episode, then ONE retry of the exact same request. Direct-
+	// compaction episode, then ONE retry of a REASSEMBLED request. Direct-
 	// api only (curation/compaction has nothing to do on the claudesdk
 	// lane, which owns its own server-side session). See
 	// isContextLengthError's doc comment for why this is provider-error
 	// string matching rather than a typed ErrorClass check.
 	if err != nil && ph.directAPI && m.ctxCurationEnabled && isContextLengthError(err) {
-		m.runCompactionEpisode(contracts.CompactAuto, turnID, turnStartTS, emit)
+		m.runCompactionEpisode(contracts.CompactAuto, turnID, turnStartTS, emit, func() {
+			// The episode arms ctxmgr's dialogue trim, but that manager
+			// curates INSIDE Assemble — so nothing about the request
+			// changes until the tail is rebuilt. This retry used to reissue
+			// `req` verbatim, which meant sending the identical oversized
+			// payload and taking the identical error, having spent the one
+			// retry the contract allows (agora#134).
+			if curated, ok := m.assembleCuratedTail(ph); ok {
+				req.SessionTail = curated
+			}
+		})
 		result, err = ph.harness.RunTurn(turnCtx, req, newSurfaceRunner(m.surface), sink)
 	}
 
