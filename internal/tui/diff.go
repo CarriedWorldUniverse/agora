@@ -148,6 +148,8 @@ var diffArgsDisallowed = regexp.MustCompile("[;|&$><`\n\r]")
 // through DiffCell.Render (§7). Never sends anything to the model — like
 // every command in this table, it's a local client action.
 func runSlashDiff(m *Model, args string) tea.Cmd {
+	// Argument validation is a regexp match — cheap, and it must stay here
+	// so a rejected argument never reaches the exec path at all.
 	if diffArgsDisallowed.MatchString(args) {
 		return m.cfg.Printer("unsupported /diff argument")
 	}
@@ -155,7 +157,19 @@ func runSlashDiff(m *Model, args string) tea.Cmd {
 	if args != "" {
 		argv = append(argv, strings.Fields(args)...)
 	}
+	// Everything below spawns and waits on git. That runs on the Cmd
+	// goroutine (see printAsync): the 5s timeout bounds how long git may
+	// take, but it does NOT make waiting on the Update goroutine acceptable
+	// — index-lock contention froze the whole terminal for the full window
+	// (agora#138). Width and theme are captured by value here; the closure
+	// must not read the Model.
+	width, th := m.width, m.cfg.Theme
+	return printAsync(m.cfg.Printer, func() string { return runGitDiff(argv, width, th) })
+}
 
+// runGitDiff spawns `git diff` and renders its output (or the failure).
+// Called only from a tea.Cmd goroutine — it blocks for up to 5s.
+func runGitDiff(argv []string, width int, th Theme) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", argv...)
@@ -165,21 +179,21 @@ func runSlashDiff(m *Model, args string) tea.Cmd {
 	out, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return m.cfg.Printer("git diff timed out")
+			return "git diff timed out"
 		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = err.Error()
 		}
 		if strings.Contains(strings.ToLower(msg), "not a git repository") {
-			return m.cfg.Printer("not a git repository")
+			return "not a git repository"
 		}
-		return m.cfg.Printer("git diff failed: " + firstLine(msg))
+		return "git diff failed: " + firstLine(msg)
 	}
 	if strings.TrimSpace(string(out)) == "" {
-		return m.cfg.Printer("no changes")
+		return "no changes"
 	}
-	return m.cfg.Printer(renderDiffOutput(string(out), m.width, m.cfg.Theme))
+	return renderDiffOutput(string(out), width, th)
 }
 
 // firstLine returns s up to its first newline (git's stderr is often

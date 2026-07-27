@@ -5,11 +5,10 @@
 //
 // v0-legacy retirement (U15, agora-spec-build.md §1): the previous
 // broker-mediated, multi-aspect chat TUI (internal/ui + internal/opclient)
-// is retired from `main` as of this unit — internal/ui is deleted; the
-// `v0-legacy` git branch remains the runnable reference per the U1 cut.
-// internal/opclient is untouched (nothing in this unit needs it deleted;
-// it was already a self-contained package with its own tests and no other
-// caller) — see the build report for exactly what still references it.
+// is retired from `main` — both packages are now deleted (internal/ui at
+// U15, internal/opclient at agora#139, which also dropped the
+// CarriedWorldUniverse/nexus module it was the last importer of). The
+// `v0-legacy` line remains the runnable reference per the U1 cut.
 package main
 
 import (

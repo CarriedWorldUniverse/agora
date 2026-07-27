@@ -8,6 +8,7 @@
 package turnengine
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -315,5 +316,101 @@ func TestManager_CuratedAssembly_Deterministic(t *testing.T) {
 		t.Fatalf("two Assemble calls over the same items produced different output:\n1: %s\n2: %s", b1, b2)
 	}
 
+	endAndClose(t, in, out, runErr)
+}
+
+// shrinkGatedProvider fails with a context_length error until the request
+// it receives is SMALLER than the first one it saw.
+//
+// This is the fake the original C2 test needed and didn't have. That test
+// scripted "fail once, then succeed unconditionally", so it asserted the
+// retry FIRES and was structurally incapable of noticing that the retry
+// re-sent the identical oversized payload and could never have worked
+// (agora#134). Gating success on an actual reduction is what makes the test
+// able to fail.
+type shrinkGatedProvider struct {
+	// armAfter calls succeed first, so the thread can accumulate the
+	// dialogue history a trim needs something to bite on.
+	armAfter int
+	calls    int
+	baseline int
+	sizes    []int
+}
+
+func (p *shrinkGatedProvider) Name() bridle.ProviderID { return "fake" }
+
+func (p *shrinkGatedProvider) Capabilities() bridle.ProviderCapabilities {
+	return bridle.ProviderCapabilities{
+		Category:               bridle.CategoryDirectAPI,
+		SupportsCustomTools:    true,
+		SupportsBeforeToolCall: true,
+		SupportsAfterToolCall:  true,
+	}
+}
+
+func (p *shrinkGatedProvider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink bridle.EventSink) (bridle.ProviderResult, error) {
+	size := 0
+	for _, msg := range req.Messages {
+		size += len(msg.Content)
+	}
+	p.calls++
+	if p.calls <= p.armAfter {
+		return bridle.ProviderResult{StopReason: bridle.StopReasonModelDone}, nil
+	}
+	p.sizes = append(p.sizes, size)
+	if p.baseline == 0 {
+		p.baseline = size
+	}
+	if size >= p.baseline {
+		// The request did not shrink: still over the window.
+		return bridle.ProviderResult{}, errContextLengthForTest{}
+	}
+	return bridle.ProviderResult{StopReason: bridle.StopReasonModelDone}, nil
+}
+
+// TestManager_ContextLengthError_RetryActuallyShrinksRequest is the
+// behavioural half of contract 7: recovery must send a SMALLER request, not
+// merely send one again.
+func TestManager_ContextLengthError_RetryActuallyShrinksRequest(t *testing.T) {
+	provider := &shrinkGatedProvider{armAfter: 14}
+	store := persistence.NewMemStore()
+	if err := store.Create(contracts.ThreadMeta{ThreadID: "th_shrink"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	_, in, out, runErr := newTestManagerWithStore(t, "th_shrink", store, provider)
+
+	// Enough prior dialogue that a DialogueKeepTurns trim has something to
+	// bite on — the trim keeps the last N user messages and stubs earlier
+	// ones, so a thread shorter than N cannot shrink at all.
+	for i := 0; i < 14; i++ {
+		in <- contracts.Input{Type: contracts.InUserMessage, Text: strings.Repeat("filler dialogue ", 200)}
+		if !drainToTurnCompleted(t, out, testTimeout) {
+			t.Fatalf("filler turn %d did not complete", i)
+		}
+	}
+
+	in <- contracts.Input{Type: contracts.InUserMessage, Text: "the turn that blows the window"}
+
+	var failed bool
+	for {
+		ev := recvWithin(t, out, testTimeout)
+		if ev.Type == contracts.EvTurnCompleted {
+			break
+		}
+		if ev.Type == contracts.EvTurnFailed {
+			failed = true
+			break
+		}
+	}
+	if failed {
+		t.Fatalf("turn failed: the retry did not shrink the request (sizes seen: %v) — compaction armed the trim but the request was reissued verbatim (agora#134)", provider.sizes)
+	}
+	if len(provider.sizes) < 2 {
+		t.Fatalf("provider saw %d requests; want at least 2 (original + retry)", len(provider.sizes))
+	}
+	last := provider.sizes[len(provider.sizes)-1]
+	if last >= provider.sizes[0] {
+		t.Fatalf("retry payload %d bytes >= original %d — nothing was actually compacted", last, provider.sizes[0])
+	}
 	endAndClose(t, in, out, runErr)
 }
