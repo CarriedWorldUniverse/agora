@@ -184,12 +184,19 @@ func runSlashMCP(m *Model, _ string) tea.Cmd {
 	return m.cfg.Printer(strings.Join(renderMCPReport(m.cfg.ListServers, m.cfg.Theme), "\n"))
 }
 
-// renderMCPReport builds the /mcp transcript block. Honest v1: the engine
-// exposes no LIVE MCP connection state yet — no mcp.Manager is constructed
-// in the turn path, and no server-status event exists on the session wire
-// — so this reports CONFIGURED servers (via cfg.ListServers, which
-// cmd/agora wires to the .mcp.json loader) and says so plainly, rather
-// than implying a connection that was never attempted.
+// renderMCPReport builds the /mcp transcript block. Honest v1: this
+// reports CONFIGURED servers (via cfg.ListServers, which cmd/agora wires
+// to the .mcp.json loader) and says so plainly, rather than implying a
+// connection that was never attempted.
+//
+// The reason is NOT that MCP is unwired — it is (buildMCPSource ->
+// WithMCPSource -> toolrunner.NewSurface, at the shared engine seam). The
+// reason is that no server-status event exists on the SESSION WIRE, so a
+// client — which is what the TUI is, even in the in-process lane — has no
+// way to learn whether a given server actually started, or is still up.
+// Surfacing live state means adding that event, not reaching for the
+// source; a client that read the source directly would report the daemon
+// lane's servers wrongly (they live in the daemon's process, not this one).
 func renderMCPReport(list func() ([]ServerInfo, error), th Theme) []string {
 	header := th.Header.Render("MCP servers")
 	if list == nil {
