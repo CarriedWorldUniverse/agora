@@ -383,3 +383,63 @@ func TestClassifyExec_CwdInsideSandboxStaysExec(t *testing.T) {
 		}
 	}
 }
+
+// TestClassify_ExecInternalEgressEscalates covers agora#136: run_command
+// must not be a way around web_fetch's SSRF guard. The metadata endpoint is
+// the case that matters.
+func TestClassify_ExecInternalEgressEscalates(t *testing.T) {
+	roots := Roots{WorkingDir: t.TempDir()}
+	internal := []string{
+		"curl http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+		"curl 169.254.169.254",
+		"wget https://169.254.169.254/x",
+		"curl http://metadata.google.internal/computeMetadata/v1/",
+		"curl http://metadata/computeMetadata/v1/",
+		"curl http://localhost:8080/admin",
+		"nc 127.0.0.1 8080",
+		"curl http://10.0.0.5/secrets",
+		"curl http://192.168.1.1/",
+		"curl http://[::1]:9000/",
+		"curl http://broker.nexus.svc.cluster.local/admin",
+		"curl --url http://169.254.169.254/",
+		"curl http://user:pass@169.254.169.254/",
+		// 100.64/10 — carrier-grade NAT, the tailnet the personal cloud runs on.
+		"curl http://100.85.1.2/",
+	}
+	for _, cmd := range internal {
+		kind, _ := Classify(Call{Name: ToolRunCommand, Args: json.RawMessage(mustJSON(t, map[string]any{"command": cmd}))}, roots)
+		if kind != contracts.KindEscalation {
+			t.Errorf("Classify(%q) = %s; want escalation — this reaches an internal address that web_fetch would refuse (agora#136)", cmd, kind)
+		}
+	}
+	// run_background starts the same shell command; same classification.
+	kind, _ := Classify(Call{Name: ToolRunBackground, Args: json.RawMessage(mustJSON(t, map[string]any{"command": "curl http://169.254.169.254/"}))}, roots)
+	if kind != contracts.KindEscalation {
+		t.Errorf("run_background internal egress = %s; want escalation", kind)
+	}
+}
+
+// TestClassify_ExecPublicEgressStaysExec is the other half, and the reason
+// this is parity-with-web_fetch rather than no-egress-from-exec: web_fetch
+// permits public URLs, so escalating every outbound command would be
+// stricter than the path being restored parity with — and under
+// never-escalate (which DENIES escalation) it would break ordinary headless
+// work like cloning a repo.
+func TestClassify_ExecPublicEgressStaysExec(t *testing.T) {
+	roots := Roots{WorkingDir: t.TempDir()}
+	public := []string{
+		"curl https://api.github.com/repos/x/y",
+		"git clone https://github.com/CarriedWorldUniverse/agora",
+		"go mod download",
+		"npm install",
+		"curl https://8.8.8.8/",
+		"echo hello",
+		"go test ./...",
+	}
+	for _, cmd := range public {
+		kind, _ := Classify(Call{Name: ToolRunCommand, Args: json.RawMessage(mustJSON(t, map[string]any{"command": cmd}))}, roots)
+		if kind != contracts.KindExec {
+			t.Errorf("Classify(%q) = %s; want exec — public egress is what web_fetch itself allows, and denying it breaks headless work", cmd, kind)
+		}
+	}
+}

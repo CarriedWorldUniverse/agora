@@ -2,6 +2,7 @@ package toolrunner
 
 import (
 	"encoding/json"
+	"net"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -184,6 +185,15 @@ func Classify(call Call, roots Roots) (contracts.ApprovalKind, any) {
 				Detail: "command runs in " + strconv.Quote(off) + " outside the sandbox: " + a.Command,
 			}
 		}
+		// Network egress to an INTERNAL address — parity with web_fetch's
+		// SSRF guard, which run_command otherwise walked straight around
+		// (agora#136). See commandNamesInternalHost.
+		if host, internal := commandNamesInternalHost(a.Command); internal {
+			return contracts.KindEscalation, EscalationPayload{
+				Detail: "command reaches internal address " + strconv.Quote(host) +
+					" — web_fetch refuses these, and run_command is not a way around that; use web_fetch for public URLs: " + a.Command,
+			}
+		}
 		return contracts.KindExec, ExecPayload{Command: a.Command}
 
 	case call.Name == ToolRunBackground:
@@ -204,6 +214,15 @@ func Classify(call Call, roots Roots) (contracts.ApprovalKind, any) {
 		if off, outside := cwdOutsideSandbox(a.Cwd, roots); outside {
 			return contracts.KindEscalation, EscalationPayload{
 				Detail: "command runs in " + strconv.Quote(off) + " outside the sandbox: " + a.Command,
+			}
+		}
+		// Network egress to an INTERNAL address — parity with web_fetch's
+		// SSRF guard, which run_command otherwise walked straight around
+		// (agora#136). See commandNamesInternalHost.
+		if host, internal := commandNamesInternalHost(a.Command); internal {
+			return contracts.KindEscalation, EscalationPayload{
+				Detail: "command reaches internal address " + strconv.Quote(host) +
+					" — web_fetch refuses these, and run_command is not a way around that; use web_fetch for public URLs: " + a.Command,
 			}
 		}
 		return contracts.KindExec, ExecPayload{Command: a.Command}
@@ -436,6 +455,113 @@ func commandNamesOutsidePath(command string, roots Roots) (offending string, out
 		// trailing/doubled ':') is not a path and is skipped.
 		for _, seg := range strings.Split(value, ":") {
 			if seg != "" && isCandidateOutside(seg) {
+				return raw, true
+			}
+		}
+	}
+	return "", false
+}
+
+// internalHostNames/internalHostSuffixes are hostnames that mean "inside"
+// with no IP literal to check. The cloud metadata endpoints matter most:
+// they are the classic SSRF target and are reached by NAME as often as by
+// address.
+var internalHostNames = map[string]bool{
+	"localhost":                true,
+	"metadata":                 true,
+	"metadata.google.internal": true,
+	"instance-data":            true,
+}
+
+var internalHostSuffixes = []string{".internal", ".local", ".localdomain", ".svc", ".svc.cluster.local"}
+
+// commandNamesInternalHost reports whether a command names a host that
+// web_fetch's SSRF guard would refuse to connect to.
+//
+// WHY this exists (agora#136). commandNamesOutsidePath deliberately exempts
+// any token containing "://" — a URL is not a filesystem path, and judging
+// it as one produces nonsense escalations. The consequence was that
+//
+//	curl http://169.254.169.254/latest/meta-data/iam/security-credentials/
+//
+// named no offending path, classified as plain KindExec, and auto-ran under
+// auto-safe and never-escalate. Classify states the invariant for
+// web_fetch — "approving a fetch grants reaching a PUBLIC url, never an
+// internal one" — and it held for exactly one of the two egress paths. The
+// guard web.go implements carefully was one run_command away from moot.
+//
+// The bar here is PARITY WITH web_fetch, deliberately, not "no egress from
+// exec". web_fetch itself permits public URLs, so escalating every outbound
+// command would be STRICTER than the guarded path this is restoring parity
+// with — and would break ordinary headless work (`git clone
+// https://github.com/...`, `go mod download`) under never-escalate, which
+// denies escalation outright. A command reaching a public address stays
+// KindExec; one reaching an internal address escalates.
+//
+// KNOWN LIMIT, stated rather than papered over: this is a LEXICAL check. A
+// DNS name resolving to an internal address walks through, where web_fetch
+// catches it at dial time by checking the resolved IP in Dialer.Control.
+// Closing that for exec needs the parked sandbox (agora-spec-io.md §3a), or
+// a resolving pre-check with its own TOCTOU window; the well-known-name
+// list above covers the cases that matter in practice.
+func commandNamesInternalHost(command string) (offending string, internal bool) {
+	judgeHost := func(host string) bool {
+		// SplitHostPort FIRST: it understands the bracketed IPv6 form
+		// ("[::1]:9000" -> "::1"). Trimming the brackets first would leave
+		// "::1]:9000", which parses as nothing. It errors for a host with
+		// no port, which is fine — host is then already bare.
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		host = strings.Trim(host, "[]")
+		lower := strings.ToLower(host)
+		if internalHostNames[lower] {
+			return true
+		}
+		for _, sfx := range internalHostSuffixes {
+			if strings.HasSuffix(lower, sfx) {
+				return true
+			}
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			return !isPublicIP(ip)
+		}
+		return false
+	}
+
+	for _, raw := range strings.Fields(command) {
+		tok := strings.Trim(raw, "\"'`(),;&|<>")
+		// --flag=<value> / VAR=<value>: judge the value.
+		if eq := strings.IndexByte(tok, '='); eq >= 0 && eq+1 < len(tok) {
+			tok = strings.Trim(tok[eq+1:], "\"'`")
+		}
+		if i := strings.Index(tok, "://"); i >= 0 {
+			rest := tok[i+3:]
+			// Strip userinfo, then take up to the first /, ? or #.
+			if at := strings.LastIndexByte(rest, '@'); at >= 0 {
+				rest = rest[at+1:]
+			}
+			if j := strings.IndexAny(rest, "/?#"); j >= 0 {
+				rest = rest[:j]
+			}
+			if judgeHost(rest) {
+				return raw, true
+			}
+			continue
+		}
+		// A bare address, with or without a port: `curl 169.254.169.254`,
+		// `nc 127.0.0.1 8080`. Only IP-SHAPED tokens are judged here — a
+		// bare word is far more likely a filename than a hostname, and
+		// treating every word as a host would escalate nearly everything.
+		trimmed := strings.Trim(tok, "[]")
+		if ip := net.ParseIP(trimmed); ip != nil {
+			if !isPublicIP(ip) {
+				return raw, true
+			}
+			continue
+		}
+		if h, _, err := net.SplitHostPort(tok); err == nil {
+			if ip := net.ParseIP(strings.Trim(h, "[]")); ip != nil && !isPublicIP(ip) {
 				return raw, true
 			}
 		}
