@@ -7,6 +7,29 @@ on:
     branches: [main]
 
 jobs:
+  # agora had NO vulnerability gate until 2026-07-25. GO-2026-5970 (a
+  # reachable infinite loop in x/text/unicode/norm) sat in go.mod for weeks
+  # and was found only because nexus — which does have this gate — tripped on
+  # the same dependency. Nothing in this repo would ever have said so.
+  security:
+    name: security scan
+    runs-on: ubuntu-latest
+    env:
+      GOVULNCHECK_VERSION: v1.3.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: true
+
+      - name: install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}
+
+      - name: govulncheck (symbol-level gate)
+        run: ./scripts/govulncheck-gate.sh
+
   build-test:
     name: build + test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

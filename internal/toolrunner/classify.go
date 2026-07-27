@@ -2,6 +2,8 @@ package toolrunner
 
 import (
 	"encoding/json"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
@@ -131,12 +133,90 @@ func Classify(call Call, roots Roots) (contracts.ApprovalKind, any) {
 		}
 		return contracts.KindExec, ExecPayload{Command: "agent(" + agentType + "): " + a.Prompt}
 
+	case taskToolNames[call.Name]:
+		// The task list is the model's own bookkeeping: it touches no file,
+		// no network, and no process — the state lives and dies inside the
+		// family. KindRead is the honest classification (auto-allowed in
+		// every preset but strict, where the operator has asked to see even
+		// read-only calls), and it means a model can still track its own
+		// work under the presets meant for headless runs.
+		return contracts.KindRead, ReadPayload{Detail: call.Name}
+
+	case call.Name == ToolWebFetch:
+		// Network egress. Classified as KindExec, not KindEscalation, for
+		// the same reason agent() is (see above): KindEscalation is DENIED
+		// outright under the never-escalate preset, which would make
+		// web_fetch permanently unusable headless. KindExec's per-preset
+		// defaults (prompt in prompt/strict, auto in auto-safe/
+		// never-escalate) are the right middle ground, and ExecPayload's
+		// {command} shape renders in the existing TUI approval modal with
+		// no wire change.
+		//
+		// The SSRF guard in web.go is NOT part of this decision — it always
+		// applies, regardless of what the operator approves here. Approving
+		// a fetch grants reaching a PUBLIC url, never an internal one.
+		var a webFetchArgs
+		if err := json.Unmarshal(call.Args, &a); err != nil {
+			return contracts.KindEscalation, EscalationPayload{Detail: "malformed web_fetch arguments: " + err.Error()}
+		}
+		return contracts.KindExec, ExecPayload{Command: "web_fetch: " + a.URL}
+
 	case call.Name == ToolRunCommand:
 		var a runCommandArgs
 		if err := json.Unmarshal(call.Args, &a); err != nil {
 			return contracts.KindEscalation, EscalationPayload{Detail: "malformed run_command arguments: " + err.Error()}
 		}
+		// Sandbox-first exec (operator decree): a command that NAMES a path
+		// outside the working-dir subtree classifies as escalation (prompts
+		// under every preset), so the sandbox-auto default only auto-runs
+		// commands whose named paths stay inside. AddDirs deliberately
+		// count as OUTSIDE here — an added folder is reachable, not
+		// implicitly trusted; the operator grants it via the prompt
+		// (allow-always persists in the scope store).
+		if off, outside := commandNamesOutsidePath(a.Command, roots); outside {
+			return contracts.KindEscalation, EscalationPayload{
+				Detail: "command references " + strconv.Quote(off) + " outside the sandbox: " + a.Command,
+			}
+		}
+		// The cwd is part of what the command can reach — see cwdOutsideSandbox.
+		if off, outside := cwdOutsideSandbox(a.Cwd, roots); outside {
+			return contracts.KindEscalation, EscalationPayload{
+				Detail: "command runs in " + strconv.Quote(off) + " outside the sandbox: " + a.Command,
+			}
+		}
 		return contracts.KindExec, ExecPayload{Command: a.Command}
+
+	case call.Name == ToolRunBackground:
+		var a runBackgroundArgs
+		if err := json.Unmarshal(call.Args, &a); err != nil {
+			return contracts.KindEscalation, EscalationPayload{Detail: "malformed run_background arguments: " + err.Error()}
+		}
+		// Starts a real shell command, same risk as run_command — same
+		// sandbox-first check, same classification. Only the LIFETIME
+		// differs (until bg.kill/session end, not until it exits), which
+		// has no bearing on what it's allowed to touch when it starts.
+		if off, outside := commandNamesOutsidePath(a.Command, roots); outside {
+			return contracts.KindEscalation, EscalationPayload{
+				Detail: "command references " + strconv.Quote(off) + " outside the sandbox: " + a.Command,
+			}
+		}
+		// The cwd is part of what the command can reach — see cwdOutsideSandbox.
+		if off, outside := cwdOutsideSandbox(a.Cwd, roots); outside {
+			return contracts.KindEscalation, EscalationPayload{
+				Detail: "command runs in " + strconv.Quote(off) + " outside the sandbox: " + a.Command,
+			}
+		}
+		return contracts.KindExec, ExecPayload{Command: a.Command}
+
+	case call.Name == ToolBgOutput, call.Name == ToolBgList, call.Name == ToolBgKill:
+		// Bookkeeping bounded entirely to jobs THIS session's own
+		// run_background already started and had approved — same
+		// reasoning as the task family: no new privilege is exercised by
+		// reading a job's buffered output or listing known ids, and
+		// bg.kill can only ever terminate a job this registry itself
+		// tracks (never an arbitrary PID), so it cannot escalate either —
+		// worst case is a model stopping its own spawned job early.
+		return contracts.KindRead, ReadPayload{Detail: call.Name}
 
 	case strings.HasPrefix(call.Name, mcpPrefix):
 		return contracts.KindMCPTool, MCPToolPayload{Tool: call.Name, Args: call.Args}
@@ -236,6 +316,131 @@ func Classify(call Call, roots Roots) (contracts.ApprovalKind, any) {
 	default:
 		return contracts.KindEscalation, EscalationPayload{Detail: "unrecognized tool call: " + call.Name}
 	}
+}
+
+// commandNamesOutsidePath scans a shell command's tokens for filesystem
+// paths that leave the WorkingDir subtree: absolute paths, ~-prefixed
+// paths, ..-relative escapes, and — unlike the rest of this file's
+// classify-time checks — a SYMLINK-AWARE resolution of every candidate
+// that looks lexically inside. It is a POLICY-layer heuristic (which
+// approval kind the call classifies as), not full containment: the exec
+// family still runs with cwd=WorkingDir and this only judges tokens that
+// look like paths at all (env-var indirection, subshells still evade it).
+//
+// The symlink resolution is the one deliberate exception to this file's
+// "Classify does no I/O" convention (finding, adversarial review of
+// PR #94): for a WRITE, that convention is safe because fs.go's
+// execution-time resolveContained is a REAL symlink-aware backstop no
+// matter what classify-time decided — an auto-approved write to a symlink
+// escaping the sandbox still gets refused when it actually runs. Exec has
+// no equivalent backstop (exec.go only sets cmd.Dir=cwd; validating
+// arbitrary shell-command path arguments at execution time is not
+// generally possible), so classify-time IS the only boundary here — a
+// purely lexical check would auto-run `cat innocuous` where `innocuous`
+// is a symlink to anything on the host, with no prompt. A resolution
+// failure (token doesn't exist, permission denied, ...) stays inside:
+// nothing on disk means nothing to leak, and matches the file's existing
+// "a false prompt is recoverable, a false auto-run is not" rule — it's
+// only ever the RESOLVED existing target landing outside that flips this.
+// cwdOutsideSandbox judges a run_command/run_background `cwd` argument the
+// same way commandNamesOutsidePath judges a path token: empty means the
+// working dir (inside by definition); anything else is resolved (symlinks
+// included) and must stay under WorkingDir.
+//
+// This exists because Execute uses `cwd` UNCONDITIONALLY (exec.go: cmd.Dir =
+// cwd, no containment check), so a command whose TEXT names nothing outside
+// the sandbox still runs wherever cwd points. Without this check
+// {"command":"cat id_ed25519","cwd":"/home/operator/.ssh"} classified as
+// plain KindExec — PolicyAuto under the interactive default AND under
+// auto-safe/never-escalate — and read the operator's keys with no prompt.
+// Security review 2026-07-25.
+func cwdOutsideSandbox(cwd string, roots Roots) (string, bool) {
+	if strings.TrimSpace(cwd) == "" {
+		return "", false
+	}
+	wd := roots.WorkingDir
+	sep := string(filepath.Separator)
+	outsideOf := func(p string) bool { return p != wd && !strings.HasPrefix(p+sep, wd+sep) }
+
+	p := cwd
+	if strings.HasPrefix(p, "~") {
+		return cwd, true
+	}
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(wd, p)
+	}
+	p = filepath.Clean(p)
+	if outsideOf(p) {
+		return cwd, true
+	}
+	// Lexically inside, but the path itself may be a symlink out.
+	if resolved, err := filepath.EvalSymlinks(p); err == nil && outsideOf(resolved) {
+		return cwd, true
+	}
+	return "", false
+}
+
+func commandNamesOutsidePath(command string, roots Roots) (offending string, outside bool) {
+	wd := roots.WorkingDir
+	sep := string(filepath.Separator)
+	outsideOf := func(p string) bool { return p != wd && !strings.HasPrefix(p+sep, wd+sep) }
+
+	// isCandidateOutside judges ONE path candidate (already stripped of any
+	// VAR=/--flag= prefix): the lexical check, then — for anything that
+	// looks inside — the symlink-aware resolution (see the function doc).
+	isCandidateOutside := func(tok string) bool {
+		if tok == "" || strings.Contains(tok, "://") {
+			return false
+		}
+		var p string
+		switch {
+		case tok == "~" || strings.HasPrefix(tok, "~/"):
+			return true
+		case strings.HasPrefix(tok, "/"):
+			p = filepath.Clean(tok)
+		case tok == ".." || strings.HasPrefix(tok, "../") || strings.Contains(tok, "/../") || strings.HasSuffix(tok, "/.."):
+			p = filepath.Clean(filepath.Join(wd, tok))
+		default:
+			// A bare relative token: lexically inside by construction, but
+			// may be a symlink whose target escapes — still a candidate
+			// for the resolution check below, not skipped outright.
+			p = filepath.Join(wd, tok)
+		}
+		if outsideOf(p) {
+			return true
+		}
+		resolved, err := filepath.EvalSymlinks(p)
+		return err == nil && outsideOf(resolved)
+	}
+
+	for _, raw := range strings.Fields(command) {
+		tok := strings.Trim(raw, "\"'`(),;&|<>")
+		value := tok
+		isAssignment := false
+		// --flag=/path and VAR=/path forms: judge the value part.
+		if eq := strings.IndexByte(tok, '='); eq >= 0 && eq+1 < len(tok) {
+			value = strings.Trim(tok[eq+1:], "\"'`")
+			isAssignment = true
+		}
+		if !isAssignment {
+			if isCandidateOutside(value) {
+				return raw, true
+			}
+			continue
+		}
+		// PATH-style assignments (VAR=a:b:c, e.g. `PATH=/usr/local/go/bin:$PATH
+		// make build`) are a list, not one path — judging the whole
+		// colon-joined blob as a single candidate made this a common false
+		// positive (adversarial review of PR #94, finding 4). Judge each
+		// ':'-separated segment on its own; an empty segment (leading/
+		// trailing/doubled ':') is not a path and is skipped.
+		for _, seg := range strings.Split(value, ":") {
+			if seg != "" && isCandidateOutside(seg) {
+				return raw, true
+			}
+		}
+	}
+	return "", false
 }
 
 // classifyWriteTarget checks path against roots' containment/protection

@@ -25,6 +25,19 @@ func NewSurface(mcp MCPSource, families ...Family) *Surface {
 	return &Surface{families: families, mcp: mcp}
 }
 
+// Close tears down every family that owns a resource needing it (today:
+// ExecFamily's background job registry) — anything else is a no-op.
+// Unconditional method, not an optional interface, so a caller (Manager.
+// Run) can always `defer surface.Close()` without a type assertion; the
+// Family interface itself has no Close, so this checks per-family.
+func (s *Surface) Close() {
+	for _, f := range s.families {
+		if closer, ok := f.(interface{ Close() }); ok {
+			closer.Close()
+		}
+	}
+}
+
 // Specs returns every family's specs (in registration order) followed by
 // the MCPSource's tools, if any. Returns an error only if the MCPSource's
 // listing itself fails — native family specs are always static/in-memory

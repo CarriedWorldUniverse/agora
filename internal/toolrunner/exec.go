@@ -48,6 +48,11 @@ const execWaitDelay = 500 * time.Millisecond
 // so it is a known, tracked gap rather than a silent one.
 type ExecFamily struct {
 	roots Roots
+	// bg tracks background jobs started via run_background — see
+	// background.go. Constructed eagerly (not lazily like the memory
+	// family's store) since it holds no disk resource, only in-memory
+	// state and goroutines that only exist once a job actually starts.
+	bg *backgroundRegistry
 }
 
 // NewExecFamily builds the exec family. roots supplies the default cwd
@@ -55,15 +60,22 @@ type ExecFamily struct {
 // NOT containment-checked here (sandboxing is parked, per above) — only
 // defaulted.
 func NewExecFamily(roots Roots) *ExecFamily {
-	return &ExecFamily{roots: roots}
+	return &ExecFamily{roots: roots, bg: newBackgroundRegistry(roots)}
 }
 
 func (e *ExecFamily) Name() string { return contracts.FamilyExec }
 
-func (e *ExecFamily) Handles(name string) bool { return name == ToolRunCommand }
+func (e *ExecFamily) Handles(name string) bool {
+	return name == ToolRunCommand || backgroundToolNames[name]
+}
+
+// Close kills every still-running background job this family started.
+// Wired into Manager.Run's teardown via Surface.Close — see
+// background.go's closeAll doc comment for why this exists at all.
+func (e *ExecFamily) Close() { e.bg.closeAll() }
 
 func (e *ExecFamily) Specs() []contracts.ToolSpec {
-	return []contracts.ToolSpec{
+	specs := []contracts.ToolSpec{
 		{
 			Name:        ToolRunCommand,
 			Description: "Run a shell command and return its combined stdout/stderr.",
@@ -78,6 +90,7 @@ func (e *ExecFamily) Specs() []contracts.ToolSpec {
 			}),
 		},
 	}
+	return append(specs, backgroundSpecs()...)
 }
 
 type runCommandArgs struct {
@@ -87,6 +100,9 @@ type runCommandArgs struct {
 }
 
 func (e *ExecFamily) Execute(ctx context.Context, call Call) (Result, error) {
+	if backgroundToolNames[call.Name] {
+		return e.executeBackground(ctx, call)
+	}
 	if call.Name != ToolRunCommand {
 		return errorResult(fmt.Errorf("%w: %s", ErrUnknownTool, call.Name)), nil
 	}

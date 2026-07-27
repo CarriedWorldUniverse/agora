@@ -2,6 +2,8 @@ package toolrunner
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
@@ -9,11 +11,113 @@ import (
 
 func TestClassifyExec(t *testing.T) {
 	roots := newTestRoots(t)
-	kind, payload := Classify(Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: "rm -rf /tmp/x"})}, roots)
+	// In-sandbox command (no named path leaves the working dir) -> exec.
+	kind, payload := Classify(Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: "rm -rf tmp/x"})}, roots)
 	if kind != contracts.KindExec {
 		t.Fatalf("kind = %v, want %v", kind, contracts.KindExec)
 	}
-	assertJSONExact(t, payload, `{"command":"rm -rf /tmp/x"}`)
+	assertJSONExact(t, payload, `{"command":"rm -rf tmp/x"}`)
+}
+
+// TestClassifyExec_SandboxEscapes: sandbox-first exec (operator decree) —
+// a command NAMING a path outside the working-dir subtree classifies as
+// escalation (prompts), while sandbox-relative commands and in-sandbox
+// absolute paths stay exec (auto under the default policy).
+func TestClassifyExec_SandboxEscapes(t *testing.T) {
+	roots := newTestRoots(t)
+	outside := []string{
+		"rm -rf /tmp/x",
+		"cat /etc/passwd",
+		"cp bin/agora ~/.local/bin/agora",
+		"ls ~",
+		"cat ../sibling/secret",
+		"tar -C .. -xf a.tar",
+		"go build -o /usr/local/bin/x ./cmd",
+	}
+	for _, cmd := range outside {
+		kind, _ := Classify(Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: cmd})}, roots)
+		if kind != contracts.KindEscalation {
+			t.Errorf("Classify(%q) = %v, want escalation (names an outside path)", cmd, kind)
+		}
+	}
+	inside := []string{
+		"go test ./...",
+		"make build",
+		"git commit -m msg",
+		"cat " + roots.WorkingDir + "/notes.txt",
+		"curl https://example.com/api",
+		"grep -rn TODO internal/",
+		// PATH-style VAR=a:b:c is a LIST, not one path (adversarial review
+		// of PR #94, finding 4) — every segment here is sandbox-relative
+		// or a bare name, so this must stay exec, not false-positive as
+		// escalation on the colon-joined blob.
+		"PATH=bin:vendor/bin:$PATH make build",
+	}
+	for _, cmd := range inside {
+		kind, _ := Classify(Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: cmd})}, roots)
+		if kind != contracts.KindExec {
+			t.Errorf("Classify(%q) = %v, want exec (sandbox-contained)", cmd, kind)
+		}
+	}
+}
+
+// TestClassifyExec_PathStyleAssignment_StillCatchesAnEscapingSegment:
+// finding 4's fix must not weaken finding-4-adjacent coverage — a REAL
+// escape hidden in one segment of a colon-joined PATH-style assignment
+// still classifies as escalation.
+func TestClassifyExec_PathStyleAssignment_StillCatchesAnEscapingSegment(t *testing.T) {
+	roots := newTestRoots(t)
+	kind, _ := Classify(Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: "PATH=/tmp/evil:/usr/bin make build"})}, roots)
+	if kind != contracts.KindEscalation {
+		t.Fatalf("Classify(PATH with an escaping segment) = %v, want escalation", kind)
+	}
+}
+
+// TestClassifyExec_SymlinkEscape: adversarial review of PR #94, finding 1
+// — a relative-looking token that is actually a symlink resolving OUTSIDE
+// the sandbox must classify as escalation, not auto-run as exec. The
+// companion case proves a symlink that stays INSIDE (or points at a
+// nonexistent target) is unaffected — this must not become a blanket
+// "no symlinks ever" false-positive generator.
+func TestClassifyExec_SymlinkEscape(t *testing.T) {
+	roots := newTestRoots(t)
+	wd := roots.WorkingDir
+
+	outsideDir := t.TempDir()
+	secret := filepath.Join(outsideDir, "secret.txt")
+	if err := os.WriteFile(secret, []byte("s"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	escapingLink := filepath.Join(wd, "innocuous")
+	if err := os.Symlink(secret, escapingLink); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	kind, _ := Classify(Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: "cat innocuous"})}, roots)
+	if kind != contracts.KindEscalation {
+		t.Fatalf("Classify(cat innocuous) with an escaping symlink = %v, want escalation", kind)
+	}
+
+	// A symlink that resolves INSIDE the sandbox is a normal in-sandbox
+	// reference — must stay exec.
+	insideTarget := filepath.Join(wd, "real.txt")
+	if err := os.WriteFile(insideTarget, []byte("s"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sameDirLink := filepath.Join(wd, "alias")
+	if err := os.Symlink(insideTarget, sameDirLink); err != nil {
+		t.Fatal(err)
+	}
+	kind, _ = Classify(Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: "cat alias"})}, roots)
+	if kind != contracts.KindExec {
+		t.Fatalf("Classify(cat alias) with an in-sandbox symlink = %v, want exec", kind)
+	}
+
+	// A token that doesn't exist on disk (nothing to leak) stays exec —
+	// resolution failure is not treated as an escape.
+	kind, _ = Classify(Call{Name: ToolRunCommand, Args: mustArgs(t, runCommandArgs{Command: "cat does-not-exist.txt"})}, roots)
+	if kind != contracts.KindExec {
+		t.Fatalf("Classify(cat does-not-exist.txt) = %v, want exec (nonexistent target is not a leak)", kind)
+	}
 }
 
 func TestClassifyMCPTool(t *testing.T) {
@@ -182,5 +286,100 @@ func assertJSONExact(t *testing.T, payload any, want string) {
 	}
 	if string(got) != want {
 		t.Fatalf("payload JSON =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// run_background shares run_command's sandbox-first classification
+// exactly — same escape check, same auto-vs-prompt split. Mirrors
+// TestClassifyExec/TestClassifyExec_SandboxEscapes rather than assuming
+// the shared code path makes a separate test redundant.
+func TestClassifyRunBackground_SandboxEscapes(t *testing.T) {
+	roots := newTestRoots(t)
+
+	kind, payload := Classify(Call{Name: ToolRunBackground, Args: mustArgs(t, runBackgroundArgs{Command: "npm run dev"})}, roots)
+	if kind != contracts.KindExec {
+		t.Fatalf("in-sandbox run_background: kind = %v, want %v", kind, contracts.KindExec)
+	}
+	assertJSONExact(t, payload, `{"command":"npm run dev"}`)
+
+	outside := []string{"cat /etc/passwd", "npm run dev --prefix ~/other-project"}
+	for _, cmd := range outside {
+		kind, _ := Classify(Call{Name: ToolRunBackground, Args: mustArgs(t, runBackgroundArgs{Command: cmd})}, roots)
+		if kind != contracts.KindEscalation {
+			t.Errorf("Classify(run_background, %q) = %v, want escalation", cmd, kind)
+		}
+	}
+}
+
+func TestClassifyRunBackground_MalformedArgs(t *testing.T) {
+	roots := newTestRoots(t)
+	kind, payload := Classify(Call{Name: ToolRunBackground, Args: json.RawMessage(`not json`)}, roots)
+	if kind != contracts.KindEscalation {
+		t.Fatalf("malformed run_background args: kind = %v, want escalation (fail closed)", kind)
+	}
+	if _, ok := payload.(EscalationPayload); !ok {
+		t.Fatalf("payload = %T, want EscalationPayload", payload)
+	}
+}
+
+func TestClassify_BackgroundControlToolsAreReadKind(t *testing.T) {
+	roots := newTestRoots(t)
+	for _, name := range []string{ToolBgOutput, ToolBgList, ToolBgKill} {
+		kind, payload := Classify(Call{Name: name, Args: json.RawMessage(`{}`)}, roots)
+		if kind != contracts.KindRead {
+			t.Errorf("Classify(%s) kind = %q; want %q", name, kind, contracts.KindRead)
+		}
+		if _, ok := payload.(ReadPayload); !ok {
+			t.Errorf("Classify(%s) payload is %T; want ReadPayload", name, payload)
+		}
+	}
+}
+
+// Security review 2026-07-25: a command whose TEXT names nothing outside the
+// sandbox but whose CWD points outside it must escalate. Execute uses cwd
+// unconditionally (exec.go sets cmd.Dir with no containment check), so before
+// this the call classified as plain KindExec — PolicyAuto under the
+// interactive default — and ran wherever cwd pointed with no prompt.
+func TestClassifyExec_CwdOutsideSandboxEscalates(t *testing.T) {
+	roots := newTestRoots(t)
+	outside := t.TempDir() // a real dir, definitively not under roots.WorkingDir
+
+	for _, tc := range []struct {
+		name string
+		tool string
+	}{
+		{"run_command", "run_command"},
+		{"run_background", "run_background"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args, err := json.Marshal(map[string]any{"command": "cat id_ed25519", "cwd": outside})
+			if err != nil {
+				t.Fatal(err)
+			}
+			kind, _ := Classify(Call{Name: tc.tool, Args: args}, roots)
+			if kind != contracts.KindEscalation {
+				t.Fatalf("cwd=%q classified as %v; want escalation (it runs there regardless of the command text)", outside, kind)
+			}
+		})
+	}
+}
+
+// A cwd INSIDE the sandbox (and the empty default) must stay ordinary exec —
+// the fix must not turn every command into an escalation prompt.
+func TestClassifyExec_CwdInsideSandboxStaysExec(t *testing.T) {
+	roots := newTestRoots(t)
+	dir := roots.WorkingDir
+	sub := filepath.Join(dir, "pkg")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, cwd := range []string{"", sub, "pkg"} {
+		args, err := json.Marshal(map[string]any{"command": "go test ./...", "cwd": cwd})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kind, _ := Classify(Call{Name: "run_command", Args: args}, roots); kind != contracts.KindExec {
+			t.Errorf("cwd=%q classified as %v; want exec", cwd, kind)
+		}
 	}
 }

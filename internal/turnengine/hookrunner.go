@@ -37,7 +37,78 @@ type HookRunner struct {
 	dispatcher  *hooks.Dispatcher
 	cwd         string
 
+	// permissionMode is what hooks are TOLD the session's approval posture
+	// is (spec §3: report-only — hooks never configure via this field).
+	// Set by the Manager via setPermissionMode once its policy is resolved;
+	// DiscoverHooks runs before any Manager exists, so the zero value ""
+	// means "no Manager has claimed this runner yet" and reports the
+	// engine's own default posture rather than a misleading preset name.
+	permissionMode string
+
 	asyncResults chan hooks.AsyncResult
+}
+
+// setPermissionMode records the approval posture hooks should be told
+// about. Called by NewManager once opts have resolved m.policy.
+// DiscoveredHook is one resolved handler, flattened for a UI that must not
+// import internal/hooks (the TUI's /hooks verb — NEX-825).
+type DiscoveredHook struct {
+	Event     string
+	Key       string
+	Command   string
+	Matcher   string
+	Trust     string
+	Runnable  bool
+	Hash      string
+	StatePath string
+}
+
+// Discovered lists every handler this runner found, with its resolved trust
+// state and the content hash that would enable it. A nil runner (no hooks.json
+// anywhere) reports nothing — the caller renders "none discovered".
+//
+// Trust is fail-closed, so a handler with no recorded hash never fires; this
+// is what lets the operator SEE that, rather than watching a configured hook
+// silently do nothing.
+func (hr *HookRunner) Discovered() []DiscoveredHook {
+	if hr == nil || hr.registry == nil {
+		return nil
+	}
+	statePath := filepath.Join(hooksUserDir(), "hooks-state.json")
+	resolved := hooks.Resolve(hr.registry.All(), hr.state, hr.bypassTrust)
+	out := make([]DiscoveredHook, 0, len(resolved))
+	for _, r := range resolved {
+		cmd := r.Handler.Command
+		if cmd == "" {
+			cmd = r.Handler.CommandWindows
+		}
+		out = append(out, DiscoveredHook{
+			Event:     string(r.Event),
+			Key:       r.PositionalKey(),
+			Command:   cmd,
+			Matcher:   r.Matcher,
+			Trust:     string(r.TrustState),
+			Runnable:  r.Runnable,
+			Hash:      r.ContentHash,
+			StatePath: statePath,
+		})
+	}
+	return out
+}
+
+func (hr *HookRunner) setPermissionMode(mode string) {
+	if hr == nil {
+		return
+	}
+	hr.permissionMode = mode
+}
+
+// reportedPermissionMode is the value written into every event's stdin.
+func (hr *HookRunner) reportedPermissionMode() string {
+	if hr == nil || hr.permissionMode == "" {
+		return permissionModeName(defaultPolicy())
+	}
+	return hr.permissionMode
 }
 
 // hookStateEntry is this package's OWN on-disk shape for the trust/enable
@@ -50,9 +121,16 @@ type HookRunner struct {
 // internal/hooks.HandlerState itself carries no json tags (it's an
 // already-merged, in-memory-only shape per its own doc comment), so this is
 // a deliberately separate wire type, converted 1:1 on load.
+//
+// The field names are the SPEC's (§4.4: `enabled`, `trusted_hash`) and must
+// stay byte-identical to the entry untrustedHookReport and /hooks print. A
+// camelCase `trustedHash` tag shipped here originally, so the recorded hash
+// never unmarshalled and following the printed instruction left the handler
+// Untrusted forever — the trust gate had no key, only a lock (caught by the
+// round-trip test below, live-verified 2026-07-25).
 type hookStateEntry struct {
 	Enabled     bool   `json:"enabled"`
-	TrustedHash string `json:"trustedHash"`
+	TrustedHash string `json:"trusted_hash"`
 }
 
 // DiscoverHooks loads hooks.json for cwd's project layer and the operator's
@@ -102,6 +180,15 @@ func DiscoverHooks(cwd string) (*HookRunner, []string) {
 	if !loaded {
 		return nil, warnings
 	}
+
+	// NEX-825: tell the operator what was discovered but WITHHELD. Trust is
+	// fail-closed (ResolveTrust refuses anything with no recorded hash), and
+	// nothing writes hooks-state.json, so before this every hook silently
+	// never ran and there was no way to learn that — a configured hook that
+	// does nothing, with no signal, is worse than no hook feature at all.
+	// Same shape as the MCP trust gate's report: name what was withheld and
+	// the exact entry to add.
+	warnings = append(warnings, untrustedHookReport(&reg, state, userDir)...)
 
 	asyncResults := make(chan hooks.AsyncResult, 16)
 	hr := &HookRunner{
@@ -246,4 +333,28 @@ func shellRunFunc(ctx context.Context, rh hooks.ResolvedHandler, event hooks.Eve
 	// doc comment), which baseInterpret's exit-code switch treats as
 	// Failed regardless of the sentinel ExitCode value.
 	return hooks.RunResult{ExitCode: -1, Err: waitErr, Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
+}
+
+// untrustedHookReport lists handlers that will NOT run because no trusted
+// hash is recorded for them, with the exact hooks-state.json entry that
+// would allow each. Returns warning lines (the caller surfaces them the same
+// way it surfaces parse warnings).
+func untrustedHookReport(reg *hooks.Registry, state map[string]hooks.HandlerState, userDir string) []string {
+	resolved := hooks.Resolve(reg.All(), state, false)
+	var out []string
+	for _, r := range resolved {
+		if r.Runnable {
+			continue
+		}
+		cmd := r.Handler.Command
+		if cmd == "" {
+			cmd = r.Handler.CommandWindows
+		}
+		out = append(out, fmt.Sprintf(
+			"hooks: %s handler %q will NOT run (%s) — command: %s\n"+
+				"       to allow it, add to %s:  %q: {\"enabled\": true, \"trusted_hash\": %q}",
+			r.Event, r.PositionalKey(), r.TrustState, cmd,
+			filepath.Join(userDir, "hooks-state.json"), r.PositionalKey(), r.ContentHash))
+	}
+	return out
 }

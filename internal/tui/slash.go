@@ -46,6 +46,38 @@ type ServerInfo struct {
 	Enabled   bool
 }
 
+// PermissionInfo is one saved approval grant, for /permissions. Mirrors
+// approval.DisplayGrant, restated here so internal/tui keeps no dependency
+// on the approval package (the same split ServerInfo uses for mcp).
+type PermissionInfo struct {
+	Kind      string
+	Scope     string
+	Key       string
+	GrantedAt string
+	// Global marks a grant that applies in EVERY project, not just this
+	// one — worth showing differently, since it is the wider authority.
+	Global bool
+}
+
+// HookInfo is one discovered lifecycle hook as the TUI needs it for /hooks —
+// deliberately NOT hooks.ResolvedHandler, so internal/tui keeps no dependency
+// on internal/hooks; cmd/agora adapts the runner's output into this shape
+// (the same split ServerInfo uses for mcp).
+type HookInfo struct {
+	Event   string
+	Key     string // PositionalKey — what hooks-state.json records trust under
+	Command string
+	Matcher string
+	// Trust is the resolved trust state ("Trusted"/"Untrusted"/"Modified"/…).
+	Trust string
+	// Runnable is the fail-closed gate: false means this hook will NOT fire.
+	Runnable bool
+	// Hash is the content hash to record in hooks-state.json to trust it.
+	Hash string
+	// StatePath is where that file lives, so the block can say it exactly.
+	StatePath string
+}
+
 // slashCommand is one known /verb. Run returns the tea.Cmd the command
 // produces (usually a single Printer call carrying the rendered block).
 // Exit verbs (/quit, /exit, /q) are NOT in this table — they keep their
@@ -72,6 +104,9 @@ func slashCommandTable() []slashCommand {
 		{name: "compact", desc: "compact the thread context (between turns)", run: runSlashCompact},
 		{name: "new", desc: "print the command to start a fresh thread", run: runSlashNew},
 		{name: "mcp", desc: "list configured MCP servers", run: runSlashMCP},
+		{name: "hooks", desc: "list discovered lifecycle hooks and their trust state", run: runSlashHooks},
+		{name: "permissions", desc: "list or revoke saved approval grants", run: runSlashPermissions},
+		{name: "mode", desc: "show this session's approval posture", run: runSlashMode},
 		{name: "init", desc: "create AGENTS.md", run: runSlashInit},
 		{name: "diff", desc: "show git diff", run: runSlashDiff},
 		{name: "help", desc: "list available commands", run: runSlashHelp},
@@ -114,6 +149,9 @@ var helpOrder = []struct{ name, fallbackDesc string }{
 	{"new", "start a fresh thread"},
 	{"init", "create AGENTS.md"},
 	{"mcp", "list configured MCP servers"},
+	{"hooks", "list lifecycle hooks and their trust state"},
+	{"permissions", "list or revoke saved approval grants"},
+	{"mode", "show this session's approval posture"},
 	{"help", "list available commands"},
 }
 
@@ -176,6 +214,184 @@ func renderMCPReport(list func() ([]ServerInfo, error), th Theme) []string {
 	return out
 }
 
+func runSlashHooks(m *Model, _ string) tea.Cmd {
+	return m.cfg.Printer(strings.Join(renderHooksReport(m.cfg.ListHooks, m.cfg.Theme), "\n"))
+}
+
+// renderHooksReport builds the /hooks transcript block.
+//
+// This verb exists because hook trust is fail-closed and had no surface: a
+// handler with no recorded hash never runs, and until NEX-825 nothing said
+// so — a configured hook silently did nothing. DiscoverHooks now emits a
+// warning, but in TUI mode that goes to stderr during engine construction,
+// where the alt-screen swallows it; the operator still could not SEE why
+// their hook was inert. So the report belongs here, on demand, where it can
+// also hand over the exact hooks-state.json entry that would enable each one.
+func renderHooksReport(list func() ([]HookInfo, error), th Theme) []string {
+	header := th.Header.Render("lifecycle hooks")
+	if list == nil {
+		return []string{header, th.Muted.Render("  hook list not available on this connection")}
+	}
+	hooks, err := list()
+	if err != nil {
+		return []string{header, th.Danger.Render("  error reading hooks: " + err.Error())}
+	}
+	if len(hooks) == 0 {
+		return []string{header, th.Muted.Render("  none discovered — add handlers to .agora/hooks.json (project) or ~/.agora/hooks.json (user)")}
+	}
+	out := []string{header}
+	var blocked int
+	for _, h := range hooks {
+		mark := th.Muted.Render("will not run")
+		if h.Runnable {
+			mark = th.Accent.Render("active")
+		} else {
+			blocked++
+		}
+		matcher := h.Matcher
+		if matcher == "" {
+			matcher = "*"
+		}
+		out = append(out,
+			fmt.Sprintf("  %-14s %-9s %s", h.Event, h.Trust, mark),
+			th.Muted.Render("      matcher "+matcher+" · "+h.Command))
+	}
+	if blocked > 0 {
+		out = append(out,
+			"",
+			th.Muted.Render(fmt.Sprintf("  %d hook(s) will not run: trust is fail-closed, so a handler only fires", blocked)),
+			th.Muted.Render("  once its content hash is recorded. To allow one, add to "+hooks[0].StatePath+":"))
+		for _, h := range hooks {
+			if h.Runnable {
+				continue
+			}
+			out = append(out, th.Muted.Render(fmt.Sprintf("      %q: {\"enabled\": true, \"trusted_hash\": %q}", h.Key, h.Hash)))
+		}
+		out = append(out, th.Muted.Render("  Editing a trusted hook changes its hash and revokes the grant."))
+	}
+	return out
+}
+
+// runSlashPermissions shows the approval grants that outlive this session,
+// and revokes one with `/permissions revoke <kind> <scope> <key>`.
+//
+// A permission store the operator cannot inspect is a liability: grants
+// accumulate silently and there is no way to answer "what has this thing
+// been allowed to do?". Listing is therefore the default, and revoke is
+// deliberately explicit (all three fields) rather than an index into the
+// printed list, which would shift under a concurrent grant.
+func runSlashPermissions(m *Model, args string) tea.Cmd {
+	th := m.cfg.Theme
+	header := th.Header.Render("Saved permissions")
+
+	if m.cfg.ListPermissions == nil {
+		return m.cfg.Printer(strings.Join([]string{
+			header, th.Muted.Render("  not available on this connection"),
+		}, "\n"))
+	}
+
+	if fields := strings.Fields(args); len(fields) > 0 {
+		if !strings.EqualFold(fields[0], "revoke") {
+			return m.cfg.Printer(strings.Join([]string{
+				header, th.Danger.Render("  usage: /permissions [revoke <kind> <scope> <key>]"),
+			}, "\n"))
+		}
+		return m.revokePermission(fields[1:], header)
+	}
+
+	grants, err := m.cfg.ListPermissions()
+	if err != nil {
+		return m.cfg.Printer(strings.Join([]string{
+			header, th.Danger.Render("  error reading saved permissions: " + err.Error()),
+		}, "\n"))
+	}
+	if len(grants) == 0 {
+		return m.cfg.Printer(strings.Join([]string{
+			header, th.Muted.Render("  none saved — approvals granted with a wider scope than once appear here"),
+		}, "\n"))
+	}
+
+	out := []string{header}
+	for _, g := range grants {
+		line := fmt.Sprintf("  %s %s %s", g.Kind, g.Scope, g.Key)
+		if g.Global {
+			line += th.Muted.Render("  [all projects]")
+		}
+		if g.GrantedAt != "" {
+			line += th.Muted.Render("  " + g.GrantedAt)
+		}
+		out = append(out, line)
+	}
+	out = append(out, th.Muted.Render("  revoke with: /permissions revoke <kind> <scope> <key>"))
+	return m.cfg.Printer(strings.Join(out, "\n"))
+}
+
+// revokePermission handles the `revoke` subcommand's arguments.
+func (m *Model) revokePermission(rest []string, header string) tea.Cmd {
+	th := m.cfg.Theme
+	if m.cfg.RevokePermission == nil {
+		return m.cfg.Printer(strings.Join([]string{
+			header, th.Muted.Render("  revoking is not available on this connection"),
+		}, "\n"))
+	}
+	// The key may contain spaces (a command prefix like "go test ./..."),
+	// so only kind and scope are split off — everything after is the key.
+	if len(rest) < 3 {
+		return m.cfg.Printer(strings.Join([]string{
+			header, th.Danger.Render("  usage: /permissions revoke <kind> <scope> <key>"),
+		}, "\n"))
+	}
+	kind, scope := rest[0], rest[1]
+	key := strings.Join(rest[2:], " ")
+
+	removed, err := m.cfg.RevokePermission(kind, scope, key)
+	switch {
+	case err != nil:
+		return m.cfg.Printer(strings.Join([]string{
+			header, th.Danger.Render("  error revoking: " + err.Error()),
+		}, "\n"))
+	case !removed:
+		return m.cfg.Printer(strings.Join([]string{
+			header, th.Muted.Render(fmt.Sprintf("  no saved grant matches %s %s %s", kind, scope, key)),
+		}, "\n"))
+	}
+	return m.cfg.Printer(strings.Join([]string{
+		header,
+		fmt.Sprintf("  revoked %s %s %s", kind, scope, key),
+		// Say plainly that this session is unchanged — the store keeps the
+		// grant live in memory on purpose, and a message implying otherwise
+		// would misrepresent what just happened.
+		th.Muted.Render("  takes effect in the next session; this one keeps the grant it already resolved against"),
+	}, "\n"))
+}
+
+// runSlashMode reports the approval posture in force.
+//
+// Deliberately READ-ONLY. Swapping the policy mid-session would need an
+// engine-side setter with defined semantics for approvals already in
+// flight, and a half-applied posture is worse than none — so this answers
+// "what am I running?" and points at the two places that decide it, rather
+// than pretending to a capability that is not wired.
+func runSlashMode(m *Model, _ string) tea.Cmd {
+	th := m.cfg.Theme
+	current := m.cfg.PermissionMode
+	if current == "" {
+		current = "sandbox-auto (engine default)"
+	}
+	out := []string{
+		th.Header.Render("Approval mode"),
+		"  " + current,
+	}
+	if m.cfg.ModeCatalog != nil {
+		out = append(out, "", th.Muted.Render("  available:"))
+		for _, e := range m.cfg.ModeCatalog() {
+			out = append(out, fmt.Sprintf("    %-16s %s", e[0], th.Muted.Render(e[1])))
+		}
+	}
+	out = append(out, "", th.Muted.Render("  set with: agora -mode <name>, or permission_mode in .agora/config.json"))
+	return m.cfg.Printer(strings.Join(out, "\n"))
+}
+
 // runSlashStatus prints agent id, current model, thread id, working dir,
 // backend mode, and session usage as one block (§5: "context-remaining …
 // Show in footer and /status"; usage reuses the exact numbers the idle
@@ -201,7 +417,40 @@ func runSlashStatus(m *Model, _ string) tea.Cmd {
 		usage = strings.TrimPrefix(strings.TrimSpace(m.usageSegment()), "· ")
 	}
 	row("usage", usage)
+	// Only shown once a rate_limit event has actually arrived — the
+	// overwhelming majority of sessions (API key, Bedrock, Vertex, any
+	// non-subscription provider) never receive one, and a permanent
+	// "plan: n/a" row would be clutter for every one of them for a signal
+	// that will never apply.
+	if m.haveRateLimit {
+		row("plan", renderRateLimit(m.rateLimit))
+	}
 	return m.cfg.Printer(b.String())
+}
+
+// renderRateLimit formats one contracts.RateLimit for /status — e.g.
+// "five_hour 82% (allowed_warning, resets 14:32)" or "overage 12%
+// (overage credits in use)" when UsingOverage.
+func renderRateLimit(rl contracts.RateLimit) string {
+	window := rl.WindowType
+	if window == "" {
+		window = "usage"
+	}
+	s := fmt.Sprintf("%s %d%%", window, rl.Utilization)
+	var notes []string
+	if rl.Status != "" && rl.Status != "allowed" {
+		notes = append(notes, rl.Status)
+	}
+	if rl.UsingOverage {
+		notes = append(notes, "overage credits in use")
+	}
+	if rl.ResetsAt != nil {
+		notes = append(notes, "resets "+rl.ResetsAt.Local().Format("15:04"))
+	}
+	if len(notes) > 0 {
+		s += " (" + strings.Join(notes, ", ") + ")"
+	}
+	return s
 }
 
 // effortTierOrder is the display order for the reasoning-effort ladder —
@@ -481,8 +730,18 @@ func nearestCommand(name string, candidates []string) string {
 	bestDist := -1
 	for _, c := range candidates {
 		d := levenshtein(name, c)
-		if bestDist == -1 || d < bestDist {
+		switch {
+		case bestDist == -1 || d < bestDist:
 			bestDist, best = d, c
+		case d == bestDist && c < best:
+			// Ties resolve ALPHABETICALLY, not by candidate order. Order
+			// was the previous tie-break, which made suggestions depend on
+			// where a verb happened to sit in the command table: adding
+			// /mode silently changed "/modek" from suggesting /model to
+			// suggesting /mode, since both are distance 1. A deterministic
+			// rule means adding a command can never quietly reword an
+			// existing suggestion.
+			best = c
 		}
 	}
 	// Half the typed name's length (floor 1, so a 1-2 char typo like "/eit"

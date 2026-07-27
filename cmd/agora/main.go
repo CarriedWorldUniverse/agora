@@ -92,8 +92,11 @@ func main() {
 		logFile     = flag.String("log-file", "", "write logs here; default /tmp/agora.log")
 		showVersion = flag.Bool("version", false, "print version and exit")
 		demo        = flag.Bool("demo", false, "play a scripted zero-cost turn (no model, no billing) to test/debug rendering")
+		mode        = flag.String("mode", "", "approval posture for this session (overrides permission_mode in .agora/config.json)")
 	)
 	flag.Parse()
+
+	applyModeFlag(*mode)
 
 	if *showVersion {
 		fmt.Printf("agora %s\n", version.Version)
@@ -176,11 +179,27 @@ func main() {
 	printResumeHistory(backend, *threadID)
 
 	m := tui.NewModel(tui.Config{
-		Backend:     backend,
-		AgentID:     *agentID,
-		Model:       *model,
+		Backend: backend,
+		AgentID: *agentID,
+		// resolveModel adds the default_model config fallback; tui.NewModel
+		// then does the registry lookup (it needs the resolved entry for
+		// /model and pricing anyway, so resolving the SPEC here too would
+		// duplicate that work rather than save it).
+		Model:       resolveModel(*model, mustGetwd()),
 		ThreadID:    *threadID,
 		ListServers: listMCPServers,
+		// /hooks: which lifecycle hooks were discovered and whether trust
+		// lets them fire — fail-closed trust is invisible without this.
+		ListHooks: listHooks,
+		// /permissions: inspect and revoke the approval grants that outlive
+		// this session. A durable permission store the operator cannot see
+		// into would be a liability.
+		ListPermissions:  listPermissions,
+		RevokePermission: revokePermission,
+		// /mode: the posture actually in force, resolved by the SAME
+		// function the engine seam uses so the two cannot disagree.
+		PermissionMode: resolvePermissionMode(mustGetwd()),
+		ModeCatalog:    modeCatalog,
 	})
 	// Never tea.WithAltScreen() (§0 non-negotiable: the transcript lives in
 	// the terminal's own scrollback, not a full-screen widget) — and NO mouse

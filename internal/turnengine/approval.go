@@ -2,6 +2,7 @@ package turnengine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -13,37 +14,38 @@ import (
 	bridle "github.com/CarriedWorldUniverse/bridle"
 )
 
-// defaultPolicy is the Manager's zero-config approval policy: every known
-// kind Classify can actually emit from the fs/exec surface (exec, patch,
-// escalation, mcp_tool) resolves to contracts.PolicyPrompt — i.e. ask,
-// absent a prior scoped allow (approval.Decide's PolicyPrompt case) —
-// EXCEPT KindRead (NEX-782), which resolves to contracts.PolicyAuto: a
-// coding agent must not prompt for approval on every read_file/list_dir/
-// glob/grep call. This does not weaken the envelope — read-only fs tools
-// are still containment-bounded and protected-dir-excluded in the fs
-// family itself (fs.go), unconditionally, regardless of the approval
-// outcome; auto-allowing KindRead only skips the approval PROMPT.
+// defaultPolicy is the Manager's zero-config approval policy — SANDBOX-
+// FIRST (operator decree): everything the classifier proves stays inside
+// the working-dir subtree auto-runs, everything that leaves it prompts.
+// Concretely:
+//   - KindRead auto (NEX-782, unchanged): reads are containment-bounded
+//     in the fs family regardless.
+//   - KindPatch auto: Classify only emits patch for writes INSIDE the
+//     writable roots and outside protected dirs — an outside/protected
+//     write is already KindEscalation, which prompts.
+//   - KindExec auto: Classify emits exec ONLY for commands whose named
+//     paths stay inside the sandbox (classify.go's
+//     commandNamesOutsidePath); a command naming an outside path (or ~,
+//     or an AddDir — added folders are reachable, not implicitly
+//     trusted) classifies as KindEscalation and prompts.
+//   - Everything that leaves the sandbox — escalation, mcp_tool (network
+//     side effects), question/plan — stays PolicyPrompt.
 //
-// This is deliberately built explicitly rather than reused from
-// contracts.BuiltinPresets()[contracts.PresetPrompt]: that preset sets
-// KindPatch to contracts.PolicyAuto (writes-inside-wd are "the sandbox's
-// job" per its own doc comment), but the brief's cited spec text for the
-// dev profile is "exec/patch/escalation → Ask" — nothing else auto-runs by
-// default in this unit. A future profile-config unit (U-C4/U-E2) is where
-// BuiltinPresets()/a real dev-profile PolicySet gets wired in; until then,
-// fail-closed-to-ask for every kind but read is the only zero-config
-// choice that can't silently auto-execute a write or a shell command.
+// The enforcement story is unchanged: this only decides PROMPTING. The
+// fs family's containment and the exec family's cwd remain hard bounds
+// whatever this table says; the exec heuristic is conservative (a false
+// positive prompts — recoverable; it cannot false-negative a write, and
+// an exec that touches outside without naming a path still runs inside
+// the sandbox cwd with roots-contained fs tools).
 //
 // KindQuestion and KindPlan are included for completeness (approval.Decide
-// reads the PolicySet for them too) even though Classify's fs/exec surface
-// never emits either — plan/question special-casing is explicitly OUT of
-// this unit's scope (no plan/question tools exist on this surface yet; see
-// doc.go). KindGate is omitted: approval.Decide always routes it to Ask
-// regardless of the PolicySet (spec: gate is preset-ungoverned).
+// reads the PolicySet for them too). KindGate is omitted: approval.Decide
+// always routes it to Ask regardless of the PolicySet (spec: gate is
+// preset-ungoverned).
 func defaultPolicy() contracts.PolicySet {
 	return contracts.PolicySet{
-		contracts.KindExec:       contracts.PolicyPrompt,
-		contracts.KindPatch:      contracts.PolicyPrompt,
+		contracts.KindExec:       contracts.PolicyAuto,
+		contracts.KindPatch:      contracts.PolicyAuto,
 		contracts.KindEscalation: contracts.PolicyPrompt,
 		contracts.KindMCPTool:    contracts.PolicyPrompt,
 		contracts.KindQuestion:   contracts.PolicyPrompt,
@@ -53,7 +55,8 @@ func defaultPolicy() contracts.PolicySet {
 }
 
 // WithPolicy overrides the Manager's approval.Decide policy set. Unset (the
-// default) is defaultPolicy() — ask on every known kind, nothing auto-runs.
+// default) is defaultPolicy() — sandbox-auto: in-sandbox exec/patch/read
+// run, anything classified outside the sandbox asks.
 func WithPolicy(p contracts.PolicySet) Option { return func(m *Manager) { m.policy = p } }
 
 // WithScopeStore overrides the Manager's approval.ScopeStore. Unset (the
@@ -326,6 +329,17 @@ func (m *Manager) beforeToolCall(ctx context.Context, c bridle.BeforeToolCallCtx
 		}
 	}
 
+	// NEX-825: record the decision. Spec §4 invariant 3 ("every decision is
+	// recorded with its stage + actor") and bridge.go's own "Callers MUST
+	// emit an audit line" were both unmet — approval.NewAuditLine had ZERO
+	// call sites, so nothing durable said who allowed what. Auto-decisions
+	// are recorded here; an ActionAsk is recorded after the operator answers
+	// (see the waiter below), so the line carries the REAL outcome rather
+	// than "we asked".
+	if res.Action != approval.ActionAsk {
+		m.persistApprovalAudit(c.Call.ID, res)
+	}
+
 	switch res.Action {
 	case approval.ActionAllow:
 		return c, bridle.HookContinue, nil
@@ -368,6 +382,16 @@ func scopeKeyFor(kind contracts.ApprovalKind, payload any) string {
 	}
 	ep, ok := payload.(toolrunner.ExecPayload)
 	if !ok {
+		return ""
+	}
+	// SECURITY (review 2026-07-25): a key is only meaningful if the program
+	// name BOUNDS what runs. exec goes through /bin/sh -c, so a command
+	// carrying shell metacharacters does not — `git status; curl x|sh` has
+	// first field "git" and would otherwise reuse a grant made for a plain
+	// `git status`. Refuse to derive a key at all in that case: an empty key
+	// makes Grant fail (ErrScopeKeyEmpty), so the call falls back to asking
+	// again — the safe direction.
+	if strings.ContainsAny(ep.Command, ";&|<>`$(){}\n") {
 		return ""
 	}
 	fields := strings.Fields(ep.Command)
@@ -463,9 +487,17 @@ func (m *Manager) askAndWait(turnCtx context.Context, htc *turnHookCtx, c bridle
 		}
 		if out.Decision == contracts.DecisionAllow {
 			m.recordScopeGrant(kind, out.Scope, scopeKey)
+			m.persistApprovalAudit(c.Call.ID, approval.Result{
+				Kind: kind, Action: approval.ActionAllow, Scope: out.Scope,
+				Stage: contracts.StageApprover, By: answeringIdentity,
+			})
 			c.Deny = false
 			return c, bridle.HookContinue, nil
 		}
+		m.persistApprovalAudit(c.Call.ID, approval.Result{
+			Kind: kind, Action: approval.ActionDeny,
+			Stage: contracts.StageApprover, By: answeringIdentity, Message: out.Message,
+		})
 		// DecisionDeny, or anything else a malformed/forged response
 		// might carry — fail closed to deny (Decide's own "the safe side
 		// is always chosen when resolution is ambiguous" convention).
@@ -509,5 +541,37 @@ func (m *Manager) recordScopeGrant(kind contracts.ApprovalKind, scope contracts.
 	default: // ScopeOnce, "", or anything unrecognized: nothing to persist.
 		return
 	}
-	_ = m.scopeStore.Grant(approval.ScopeAllow{Kind: kind, Scope: scope, Key: key, By: "approver"})
+	_ = m.scopeStore.Grant(approval.ScopeAllow{Kind: kind, Scope: scope, Key: key, ScopeKey: scopeKey, By: "approver"})
+}
+
+// persistApprovalAudit records one resolved approval decision as a durable
+// thread item (NEX-825). Spec §4 invariant 3 requires every decision to be
+// recorded with its stage and actor, and internal/hooks/bridge.go states
+// callers MUST emit an audit line for the PermissionRequest bypass — yet
+// approval.NewAuditLine had no call sites at all, so no durable record of
+// any decision existed. The AuditLine JSON is the item payload, so the
+// on-disk shape is exactly the structured record the approval package
+// already defines rather than a second, drifting one.
+//
+// Best-effort, like persistTurn: a store hiccup must never fail the tool
+// call the operator just decided on — the decision itself already happened.
+func (m *Manager) persistApprovalAudit(callID string, res approval.Result) {
+	if m.store == nil {
+		return
+	}
+	line := approval.NewAuditLine(callID, res)
+	payload, err := json.Marshal(line)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "turnengine: marshal approval audit for %s: %v\n", callID, err)
+		return
+	}
+	item := contracts.ThreadItem{
+		TS:       m.now(),
+		Type:     contracts.TIApprovalDecision,
+		Identity: answeringIdentity,
+		Payload:  json.RawMessage(payload),
+	}
+	if err := m.store.Append(m.threadID, []contracts.ThreadItem{item}); err != nil {
+		fmt.Fprintf(os.Stderr, "turnengine: persist approval audit for %s: %v\n", callID, err)
+	}
 }

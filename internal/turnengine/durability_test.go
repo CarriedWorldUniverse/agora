@@ -180,6 +180,13 @@ func TestManager_Persist_UserToolAgent_Order(t *testing.T) {
 		if !ok {
 			break
 		}
+		// NEX-825: approval decisions are appended when the DECISION happens
+		// (mid-turn), not with the turn batch — this test is about the turn
+		// batch's shape, so skip them. Their own coverage is in
+		// TestManager_ApprovalDecisionIsAudited.
+		if item.Type == contracts.TIApprovalDecision {
+			continue
+		}
 		items = append(items, item)
 	}
 	if err := it.Err(); err != nil {
@@ -251,6 +258,11 @@ func TestManager_Persist_UserToolAgent_Order(t *testing.T) {
 		if !ok {
 			break
 		}
+		// NEX-825: same filter as above — approval decisions are appended at
+		// decision time, not with the turn batch.
+		if item.Type == contracts.TIApprovalDecision {
+			continue
+		}
 		items2 = append(items2, item)
 	}
 	if err := it2.Close(); err != nil {
@@ -302,6 +314,13 @@ func TestManager_Persist_NoFinalText_NoAgentMessage(t *testing.T) {
 		item, ok := it.Next()
 		if !ok {
 			break
+		}
+		// NEX-825: approval decisions are appended when the DECISION happens
+		// (mid-turn), not with the turn batch — this test is about the turn
+		// batch's shape, so skip them. Their own coverage is in
+		// TestManager_ApprovalDecisionIsAudited.
+		if item.Type == contracts.TIApprovalDecision {
+			continue
 		}
 		items = append(items, item)
 	}

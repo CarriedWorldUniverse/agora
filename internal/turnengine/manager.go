@@ -109,6 +109,11 @@ type Manager struct {
 	// against this doc comment's advice).
 	subagents *subagent.Manager
 
+	// mcpSource folds configured MCP servers' tools into the surface
+	// (WithMCPSource) — nil (default) means no MCP, matching NewSurface's
+	// own "no MCP servers configured" no-op contract.
+	mcpSource toolrunner.MCPSource
+
 	// U-C3: the BeforeToolCall approval gate. policy/scopeStore feed
 	// approval.Decide (reused verbatim); hookMu/hookTurn and waiterMu/
 	// waiters are the two pieces of cross-goroutine state the gate's
@@ -327,6 +332,13 @@ func WithRoots(roots toolrunner.Roots) Option { return func(m *Manager) { m.root
 // built to back) never sets this Option on a CHILD Manager it constructs.
 func WithSubagents(mgr *subagent.Manager) Option { return func(m *Manager) { m.subagents = mgr } }
 
+// WithMCPSource folds a configured MCP tool source into the turn surface —
+// its tools appear as mcp__<server>__<tool> and route through it on a
+// call. Nil (default, unset) means no MCP, unchanged behavior.
+func WithMCPSource(src toolrunner.MCPSource) Option {
+	return func(m *Manager) { m.mcpSource = src }
+}
+
 // WithStore gives the Manager a contracts.ThreadStore for durability
 // (U-C6/U-C7): each turn's ThreadItems are Appended at the turn boundary
 // (see runOneTurn's persistTurn call), and the FIRST turn's Session.New
@@ -452,11 +464,24 @@ func NewManager(threadID string, provider bridle.Provider, opts ...Option) *Mana
 		toolrunner.NewExecFamily(m.roots),
 		toolrunner.NewMemoryFamily(defaultMemoryDir()),
 		toolrunner.NewPlanningFamily(),
+		// web_fetch: network reads. Gated as KindExec (see Classify) and
+		// independently SSRF-guarded inside the family, so an approved
+		// fetch can still only reach a public address.
+		toolrunner.NewWebFamily(),
+		// task.write/task.read: the model's running task list for
+		// multi-step work. One family per Manager, so the list is
+		// per-thread and lives exactly as long as the session does.
+		toolrunner.NewTaskFamily(),
 	}
 	if m.subagents != nil {
 		families = append(families, toolrunner.NewAgentFamily(m.subagents, m.threadID))
 	}
-	m.surface = toolrunner.NewSurface(nil, families...)
+	m.surface = toolrunner.NewSurface(m.mcpSource, families...)
+
+	// Hooks are told the approval posture actually in force. DiscoverHooks
+	// builds the runner before any Manager exists, so the policy can only
+	// be handed over here, once opts have resolved it.
+	m.hookRunner.setPermissionMode(permissionModeName(m.policy))
 
 	// Planning/questions (agora-spec-planning-questions.md) need somewhere
 	// to persist thread items even on a Manager built with no durability
@@ -645,6 +670,23 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 	if m.detach != nil {
 		defer m.detach()
 	}
+	// Same one-thread-lifetime-scope rationale as m.detach above (fix for
+	// adversarial review of PR #94, finding 3): an MCP source's servers are
+	// subprocesses tied to THIS Manager's construction — nothing else in
+	// either lane (TUI/pipe's newInProcessManager, or the daemon's
+	// per-thread EngineFactory) has a hook to tear them down, and Run is
+	// the one call both lanes already drive to completion. Type-asserted
+	// (toolrunner.MCPSource has no Close in its own contract — only the
+	// production *mcp.Source does) so a test fake with no Close is a no-op.
+	if closer, ok := m.mcpSource.(interface{ Close() }); ok {
+		defer closer.Close()
+	}
+	// Same one-thread-lifetime-scope rationale again: a background job
+	// (run_background) is a subprocess with NO deadline of its own by
+	// design (it runs until bg.kill or session end) — without this, it
+	// would survive past the Manager that started it, exactly the MCP
+	// subprocess leak above but for the exec family's own jobs.
+	defer m.surface.Close()
 	// Alt-provider harnesses (built lazily by harnessFor for /model entries that
 	// route to a non-default provider) share m.eng but each Attach'd their own
 	// ctxmap hooks — detach them here too so no extraction hooks outlive Run.
@@ -696,6 +738,39 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 		}
 	}
 
+	// finishInFlight waits for an in-flight turn to COMPLETE on its own
+	// and forwards its terminal event. Unlike stopInFlight it does not
+	// cancel the turn.
+	//
+	// This is the "input stream ended" path (the `in` channel closing),
+	// which is NOT the same thing as being told to stop: closing an input
+	// channel means "no more input is coming", while contracts.InEnd is
+	// the explicit stop-now request. Treating the two identically is what
+	// made the documented `echo "fix the test" | agora pipe` shape
+	// impossible (#118) — stdin hits EOF microseconds after the single
+	// message is delivered, so the turn was cancelled long before a real
+	// provider could answer, and every such run reported turn.failed
+	// {interrupted:true} with no output.
+	//
+	// A cancelled ctx still cuts it short: a caller shutting down (SIGINT,
+	// a daemon stopping) has genuinely asked to abandon the work, and
+	// waiting out a slow turn there would hang shutdown.
+	finishInFlight := func() {
+		if turnCancel == nil {
+			return
+		}
+		select {
+		case ev := <-turnDone:
+			forward(ev)
+		case <-ctx.Done():
+			turnCancel()
+			forward(<-turnDone)
+		}
+		turnCancel() // idempotent; releases turnCtx's registration in ctx
+		turnCancel, turnDone = nil, nil
+		m.setHookTurn(nil)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -723,7 +798,10 @@ func (m *Manager) Run(ctx context.Context, in <-chan contracts.Input, out chan<-
 
 		case input, ok := <-in:
 			if !ok {
-				stopInFlight()
+				// Input stream ended (EOF), not an explicit stop — let an
+				// in-flight turn finish rather than killing it. See
+				// finishInFlight.
+				finishInFlight()
 				return nil
 			}
 			switch input.Type {
@@ -1081,6 +1159,13 @@ func (m *Manager) runOneTurn(sendCtx, turnCtx context.Context, turnID string, in
 	// Tools, not MCP (blueprint: claudesdk SupportsMCP=false).
 	toolSpecs, err := m.surface.Specs(turnCtx)
 	if err != nil {
+		// Newly reachable in production since WithMCPSource (adversarial
+		// review of PR #94): a required MCP server failing to start makes
+		// this branch live. Emit the real reason before the terminal event
+		// — same two-step pattern as the provider-build error just below —
+		// so a misconfigured/unreachable required server reads as an
+		// actionable message, not a bare "turn failed".
+		emit(contracts.Event{Type: contracts.EvError, Payload: mustMarshal(errorPayload{Message: err.Error()})})
 		terminal(contracts.Event{
 			Type:    contracts.EvTurnFailed,
 			Payload: mustMarshal(turnFailedPayload{Interrupted: false}),

@@ -52,6 +52,26 @@ type Config struct {
 	// []ServerInfo, keeping internal/tui free of an mcp dependency).
 	// Nil = not wired on this connection.
 	ListServers func() ([]ServerInfo, error)
+	// ListPermissions feeds /permissions: the approval grants saved across
+	// sessions for this project (cmd/agora adapts the approval package's
+	// FileScopeStore, keeping internal/tui free of an approval dependency).
+	// Nil = not wired on this connection.
+	ListPermissions func() ([]PermissionInfo, error)
+	// ListHooks feeds /hooks: the lifecycle hooks discovered for this
+	// session with their resolved trust state. nil = the connection cannot
+	// report them (the verb says so rather than implying "none").
+	ListHooks func() ([]HookInfo, error)
+	// RevokePermission removes a saved grant, reporting whether one
+	// matched. Nil = revoking not available on this connection.
+	RevokePermission func(kind, scope, key string) (bool, error)
+	// PermissionMode is the approval posture this session resolved to, for
+	// /mode and /status. "" = the engine's own default. Supplied by
+	// cmd/agora from the same resolver the engine uses, so what the
+	// operator is told matches what is enforced.
+	PermissionMode string
+	// ModeCatalog lists selectable modes as (name, description) pairs for
+	// /mode's output. Nil = not wired.
+	ModeCatalog func() [][2]string
 }
 
 // ThreadLister is the OPTIONAL backend seam behind `/resume` (NEX-798): list
@@ -141,6 +161,14 @@ type Model struct {
 	sessCost                               float64
 	haveUsage                              bool
 	turnModelID                            string
+
+	// Most recent claude.ai plan-usage reading (rate_limit event), for
+	// /status and /usage. Provider-specific — stays haveRateLimit=false
+	// for the whole session on any provider that never sends one (API
+	// key, Bedrock, Vertex), which the reader must treat as "not
+	// applicable", not "0% used".
+	rateLimit     contracts.RateLimit
+	haveRateLimit bool
 
 	// lastAgentMessage is the most recently FINALIZED agent reply's raw text
 	// (markdown, as streamed) — the source `/copy` puts on the clipboard.
@@ -372,6 +400,21 @@ func (m *Model) usageSegment() string {
 		seg += " · " + fmtUSD(m.sessCost)
 	}
 	return seg
+}
+
+// recordRateLimit replaces the cached plan-usage reading with an
+// EvRateLimit payload. Unlike recordUsage this is a REPLACE, not an
+// accumulation: the event already carries the provider's own current
+// utilization for its window, not a per-turn delta to sum.
+func (m *Model) recordRateLimit(payload []byte) {
+	var p struct {
+		RateLimit *contracts.RateLimit `json:"rate_limit"`
+	}
+	if json.Unmarshal(payload, &p) != nil || p.RateLimit == nil {
+		return
+	}
+	m.rateLimit = *p.RateLimit
+	m.haveRateLimit = true
 }
 
 // recordUsage folds one turn.completed usage payload into the session totals.
@@ -609,6 +652,8 @@ func (m *Model) handleEvent(ev contracts.Event) []tea.Cmd {
 		for _, line := range m.stream.Commit() {
 			cmds = append(cmds, m.cfg.Printer(line))
 		}
+	case contracts.EvRateLimit:
+		m.recordRateLimit(ev.Payload)
 	case contracts.EvTurnCompleted, contracts.EvTurnFailed:
 		if ev.Type == contracts.EvTurnCompleted {
 			m.recordUsage(ev.Payload)

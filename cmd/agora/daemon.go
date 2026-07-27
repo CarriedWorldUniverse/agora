@@ -36,7 +36,9 @@ func runDaemon(args []string) {
 	fs := flag.NewFlagSet("agora daemon", flag.ExitOnError)
 	socketPath := fs.String("socket", defaultSocketPath(), "unix socket to serve the session protocol on")
 	httpAddr := fs.String("http", "", "http address to serve the session-protocol websocket on at /ws (empty disables it)")
+	applyMode := registerModeFlag(fs)
 	_ = fs.Parse(args)
+	applyMode()
 
 	if err := os.MkdirAll(filepath.Dir(*socketPath), 0o700); err != nil {
 		fmt.Fprintf(os.Stderr, "agora daemon: mkdir socket dir: %v\n", err)

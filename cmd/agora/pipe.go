@@ -31,7 +31,17 @@ func runPipe(args []string) {
 	deltas := fs.Bool("deltas", false, "emit item.agent_message.delta streaming-text events (off by default per §1)")
 	lenient := fs.Bool("lenient", false, "accept a non-JSON stdin line as a user_message's text")
 	filter := fs.String("filter", "", `output filter: "" (all events) | "agent_message" (final agent-message items only) | "text" (bare text lines, no JSON envelope)`)
+	model := fs.String("model", "", "model to run this pipe on: a models.json registry key (e.g. \"kimi\") or a raw model id (overrides default_model in .agora/config.json)")
+	applyMode := registerModeFlag(fs)
 	_ = fs.Parse(args)
+	applyMode()
+
+	// Resolve the model/provider for this run. Without this, pipe never
+	// set Input.Model or Input.Provider at all, so every headless turn
+	// went to the engine's built-in provider regardless of models.json —
+	// see model.go.
+	wd := mustGetwd()
+	modelID, providerSpec := resolveModelSpec(resolveModel(*model, wd), wd)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -43,9 +53,11 @@ func runPipe(args []string) {
 	}()
 
 	code, err := runPipeWithProvider(ctx, *threadID, claudesdk.New(), os.Stdin, os.Stdout, os.Stderr, agoraio.PipeOptions{
-		Deltas:  *deltas,
-		Lenient: *lenient,
-		Filter:  agoraio.Filter(*filter),
+		Deltas:          *deltas,
+		Lenient:         *lenient,
+		Filter:          agoraio.Filter(*filter),
+		DefaultModel:    modelID,
+		DefaultProvider: providerSpec,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "agora pipe: %v\n", err)

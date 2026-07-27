@@ -19,8 +19,10 @@ import (
 	bridle "github.com/CarriedWorldUniverse/bridle"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
+	"github.com/CarriedWorldUniverse/agora/internal/approval"
 	"github.com/CarriedWorldUniverse/agora/internal/daemon"
 	agoraio "github.com/CarriedWorldUniverse/agora/internal/io"
+	"github.com/CarriedWorldUniverse/agora/internal/skills"
 	"github.com/CarriedWorldUniverse/agora/internal/subagent"
 	"github.com/CarriedWorldUniverse/agora/internal/subagent/enginerunner"
 	"github.com/CarriedWorldUniverse/agora/internal/toolrunner"
@@ -51,11 +53,50 @@ func newTurnEngineManager(threadID string, provider bridle.Provider, store contr
 	// default rather than just the TUI. "" (no config anywhere) leaves
 	// Manager's own contracts.EffortHigh fallback in place.
 	defaultEffort := turnengine.LoadDefaultEffort(userHomeOrDot(), roots.WorkingDir)
-	return turnengine.NewManager(threadID, provider,
+	// Approval posture (approvals spec §2): permission_mode from the same
+	// config.json, overridable per-process by -mode (which permissionMode
+	// carries when set). Resolved in this shared seam so the TUI, pipe and
+	// daemon lanes all run the SAME posture — before this, nothing in
+	// cmd/agora ever passed WithPolicy, so every lane silently ran
+	// sandbox-auto no matter what the operator wanted.
+	mode := resolvePermissionMode(roots.WorkingDir)
+	// Custom subagent types (subagents spec §1): discover .agora/agents/*.md
+	// (plus the .claude/agents compat lane), project layer before user. Same
+	// shared seam again, so every lane sees the same agent types. Passing
+	// nil here — which is what this call site did before — meant ONLY the
+	// two builtins ever existed and every operator-authored agent def on
+	// disk was silently unreachable. Warnings are non-fatal: one typo'd def
+	// must not stop a session starting.
+	// One project-root resolution shared by everything below that needs it
+	// (agent-def discovery, the durable scope store), so those two can never
+	// disagree about which project a session belongs to.
+	projectRoot := skills.FindProjectRoot(roots.WorkingDir, nil)
+	agentDefs, agentWarnings := subagent.DiscoverAgentDefs(
+		subagent.DefaultAgentRoots(projectRoot, userHomeOrDot()))
+	for _, w := range agentWarnings {
+		fmt.Fprintf(os.Stderr, "agora: agent def %s: %s\n", w.Path, w.Message)
+	}
+	// Durable approvals (approvals spec §1): allow-always grants live in
+	// ~/.agora/permissions.json, bucketed by project root, so a grant the
+	// operator gave last session is still in force this session instead of
+	// re-prompting for the same safe command every time. Deliberately the
+	// USER's directory, never the project's — a project-layer permissions
+	// file would let a cloned repo ship its own pre-granted command
+	// prefixes. A missing file is the normal first run; a corrupt one warns
+	// and degrades to no-saved-grants rather than blocking the session.
+	scopeStore, scopeWarn := approval.OpenFileScopeStore(
+		filepath.Join(userHomeOrDot(), ".agora", "permissions.json"), projectRoot)
+	if scopeWarn != nil {
+		fmt.Fprintf(os.Stderr, "agora: %v\n", scopeWarn)
+	}
+	opts := []turnengine.Option{
 		turnengine.WithRoots(roots),
 		turnengine.WithStore(store),
 		turnengine.WithDefaultEffort(defaultEffort),
+		turnengine.WithScopeStore(scopeStore),
 		// Interactive sessions distill each turn into durable facts using the
+		// active model itself (ctxmap fact extraction) — off by default in the
+		// engine, on here, for every lane that runs a real turn.
 		// active model itself (ctxmap fact extraction) — off by default in the
 		// engine, on here, for every lane that runs a real turn.
 		turnengine.WithContextExtraction(true),
@@ -63,9 +104,23 @@ func newTurnEngineManager(threadID string, provider bridle.Provider, store contr
 		// agent() delegation (subagents spec §2): the PARENT Manager gets the
 		// tool; enginerunner never re-wires it onto children (structural
 		// depth guard — see turnengine.Manager.subagents' doc comment).
-		turnengine.WithSubagents(subagent.NewManager(store, graph, subagent.NewRegistry(nil),
+		turnengine.WithSubagents(subagent.NewManager(store, graph, subagent.NewRegistry(agentDefs),
 			enginerunner.New(provider, store))),
-	)
+	}
+	// Apply the resolved approval posture LAST among the policy-bearing
+	// options, so an explicit -mode/config choice wins over anything the
+	// base profile set. An unknown name never reaches here — main.go
+	// validates and exits — so this cannot silently loosen the posture.
+	if mode != "" {
+		opts = append(opts, turnengine.WithPermissionMode(mode))
+	}
+	// MCP (§1 spec): fold this working dir's .mcp.json servers, identity-
+	// interpolated, into the surface — same shared seam as hooks/effort so
+	// every lane (TUI, pipe, daemon) gets the same servers, not just one.
+	if src := buildMCPSource(roots.WorkingDir); src != nil {
+		opts = append(opts, turnengine.WithMCPSource(src))
+	}
+	return turnengine.NewManager(threadID, provider, opts...)
 }
 
 // openAgentGraph opens the ONE process-wide agent-graph store every engine
@@ -157,4 +212,27 @@ type errEngine struct{ err error }
 func (e errEngine) Run(_ context.Context, _ <-chan contracts.Input, out chan<- contracts.Event) error {
 	close(out)
 	return e.err
+}
+
+// permissionModeOverride carries the -mode flag's value to
+// newTurnEngineManager. A package-level variable rather than a parameter
+// because every lane reaches the shared seam through a different call
+// chain (EngineFactory's signature is fixed by daemon.EngineFactory, and
+// newInProcessManager is called from three places) — threading it through
+// all of them would touch far more code than the one value warrants. It is
+// written exactly once, during flag parsing in main, before any engine is
+// constructed, and read-only thereafter.
+var permissionModeOverride string
+
+// resolvePermissionMode is the ONE place the session's approval posture is
+// decided: the -mode flag if given, else permission_mode from
+// .agora/config.json (project over user), else "" meaning the engine's own
+// default. Both the engine seam and the TUI's /mode call this, so what the
+// operator is TOLD they are running and what they are actually running
+// cannot drift.
+func resolvePermissionMode(workingDir string) string {
+	if permissionModeOverride != "" {
+		return permissionModeOverride
+	}
+	return turnengine.LoadPermissionMode(userHomeOrDot(), workingDir)
 }

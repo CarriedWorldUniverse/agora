@@ -77,8 +77,13 @@ func TestSubmitComposer_UnknownSlash_Contained(t *testing.T) {
 	if len(printed) != 1 || !strings.Contains(printed[0], "unknown command: /modek") {
 		t.Fatalf("printed = %v; want a local unknown-command error", printed)
 	}
-	if !strings.Contains(printed[0], "did you mean /model?") {
-		t.Fatalf("printed = %q; want a nearest-match suggestion for /model", printed[0])
+	// "/modek" is distance 1 from BOTH /mode and /model, so the suggestion
+	// is decided by nearestCommand's alphabetical tie-break — /mode. Pinned
+	// deliberately: before /mode existed this asserted /model, and the
+	// change is a genuine consequence of adding a near-identical verb, not
+	// a regression in the matcher.
+	if !strings.Contains(printed[0], "did you mean /mode?") {
+		t.Fatalf("printed = %q; want a nearest-match suggestion", printed[0])
 	}
 }
 
@@ -615,5 +620,60 @@ func TestSlashCompact_SendsConfigInput(t *testing.T) {
 	runCmd(m.submitComposer())
 	if len(backend.Sent) != 1 {
 		t.Fatalf("/compact while running must not send; Sent = %+v", backend.Sent)
+	}
+}
+
+// NEX-825 follow-up: /hooks must show WHY a discovered hook is inert and
+// hand over the exact hooks-state.json entry that would allow it. Trust is
+// fail-closed and, before this verb, entirely invisible in the TUI — the
+// stderr warning is swallowed by the alt-screen.
+func TestSlashHooks_ShowsTrustStateAndTheEntryToAdd(t *testing.T) {
+	m := testModelWithRegistry(newFakeBackend(), testRegistry())
+	m.cfg.ListHooks = func() ([]HookInfo, error) {
+		return []HookInfo{
+			{Event: "PreToolUse", Key: "/p/.agora:PreToolUse:0:0", Command: "echo hi",
+				Trust: "Untrusted", Runnable: false, Hash: "abc123", StatePath: "/h/.agora/hooks-state.json"},
+			{Event: "Stop", Key: "/p/.agora:Stop:0:0", Command: "notify",
+				Trust: "Trusted", Runnable: true, Hash: "def456", StatePath: "/h/.agora/hooks-state.json"},
+		}, nil
+	}
+	out := strings.Join(renderHooksReport(m.cfg.ListHooks, m.cfg.Theme), "\n")
+
+	for _, want := range []string{
+		"PreToolUse", "Untrusted", "will not run", // the inert one, and why
+		"echo hi",                   // what it would have run
+		"Stop", "Trusted", "active", // the working one
+		`"/p/.agora:PreToolUse:0:0"`, "abc123", // the exact entry to add
+		"/h/.agora/hooks-state.json", // and where to add it
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("/hooks output missing %q:\n%s", want, out)
+		}
+	}
+	// A trusted hook must NOT be listed as needing an entry.
+	if strings.Contains(out, "def456") {
+		t.Errorf("/hooks offered a trust entry for an already-trusted hook:\n%s", out)
+	}
+}
+
+// No hooks anywhere is the common case and must read as such, not as an error.
+func TestSlashHooks_NoneDiscovered(t *testing.T) {
+	m := testModelWithRegistry(newFakeBackend(), testRegistry())
+	m.cfg.ListHooks = func() ([]HookInfo, error) { return nil, nil }
+	out := strings.Join(renderHooksReport(m.cfg.ListHooks, m.cfg.Theme), "\n")
+	if !strings.Contains(out, "none discovered") {
+		t.Errorf("want a plain none-discovered line, got:\n%s", out)
+	}
+}
+
+// /hooks is local-only: it must never reach the model.
+func TestSlashHooks_NeverSendsToBackend(t *testing.T) {
+	backend := newFakeBackend()
+	m := testModelWithRegistry(backend, testRegistry())
+	m.cfg.ListHooks = func() ([]HookInfo, error) { return nil, nil }
+	m.composer.SetValue("/hooks")
+	runCmd(m.submitComposer())
+	if len(backend.Sent) != 0 {
+		t.Fatalf("/hooks sent %d message(s) to the backend; want 0", len(backend.Sent))
 	}
 }
