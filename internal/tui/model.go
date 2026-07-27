@@ -131,6 +131,12 @@ type Model struct {
 
 	statusErr string
 
+	// statusNote is a non-terminal warning (EvWarning). It renders in the
+	// idle status row BELOW statusErr's precedence: a real error must never
+	// be masked by a note. Cleared when the next turn starts, so a stale
+	// note from an earlier turn cannot linger and misattribute itself.
+	statusNote string
+
 	// currentModel is the model id applied to every normal user turn
 	// (submitComposer), unless a %-override on that turn wins. Set from
 	// cfg.Model if non-empty, else the registry's "sonnet" default;
@@ -358,6 +364,9 @@ func (m *Model) renderStatusRow() string {
 	if !m.running {
 		if m.statusErr != "" {
 			return m.cfg.Theme.Danger.Render("error: " + m.statusErr)
+		}
+		if m.statusNote != "" {
+			return m.cfg.Theme.Warning.Render("note: " + m.statusNote)
 		}
 		return m.cfg.Theme.Accent.Render(m.cfg.AgentID) + m.cfg.Theme.Muted.Render(fmt.Sprintf(" · %s%s%s · Esc to quit", m.currentModel, m.effortSegment(), m.usageSegment()))
 	}
@@ -620,6 +629,9 @@ func (m *Model) handleEvent(ev contracts.Event) []tea.Cmd {
 	case contracts.EvThreadStarted:
 		cmds = append(cmds, m.cfg.Printer(Cell{Kind: CellSessionHeader, AgentID: m.cfg.AgentID, Model: m.cfg.Model}.Render(m.width, m.cfg.Theme)[0]))
 	case contracts.EvTurnStarted:
+		// A note describes the turn that produced it; carrying one into the
+		// next turn would misattribute it.
+		m.statusNote = ""
 		// Finalize/flush a prior non-nil stream before replacing it — a
 		// double EvTurnStarted (e.g. a retried/duplicated event) must not
 		// silently drop a buffered tail that was never committed.
@@ -769,6 +781,10 @@ func (m *Model) handleEvent(ev contracts.Event) []tea.Cmd {
 		}
 		_ = json.Unmarshal(ev.Payload, &p)
 		m.statusErr = p.Message
+	case contracts.EvWarning:
+		var p contracts.WarningPayload
+		_ = json.Unmarshal(ev.Payload, &p)
+		m.statusNote = p.Message
 	}
 	return cmds
 }
