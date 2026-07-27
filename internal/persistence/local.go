@@ -160,12 +160,9 @@ func (s *LocalStore) Append(threadID string, items []contracts.ThreadItem) error
 
 	toWrite := make([]contracts.ThreadItem, len(items))
 	copy(toWrite, items)
-	next := r.LastSeq
 	updatedAt := r.UpdatedAt
 	var wdPtr, rootPtr *string
 	for i := range toWrite {
-		next++
-		toWrite[i].Seq = next
 		if toWrite[i].TS.IsZero() {
 			toWrite[i].TS = time.Now().UTC()
 		}
@@ -180,7 +177,13 @@ func (s *LocalStore) Append(threadID string, items []contracts.ThreadItem) error
 		}
 	}
 
-	if err := appendItems(path, toWrite, s.cfg.Fsync); err != nil {
+	// Seq is assigned inside appendItems, from the JSONL rather than from
+	// the mirror's LastSeq — see its doc comment and agora#135. r.LastSeq is
+	// passed as a FLOOR, not as the authority: it still covers the forked
+	// case, where a child's Seq continues from ForkOf.Seq while its own file
+	// holds no items yet.
+	next, err := appendItems(path, toWrite, s.cfg.Fsync, r.LastSeq)
+	if err != nil {
 		return err
 	}
 	if err := updateThreadAfterAppend(s.db, threadID, next, updatedAt, wdPtr, rootPtr); err != nil {

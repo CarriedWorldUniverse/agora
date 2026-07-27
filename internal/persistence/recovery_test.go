@@ -216,3 +216,126 @@ func TestListOrderParity(t *testing.T) {
 		t.Fatalf("List order = %v, want th_b,th_a,th_c (updated_at desc)", localOrder)
 	}
 }
+
+// TestMirrorLagsJSONL_SeqStaysMonotonic covers the one crash window the
+// design did not previously handle (agora#135).
+//
+// Append fsyncs the JSONL and THEN updates the SQLite mirror. A crash
+// between those two steps leaves a healthy, fully-durable JSONL and a
+// mirror whose last_seq is behind it. Seq used to be allocated from the
+// mirror, so the next append minted Seq values that already existed earlier
+// in the same file — silently, with no error anywhere, corrupting the
+// monotonicity that ItemIterator's replay order and Fork's bounds check
+// both depend on.
+//
+// The crash is simulated by rolling the mirror's last_seq backwards after a
+// successful append, which is exactly the state that window leaves behind.
+func TestMirrorLagsJSONL_SeqStaysMonotonic(t *testing.T) {
+	root := t.TempDir()
+	s, err := NewLocalStore(root, Config{})
+	if err != nil {
+		t.Fatalf("NewLocalStore: %v", err)
+	}
+	now := time.Date(2026, 7, 27, 9, 0, 0, 0, time.UTC)
+	mustCreate(t, s, contracts.ThreadMeta{ThreadID: "th_lag", CreatedAt: now, IdentityFP: "agora:x", Profile: "dev", WorkingDir: "/w"})
+	if err := s.Append("th_lag", []contracts.ThreadItem{
+		{TS: now.Add(time.Second), Type: contracts.TIUserMessage, Payload: "one"},
+		{TS: now.Add(2 * time.Second), Type: contracts.TIAgentMessage, Payload: "two"},
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	// The crash: the JSONL holds seq 1 and 2, the mirror never learned.
+	if _, err := s.db.Exec(`UPDATE threads SET last_seq = 0 WHERE id = ?`, "th_lag"); err != nil {
+		t.Fatalf("roll mirror back: %v", err)
+	}
+
+	if err := s.Append("th_lag", []contracts.ThreadItem{
+		{TS: now.Add(3 * time.Second), Type: contracts.TIUserMessage, Payload: "three"},
+	}); err != nil {
+		t.Fatalf("Append after crash: %v", err)
+	}
+
+	it, err := s.Resume("th_lag")
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	var seqs []int64
+	for {
+		item, ok := it.Next()
+		if !ok {
+			break
+		}
+		seqs = append(seqs, item.Seq)
+	}
+	if err := it.Err(); err != nil {
+		t.Fatalf("iterate: %v", err)
+	}
+	if len(seqs) != 3 {
+		t.Fatalf("got %d items (seqs %v); want 3", len(seqs), seqs)
+	}
+	for i := 1; i < len(seqs); i++ {
+		if seqs[i] <= seqs[i-1] {
+			t.Fatalf("Seq not strictly increasing after a lagging mirror: %v — a duplicate Seq breaks ItemIterator replay order and Fork's bounds check (agora#135)", seqs)
+		}
+	}
+	// And the mirror must be caught up, so the NEXT append is correct too.
+	r, err := getThread(s.db, "th_lag")
+	if err != nil {
+		t.Fatalf("getThread: %v", err)
+	}
+	if r.LastSeq != seqs[len(seqs)-1] {
+		t.Errorf("mirror last_seq = %d; want %d (the file's last Seq)", r.LastSeq, seqs[len(seqs)-1])
+	}
+	_ = s.Close()
+}
+
+// TestForkedChildSeqContinuesFromParent pins the case that makes r.LastSeq
+// a necessary FLOOR rather than something Seq allocation can ignore: a
+// forked child's own file holds no items, so the file-derived last Seq is
+// 0, and only the mirror knows the fork point.
+func TestForkedChildSeqContinuesFromParent(t *testing.T) {
+	root := t.TempDir()
+	s, err := NewLocalStore(root, Config{})
+	if err != nil {
+		t.Fatalf("NewLocalStore: %v", err)
+	}
+	now := time.Date(2026, 7, 27, 9, 0, 0, 0, time.UTC)
+	mustCreate(t, s, contracts.ThreadMeta{ThreadID: "th_parent", CreatedAt: now, IdentityFP: "agora:x", Profile: "dev", WorkingDir: "/w"})
+	if err := s.Append("th_parent", []contracts.ThreadItem{
+		{TS: now.Add(time.Second), Type: contracts.TIUserMessage, Payload: "one"},
+		{TS: now.Add(2 * time.Second), Type: contracts.TIAgentMessage, Payload: "two"},
+	}); err != nil {
+		t.Fatalf("Append parent: %v", err)
+	}
+	child, err := s.Fork("th_parent", 2)
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	if err := s.Append(child.ThreadID, []contracts.ThreadItem{
+		{TS: now.Add(3 * time.Second), Type: contracts.TIUserMessage, Payload: "three"},
+	}); err != nil {
+		t.Fatalf("Append child: %v", err)
+	}
+	it, err := s.Resume(child.ThreadID)
+	if err != nil {
+		t.Fatalf("Resume child: %v", err)
+	}
+	var seqs []int64
+	for {
+		item, ok := it.Next()
+		if !ok {
+			break
+		}
+		seqs = append(seqs, item.Seq)
+	}
+	if err := it.Err(); err != nil {
+		t.Fatalf("iterate: %v", err)
+	}
+	for i := 1; i < len(seqs); i++ {
+		if seqs[i] <= seqs[i-1] {
+			t.Fatalf("forked child Seq not strictly increasing: %v", seqs)
+		}
+	}
+	_ = s.Close()
+}
