@@ -398,7 +398,102 @@ func scopeKeyFor(kind contracts.ApprovalKind, payload any) string {
 	if len(fields) == 0 {
 		return ""
 	}
+	// SECURITY (agora#137): the metacharacter check above closes the SHELL
+	// route, but "the program name BOUNDS what runs" is also false for a
+	// program that will spawn an arbitrary child when asked. Those requests
+	// carry no shell metacharacter at all, so nothing above catches them:
+	//
+	//	tar -cf /dev/null --checkpoint=1 --checkpoint-action=exec=sh -c id .
+	//
+	// has first field "tar" and would otherwise reuse a grant made for a
+	// plain `tar -cf ...`. Same shape for `git clone ext::sh -c <cmd>`,
+	// `find . -exec <cmd>`, `rsync -e <cmd>`, `ssh -o ProxyCommand=<cmd>`.
+	// Quotes are deliberately NOT metacharacters above, so such a payload
+	// can be quoted freely without tripping that check.
+	//
+	// Refuse to derive a key, exactly as for metacharacters: an empty key
+	// makes Grant fail (ErrScopeKeyEmpty) and the call falls back to asking.
+	// The operator can still approve the specific command; what they cannot
+	// do is silently widen a narrow grant into arbitrary execution.
+	if hasExecDelegatingFlag(fields) {
+		return ""
+	}
 	return fields[0]
+}
+
+// execDelegatingFlags maps a program to the argument prefixes that make it
+// run an arbitrary command of the caller's choosing.
+//
+// This is a DENYLIST, which is the weaker kind of check: it bounds a known
+// escalation class rather than proving safety, and a program not listed
+// here with the same capability still slips through. It is the right shape
+// anyway — the alternative, allowlisting safe invocations per program, is a
+// flag grammar for every binary on the system. The durable fix is the
+// parked exec sandbox (agora-spec-io.md §3a), which bounds what a spawned
+// child may do regardless of how it was spawned; until that lands this
+// removes the cheap, well-known escalations. Add entries as they are found.
+//
+// Being wrong in the ADD direction is cheap here: a false positive only
+// means the operator is asked again rather than reusing a grant.
+var execDelegatingFlags = map[string][]string{
+	"tar":     {"--checkpoint-action", "--to-command", "--use-compress-program", "-I"},
+	"git":     {"--upload-pack", "--receive-pack", "--exec-path", "-c", "ext::"},
+	"find":    {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprintf"},
+	"rsync":   {"-e", "--rsh", "--rsync-path"},
+	"ssh":     {"-o", "ProxyCommand"},
+	"scp":     {"-o", "-S"},
+	"zip":     {"-T", "-TT"},
+	"unzip":   {"-T"},
+	"sed":     {"-e", "--expression", "-f"},
+	"awk":     {"-f"},
+	"env":     {"-S"},
+	"xargs":   {"-I", "-a"},
+	"perl":    {"-e", "-E"},
+	"python":  {"-c"},
+	"python3": {"-c"},
+	"ruby":    {"-e"},
+	"node":    {"-e", "--eval"},
+	"make":    {"-f"},
+	"cmake":   {"-P"},
+	"vim":     {"-c", "+"},
+	"nvim":    {"-c", "+"},
+	"less":    {"+"},
+	"man":     {"-P"},
+	"docker":  {"run", "exec"},
+	"kubectl": {"exec", "run"},
+	// These exist to run another command; their mere presence is enough,
+	// signalled by an empty pattern.
+	"nohup": {""},
+	"watch": {""},
+}
+
+// hasExecDelegatingFlag reports whether fields[0] is a program with a known
+// arbitrary-execution flag and one of those flags is present.
+//
+// Matching is a prefix test on each argument, so both `--flag=value` and
+// `--flag value` forms are caught, and it is case-sensitive because the
+// flags are. An empty pattern means the program delegates unconditionally.
+func hasExecDelegatingFlag(fields []string) bool {
+	prog := fields[0]
+	// Judge by base name: /usr/bin/tar and tar are the same program.
+	if i := strings.LastIndexByte(prog, '/'); i >= 0 {
+		prog = prog[i+1:]
+	}
+	pats, ok := execDelegatingFlags[prog]
+	if !ok {
+		return false
+	}
+	for _, pat := range pats {
+		if pat == "" {
+			return true
+		}
+		for _, arg := range fields[1:] {
+			if strings.HasPrefix(arg, pat) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // askAndWait implements the interactive rendezvous for approval.ActionAsk:
