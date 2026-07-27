@@ -421,6 +421,31 @@ func scopeKeyFor(kind contracts.ApprovalKind, payload any) string {
 	return fields[0]
 }
 
+// wrapperPrograms run a command named in their OWN ARGUMENTS. For these the
+// head program is not the program that runs, so keying on it is meaningless
+// — `sudo tar …`, `env tar …`, `strace curl …` all key as sudo/env/strace
+// while doing whatever the wrapped command does.
+//
+// Found by adversarial review of the first version of this check
+// (agora#137): the flag denylist below asks "does THIS program have an
+// escape flag", which never fires when the escape is the program's entire
+// purpose. Refuse a key outright rather than trying to resolve through to
+// the wrapped program: resolution would have to re-apply every rule to the
+// inner command, and the operator reading "allow sudo for this session"
+// would still be agreeing to something much broader than it sounds.
+//
+// sqlite3 is here rather than in the flag table because its shell escape
+// (`.shell`, `.system`) rides in the SQL argument, not in a flag.
+var wrapperPrograms = map[string]bool{
+	"env": true, "sudo": true, "doas": true, "su": true,
+	"stdbuf": true, "setsid": true, "flock": true, "chroot": true,
+	"unshare": true, "strace": true, "ltrace": true, "script": true,
+	"ionice": true, "nice": true, "taskset": true, "time": true,
+	"timeout": true, "nohup": true, "watch": true, "xargs": true,
+	"busybox": true, "command": true, "exec": true, "eval": true,
+	"sqlite3": true, "ssh": true, "parallel": true, "runuser": true,
+}
+
 // execDelegatingFlags maps a program to the argument prefixes that make it
 // run an arbitrary command of the caller's choosing.
 //
@@ -461,10 +486,29 @@ var execDelegatingFlags = map[string][]string{
 	"man":     {"-P"},
 	"docker":  {"run", "exec"},
 	"kubectl": {"exec", "run"},
-	// These exist to run another command; their mere presence is enough,
-	// signalled by an empty pattern.
-	"nohup": {""},
-	"watch": {""},
+	// Build/package tools execute project-controlled code by design. A
+	// grant for one is a grant to run whatever the project says, which is
+	// broader than "allow go for this session" sounds — and `go test -exec`
+	// runs an arbitrary binary outright.
+	"go":     {"run", "-exec", "--exec", "generate"},
+	"cargo":  {"run", "test"},
+	"npm":    {"run", "exec", "install", "ci"},
+	"yarn":   {"run", "exec"},
+	"pnpm":   {"run", "exec"},
+	"pip":    {"install"},
+	"pip3":   {"install"},
+	"uv":     {"run", "pip"},
+	"gradle": {""},
+	"mvn":    {""},
+	// Plugin/engine loaders: the "plugin" is arbitrary native code.
+	"gcc":        {"-fplugin", "-specs", "-B", "-wrapper"},
+	"g++":        {"-fplugin", "-specs", "-B", "-wrapper"},
+	"clang":      {"-fplugin", "-specs", "-B", "-load"},
+	"cc":         {"-fplugin", "-specs", "-B", "-wrapper"},
+	"openssl":    {"-engine", "-provider"},
+	"ssh-keygen": {"-D"},
+	"jq":         {"-f", "--from-file"},
+	"gpg":        {"--photo-viewer", "--keyserver-options"},
 }
 
 // hasExecDelegatingFlag reports whether fields[0] is a program with a known
@@ -478,6 +522,9 @@ func hasExecDelegatingFlag(fields []string) bool {
 	// Judge by base name: /usr/bin/tar and tar are the same program.
 	if i := strings.LastIndexByte(prog, '/'); i >= 0 {
 		prog = prog[i+1:]
+	}
+	if wrapperPrograms[prog] {
+		return true
 	}
 	pats, ok := execDelegatingFlags[prog]
 	if !ok {

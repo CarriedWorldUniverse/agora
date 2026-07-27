@@ -443,3 +443,59 @@ func TestClassify_ExecPublicEgressStaysExec(t *testing.T) {
 		}
 	}
 }
+
+// TestClassify_ExecInternalEgress_AlternateIPEncodings is the regression for
+// the hole an adversarial review found in the first version of this check
+// (agora#136 follow-up).
+//
+// net.ParseIP accepts only the canonical dotted-quad form. inet_aton — what
+// curl/wget/nc actually resolve through — also accepts decimal, hex, octal
+// and short forms, and every one of these reaches the metadata endpoint.
+// Each string below was verified against libc's own resolver.
+func TestClassify_ExecInternalEgress_AlternateIPEncodings(t *testing.T) {
+	roots := Roots{WorkingDir: t.TempDir()}
+	encodings := []struct{ cmd, resolves string }{
+		{"curl http://2852039166/latest/meta-data/", "169.254.169.254 (decimal)"},
+		{"curl http://0xA9FEA9FE/latest/meta-data/", "169.254.169.254 (hex)"},
+		{"curl http://0251.0376.0251.0376/latest/meta-data/", "169.254.169.254 (dotted octal)"},
+		{"curl http://127.1/admin", "127.0.0.1 (2-part short form)"},
+		{"curl http://10.1/x", "10.0.0.1 (2-part short form)"},
+		{"curl http://192.168.257/x", "192.168.1.1 (3-part short form)"},
+		{"curl http://0/admin", "0.0.0.0"},
+		{"curl http://0x7f000001/x", "127.0.0.1 (hex loopback)"},
+		{"curl http://2130706433/x", "127.0.0.1 (decimal loopback)"},
+		{"curl http://169.254.169.254./latest/meta-data/", "169.254.169.254 (trailing dot)"},
+		{"wget http://[::ffff:169.254.169.254]/x", "169.254.169.254 (v4-mapped v6)"},
+	}
+	for _, tc := range encodings {
+		kind, _ := Classify(Call{Name: ToolRunCommand, Args: json.RawMessage(mustJSON(t, map[string]any{"command": tc.cmd}))}, roots)
+		if kind != contracts.KindEscalation {
+			t.Errorf("Classify(%q) = %s; want escalation — resolves to %s, so a guard that only reads the canonical form just asks the attacker to spell it differently (agora#136)", tc.cmd, kind, tc.resolves)
+		}
+	}
+}
+
+// TestParseHostIP_RejectsNonAddresses guards the other direction: the more
+// permissive parser must not start treating ordinary words, versions or
+// filenames as addresses, which would escalate half of all commands.
+func TestParseHostIP_RejectsNonAddresses(t *testing.T) {
+	notAddrs := []string{
+		"", "github.com", "api.example.com", "localhost.example.com",
+		"1.2.3.4.5", "999.1.1.1", "1.2.3.999", "-1", "0x", "1_0",
+		"v1.2.3", "file.txt", "..", "300.1",
+	}
+	for _, s := range notAddrs {
+		if ip := parseHostIP(s); ip != nil {
+			t.Errorf("parseHostIP(%q) = %v; want nil — treating this as an address would escalate ordinary commands", s, ip)
+		}
+	}
+	// And the forms that ARE addresses still parse. A trailing dot counts:
+	// it is the FQDN-root marker, and while glibc happens to refuse
+	// "169.254.169.254." today, other resolvers accept it — and erring
+	// toward "this is an address" only ever escalates more, never less.
+	for _, s := range []string{"8.8.8.8", "169.254.169.254", "::1", "2852039166", "0x08080808", "1.2.3.4."} {
+		if ip := parseHostIP(s); ip == nil {
+			t.Errorf("parseHostIP(%q) = nil; want an address", s)
+		}
+	}
+}
