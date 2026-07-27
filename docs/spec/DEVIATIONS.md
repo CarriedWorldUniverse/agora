@@ -109,6 +109,30 @@ is added to `planning`/`pod` later, these can become byte-exact. The other 4 flo
 (turn, approval, plan-gate, compaction/curation) are byte-exact.
 
 ## 3. Daemon auth defaults fail-closed (U18) — stricter than the spec implied
+
+**Revised 2026-07-27 (agora#133).** Fail-closed was right; having nothing on
+the other side was not. `cmd/agora`'s `runDaemon` never configures a
+`Registry`, so EVERY client fell to `CapObserver` and `Session.handleInput`
+refused every input needing `CapInteractive`/`CapApprover` — the shipped
+`agora daemon` could not serve a turn to anyone, including the operator who
+started it. It was silent too: `dialBackend` PREFERS a listening daemon, so
+starting one turned the TUI into a window that rendered normally and dropped
+everything typed into it.
+
+`authenticate` now takes the TRANSPORT into account. A connection arriving
+on the unix socket is granted `CapObserver+CapInteractive+CapApprover`,
+because `io.ListenUnix` chmods that socket to 0700 at creation — the kernel
+refuses any other uid's `connect()`, so the peer is necessarily the operator
+who started the daemon. That is the same trust boundary the in-process lane
+already runs at. `CapAdmin` is deliberately NOT granted: admin operations
+stay behind a real registry identity, since "is the local uid" is a weaker
+claim than it looks once anything else runs as that user. The ws lane is
+unchanged and still fails closed to `CapObserver`.
+
+Client side, the TUI now warns when its own `client.attached` reports
+capabilities that cannot send input, so a read-only attach on any lane says
+so instead of silently swallowing messages.
+
 - A **nil-`Registry` daemon grants `CapObserver` only** by default; it does NOT
   trust wire-declared `AttachRequest.Capabilities`. `Config.InsecureTrustWireCaps`
   is an explicit dev/test opt-in (loud stderr warning at `NewDaemon`). This closed

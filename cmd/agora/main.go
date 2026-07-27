@@ -184,8 +184,11 @@ func main() {
 		// then does the registry lookup (it needs the resolved entry for
 		// /model and pricing anyway, so resolving the SPEC here too would
 		// duplicate that work rather than save it).
-		Model:       resolveModel(*model, mustGetwd()),
-		ThreadID:    *threadID,
+		Model:    resolveModel(*model, mustGetwd()),
+		ThreadID: *threadID,
+		// Lets the TUI recognise its OWN client.attached event and warn if
+		// the backend granted capabilities that cannot send input.
+		ClientID:    *clientID,
 		ListServers: listMCPServers,
 		// /hooks: which lifecycle hooks were discovered and whether trust
 		// lets them fire — fail-closed trust is invisible without this.
