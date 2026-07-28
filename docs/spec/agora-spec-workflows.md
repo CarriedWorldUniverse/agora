@@ -161,7 +161,23 @@ permissions store never reach a workflow-spawned agent.
 An in-session run MUST be hosted through the same shared seam as the TUI, pipe
 and daemon lanes, so a workflow stage sees the same tool surface, hooks and
 grants the operator's own turns do. Consolidating the headless
-`agora workflow run` path onto that seam is in scope; leaving two lanes is not.
+`agora workflow run` path onto that seam is in scope; leaving two lanes is not
+(operator decision, 2026-07-27: now, not later).
+
+**Correction to the drift list above, from attempting it.** The two lanes'
+child *profiles* are already identical — both build `DevProfile()` with
+`PresetNeverEscalate`. They agree by coincidence rather than by construction:
+two call sites, no shared definition, and they HAD already drifted once (the
+never-escalate profile reached the workflow lane long before the interactive
+one — agora#152). So the consolidation's value is preventing the next drift,
+not repairing a current one.
+
+What genuinely does not reach children in EITHER lane: hooks
+(`DiscoverHooks`), MCP servers (`buildMCPSource`), and the parent's `Roots`
+(agora#160 — children fall back to the process cwd). Whether children *should*
+inherit hooks and MCP is an undecided design question, not an oversight; roots
+they clearly should. Both are properly scoped as their own work rather than
+folded into moving the constructor.
 
 ### 8.4 Thread topology and the agent graph
 
@@ -332,11 +348,10 @@ already defers this — v1 recovers a parked run by journal replay).
 1. **A live run dies with session exit** — no survive-and-reattach (§8.9).
 2. **Concurrency ceiling defaults to 5, configurable** (§8.10).
 
-**Still open:**
+3. **Consolidate the headless lane onto the shared seam NOW** (§8.3), not
+   later.
 
-3. **Whether the headless `agora workflow run` lane is consolidated onto the
-   shared seam now or later** (§8.3). Consolidating is more work and removes a
-   real drift; deferring keeps two lanes with different tool surfaces.
+**Still open:**
 4. **Does the "5" in §8.10 cap concurrent agents or total agents per run?**
    Specced as CONCURRENT, because a total cap of 5 would make most of §6's
    pattern library (adversarial verify with N skeptics, judge panels,
