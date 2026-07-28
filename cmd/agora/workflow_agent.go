@@ -1,13 +1,16 @@
 package main
 
 import (
+	"fmt"
+	"os"
+
+	bridle "github.com/CarriedWorldUniverse/bridle"
+
 	"github.com/CarriedWorldUniverse/agora/contracts"
 	"github.com/CarriedWorldUniverse/agora/internal/skills"
 	"github.com/CarriedWorldUniverse/agora/internal/subagent"
-	"github.com/CarriedWorldUniverse/agora/internal/subagent/enginerunner"
-	"github.com/CarriedWorldUniverse/agora/internal/turnengine"
+	"github.com/CarriedWorldUniverse/agora/internal/toolrunner"
 	"github.com/CarriedWorldUniverse/agora/internal/workflow"
-	bridle "github.com/CarriedWorldUniverse/bridle"
 )
 
 // buildWorkflowInvoker composes the production ctx.agent() path: a real
@@ -25,9 +28,16 @@ func buildWorkflowInvoker(store contracts.ThreadStore, provider bridle.Provider,
 	// wires for interactive agent() spawns); a headless workflow run just
 	// gives it a never-escalate profile — no interactive approver is
 	// attached, so PresetPrompt would park a child's tool call forever.
-	prof := turnengine.DevProfile()
-	prof.Policy = contracts.BuiltinPresets()[contracts.PresetNeverEscalate]
-	runner := enginerunner.New(provider, store, enginerunner.WithProfile(prof))
+	// Consolidated onto the shared child-runner constructor (spec §8.3): the
+	// same never-escalate profile and the same parent-roots threading every
+	// other lane gets, from one definition rather than a second copy that
+	// happened to agree. A malformed cwd must not fail the run — fall back to
+	// the process default, which is what this lane did anyway before #160.
+	childRoots, rerr := toolrunner.NewRoots(cwd)
+	if rerr != nil {
+		fmt.Fprintf(os.Stderr, "agora workflow: build child roots for %q: %v (children fall back to the process cwd)\n", cwd, rerr)
+	}
+	runner := newSubagentRunner(provider, store, childRoots)
 	// Custom agent types must be reachable from a workflow's ctx.agent()
 	// too, not just interactive spawns — same discovery as engine.go's
 	// seam. Warnings are dropped rather than printed here: a headless run
