@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/CarriedWorldUniverse/agora/contracts"
@@ -243,7 +244,7 @@ func composeSkillsAndAgentsFragments(wd string) string {
 	roots := skills.DefaultRoots(projectRoot, wd, home)
 	all, discoverWarns := skills.Discover(roots)
 	for _, w := range discoverWarns {
-		fmt.Fprintf(os.Stderr, "turnengine: skills discovery warning (%s): %s\n", w.Path, w.Message)
+		warnOnce("turnengine: skills discovery warning (%s): %s", w.Path, w.Message)
 	}
 	// disabledPaths: nil — the disabled-skills toggle state (§4) and
 	// SkillAllowlist role scoping are explicitly out of this unit's scope.
@@ -257,7 +258,7 @@ func composeSkillsAndAgentsFragments(wd string) string {
 		// fallback."
 		cat := skills.RenderCatalog(entries, skills.Budget(0))
 		for _, w := range cat.Warnings {
-			fmt.Fprintf(os.Stderr, "turnengine: %s\n", w)
+			warnOnce("turnengine: %s", w)
 		}
 		parts = append(parts, cat.Text)
 	}
@@ -321,4 +322,62 @@ func DevProfile() ProfileConfig {
 		Policy:     defaultPolicy(),
 		ScopeStore: approval.NewMemScopeStore(),
 	}
+}
+
+// warnOnce prints a composition warning to stderr at most once per distinct
+// message per process.
+//
+// DevProfile() runs on EVERY NewManager construction — deliberately, so a
+// Manager built with zero options is fully formed (see NewManager's option-
+// precedence doc comment) — and it composes the whole dev system prompt,
+// including skills discovery and the catalog render. So these warnings fire
+// once for the session's own Manager, again for the subagent runner's
+// profile, and again for every agent() spawn at runtime, printing the same
+// line over a live TUI each time.
+//
+// The message is a property of (skills on disk, budget), which does not vary
+// within a process, so a repeat carries no new information. Dedupe here
+// rather than at each call site: this is the one funnel every composition
+// warning already passes through.
+var (
+	warnedMu   sync.Mutex
+	warnedSeen map[string]bool
+)
+
+func warnOnce(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	warnedMu.Lock()
+	if warnedSeen == nil {
+		warnedSeen = make(map[string]bool)
+	}
+	if warnedSeen[msg] {
+		warnedMu.Unlock()
+		return
+	}
+	warnedSeen[msg] = true
+	sink := warnSink
+	warnedMu.Unlock()
+	sink(msg)
+}
+
+// warnSink is the output seam, so tests can assert on dedupe without
+// capturing the process's stderr.
+var warnSink = func(msg string) { fmt.Fprintln(os.Stderr, msg) }
+
+func swapWarnSink(f func(string)) func() {
+	warnedMu.Lock()
+	prev := warnSink
+	warnSink = f
+	warnedMu.Unlock()
+	return func() {
+		warnedMu.Lock()
+		warnSink = prev
+		warnedMu.Unlock()
+	}
+}
+
+func resetWarnOnce() {
+	warnedMu.Lock()
+	warnedSeen = nil
+	warnedMu.Unlock()
 }
