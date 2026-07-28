@@ -99,3 +99,190 @@ Maps directly onto the existing ticket-pipeline: intake → fan-out builders →
 ## 7. Sizing
 
 v1 = meta + agent/parallel/pipeline/log/phase + **per-stage model/effort routing (§2a)** + **ctx.question/ctx.approval (§2 — one pipeline implementation)** + journal/resume + named invocation + TUI progress. Defer: budget directives, nested workflow(), durable parked-run state (v1 recovers a parked run by journal-replay-and-re-ask; surviving restart as a live "waiting" object is the refinement), remote/cron triggering (nexus dispatch integration — later these become dispatchable units on the broker).
+
+## 8. In-session invocation & live progress (spec addition, 2026-07-27)
+
+§5 already names `/workflow <name>` and §3 already names "TUI renders from the
+agent-graph + run events". Neither is built: `agora workflow run|list|resume`
+exists, `ps`/`watch` do not, no slash command exists, and
+`contracts.ItemWorkflowProgress` is defined and registered in the contracts
+known-items test with **zero emitters**. This section specifies the delta,
+because the one-line §5 is not enough to implement against and the gaps are
+where the sharp decisions live.
+
+### 8.1 The invocation surface is OPERATOR-invoked, not model-callable
+
+`/workflow <name> [json-args]` in the TUI; `agora workflow run` headless. There
+is deliberately **no `workflow` tool on the model's surface**.
+
+A run may spawn up to the lifetime agent cap (1000). The operator typing the
+command IS the authorization for that, and it is a far better one than an
+approval prompt on a tool call whose blast radius the prompt cannot convey. A
+model-callable `workflow` tool would need its own approval kind, a cost
+pre-estimate the budget stub (§7 deferred) cannot yet produce, and a policy
+answer for `never-escalate` — three unsolved problems to buy a capability the
+operator can already trigger in one keystroke.
+
+Rejected alternative, recorded because it was proposed: exposing `workflow` as
+a native tool alongside `agent`. If it is ever wanted, the prerequisites are
+(a) a real `ctx.budget` so a pre-flight cost estimate exists, (b) a distinct
+`ApprovalKind` — reusing `KindExec` would inherit auto-run under `auto-safe`
+and `never-escalate`, which is the wrong default for something that can spawn
+a thousand children, and (c) a decision on whether a *subagent* may start a
+workflow (default: no — `enginerunner` already never re-wires `agent()` onto
+children as a structural depth guard; the same guard should cover workflows).
+
+### 8.2 A run is a background object. Nothing about it may block a turn
+
+§2's `ctx.question` note already establishes this — "the RUN parks
+(`waiting-on-answer` run status — runs are background objects already; no
+thread is held)". Make it a hard invariant for the in-session lane:
+
+> **Invariant W1.** `/workflow` starts a run and returns immediately. No
+> workflow operation is ever a blocking tool call in the parent turn.
+
+This is agora#152 made structural. That incident was a *foreground* `agent()`
+spawn blocking its parent's tool call with no timeout and no visible signal,
+for 30+ minutes. A workflow is strictly longer-running than a single subagent,
+so the same shape would be strictly worse. The run's lifetime is decoupled
+from the turn that started it: the turn ends, the run continues, progress
+keeps arriving on the session's event stream.
+
+### 8.3 Hosting: through the shared engine seam, not a second lane
+
+`agora workflow run` today builds its own invoker
+(`cmd/agora/workflow_agent.go`'s `buildWorkflowInvoker`) with
+`enginerunner.New(provider, store, WithProfile(prof))` — bypassing
+`newTurnEngineManager`. That is a fourth engine-construction lane and it drifts
+from the three the README describes: hooks (`DiscoverHooks`), `.mcp.json`
+servers (`buildMCPSource`), the operator's `default_effort`, and the durable
+permissions store never reach a workflow-spawned agent.
+
+An in-session run MUST be hosted through the same shared seam as the TUI, pipe
+and daemon lanes, so a workflow stage sees the same tool surface, hooks and
+grants the operator's own turns do. Consolidating the headless
+`agora workflow run` path onto that seam is in scope; leaving two lanes is not.
+
+### 8.4 Thread topology and the agent graph
+
+The run gets its own thread, registered as a **child edge of the session
+thread** in the agent graph. §2 already relies on this ("an edge in the agent
+graph — so the TUI's tree and `workflow watch` come for free"), and
+`RegisterRoot` already exists for the headless case.
+
+Consequence worth stating: because `EdgeClosed` means *"hides the subtree"*
+rather than *"finished"* (see `graph.go` — a completed child stays
+resumable-by-continuation and its edge stays open), the graph answers "what is
+the shape of this run" and NOT "what is running right now". Live state comes
+from run events, not from edge status. A display that infers "running" from an
+open edge will report every workflow the thread ever started as live.
+
+### 8.5 Progress events: wire `ItemWorkflowProgress`
+
+Reuse the item-event machinery, exactly as `agent_spawn` now does
+(agora#155/#156) — one mechanism, not a parallel notification channel.
+
+- `item.started` `workflow_progress` when the run starts:
+  `{run_id, name, phase_count, args_summary}`
+- `item.started`/`item.completed` pairs per **phase**, keyed by the phase title
+  so a phase is a group in the display:
+  `{run_id, phase, agents_started, agents_done}`
+- `ctx.log` narrator lines emit a progress item carrying `{run_id, message}`
+  rather than printing anywhere directly — headless and TUI then render the
+  same stream.
+- `item.completed` `workflow_progress` on run end:
+  `{run_id, status, agents_total, elapsed, error?}` with
+  `status ∈ running|parked|completed|failed|killed`.
+
+Per-agent rows come from the `agent_spawn` items each `ctx.agent()` already
+produces via the subagent path — the workflow layer does not re-emit them.
+
+### 8.6 Rendering
+
+- **Status row**, while any run is live: `· workflow <name> [phase 2/5] 3 agents`
+  — the same pattern as the subagent segment added in agora#156, and for the
+  same reason: scrollback is not a live view.
+- **Transcript**: phase transitions and `ctx.log` lines, so the arc is
+  readable after the fact.
+- **A parked run MUST be visibly parked.** `waiting-on-answer` in the status
+  row plus the question card. A parked run that looks identical to a busy run
+  recreates agora#152 exactly — an operator waiting on something that is
+  waiting on them.
+- `agora workflow ps|watch` render the same events headless (§5's unbuilt half).
+
+### 8.7 Questions and approvals from a run
+
+These already work, and the mechanism is what makes the in-session lane
+tractable: `QuestionRouter.Ask` goes through `planning.QuestionLog` with
+`Blocking: true`, and answers are resolved by `lookupAnswer` reading persisted
+thread items. Questions are **store-mediated, not channel-mediated**, so any
+client attached to the run's thread can answer one — no new transport.
+
+Requirement: the session's TUI must be attached to the run's thread (§8.4) for
+its cards to be answerable, and §8.6's parked indicator is not optional.
+
+### 8.8 Approval policy for run-spawned agents
+
+The `agent()` lane gives children `PresetNeverEscalate` (agora#152/#153),
+because a subagent has no approver and a policy that can ASK parks the child
+and its parent forever.
+
+A workflow run is **not** in that position: it has an operator, reachable via
+the store-mediated path above. So run-spawned agents may keep never-escalate
+for their *own* tool calls (unattended stages should not stall), while the
+*script* escalates deliberately through `ctx.approval` at phase boundaries —
+which is exactly the split §2 already describes ("workflow gates always
+surface to the operator"). Stated as a rule:
+
+> **W2.** An agent inside a stage never asks. A script asks, explicitly, via
+> `ctx.approval`/`ctx.question`, at points its author chose.
+
+This keeps the failure mode loud (a parked run, visible per §8.6) instead of
+silent (a wedged child).
+
+### 8.9 Cancellation
+
+`Esc` interrupts the **turn**, which per W1 is not the run. So the run needs
+its own kill:
+
+- `/workflow kill <run_id>` (and `agora workflow kill`), cancelling the
+  run-scoped context; §3's cancellation already propagates to in-flight
+  children.
+- `/workflow ps` to find the id.
+- On session exit a live run keeps running (it is a background object). This is
+  a deliberate choice and the risk is a runaway the operator has lost sight of,
+  so: the run list must be discoverable from a *fresh* session, which means run
+  state is on disk (§4's run dir) and not only in the process that started it.
+
+### 8.10 Cost visibility is a gate on this feature, not a nicety
+
+`ctx.budget` is a stub — `total`/`spent`/`remaining` report unbounded (#106).
+A surface that lets an operator start 1000 agents in one keystroke, with no
+running cost display, should not ship. Either the budget lands first, or v1
+displays a hard agent count and refuses to start a run whose declared
+`meta.phases` imply more than a configured ceiling.
+
+Recorded as a build-order constraint because it is the one part of this that
+can lose real money.
+
+### 8.11 Sizing
+
+**v1**: `/workflow <name>` + `ps` + `kill`; run-as-background-object (W1);
+hosting via the shared seam (§8.3); `ItemWorkflowProgress` emitted (§8.5);
+status-row + transcript rendering incl. the parked indicator (§8.6); agent
+count display (§8.10).
+
+**Deferred**: `watch` as a full-screen tree; per-agent token rows; model-callable
+invocation (§8.1); surviving a daemon restart as a live waiting object (§7
+already defers this — v1 recovers a parked run by journal replay).
+
+**Open for the operator, not decided here:**
+
+1. **Does a live run survive session exit, or get killed with it?** §8.9
+   assumes survives. The alternative is safer against runaways and worse for
+   long jobs.
+2. **The agent-count ceiling in §8.10** — a number, and whether it is a refusal
+   or a confirmation prompt.
+3. **Whether the headless `agora workflow run` lane is consolidated onto the
+   shared seam now or later** (§8.3). Consolidating is more work and removes a
+   real drift; deferring keeps two lanes with different tool surfaces.
