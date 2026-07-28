@@ -248,19 +248,70 @@ its own kill:
 - `/workflow kill <run_id>` (and `agora workflow kill`), cancelling the
   run-scoped context; §3's cancellation already propagates to in-flight
   children.
-- `/workflow ps` to find the id.
-- On session exit a live run keeps running (it is a background object). This is
-  a deliberate choice and the risk is a runaway the operator has lost sight of,
-  so: the run list must be discoverable from a *fresh* session, which means run
-  state is on disk (§4's run dir) and not only in the process that started it.
+- `/workflow ps` to find the id — scoped to THIS session's runs (see below).
+
+**A live run dies with the session (operator decision, 2026-07-27).** Session
+exit cancels the run-scoped context, which §3's cancellation already propagates
+to in-flight children. Survive-and-reattach was considered and rejected as
+awkward: it buys a reconnect UX nobody asked for and pays for it with orphaned
+runs, cross-session discovery, and a liveness question the graph deliberately
+does not answer (§8.4).
+
+Three consequences, all simplifications:
+
+1. **No cross-session run discovery.** `ps` lists the current session's runs;
+   there is no "attach to someone else's run". `~/.agora/workflow-runs/` stays a
+   record, not a registry of live objects.
+2. **The reconnect story is resume, not reattach.** §4's journal already gives
+   the better version: a killed run replays its journal on
+   `--resume <run_id>`, so the longest matching prefix returns cached results
+   instantly and only the unfinished tail re-runs. Picking work back up costs
+   the tail, not the run — and it works across days, not just across a
+   reconnect.
+3. **§8.9's runaway risk disappears.** A run the operator has lost sight of
+   cannot outlive the window they lost sight of it in.
+
+**Teardown must be reliable, and that is the load-bearing requirement here.**
+Killing the run's context is not enough on its own — every spawned child must
+actually die with it. `internal/subagent`'s `CancelNode` already blocks until a
+run observes cancellation rather than flipping status optimistically, so the
+machinery exists; the in-session lane must use it on exit and must not return
+from teardown until children are done. An exit path that leaves orphaned agent
+processes burning tokens is strictly worse than the survive-and-reattach model
+this decision rejected.
+
+Persisted outcomes (agora#158) make the aftermath legible: children cancelled
+by session exit record `interrupted`, so a later `--resume` or a post-mortem
+can tell them apart from ones that failed on their own.
 
 ### 8.10 Cost visibility is a gate on this feature, not a nicety
 
 `ctx.budget` is a stub — `total`/`spent`/`remaining` report unbounded (#106).
 A surface that lets an operator start 1000 agents in one keystroke, with no
-running cost display, should not ship. Either the budget lands first, or v1
-displays a hard agent count and refuses to start a run whose declared
-`meta.phases` imply more than a configured ceiling.
+running cost display, should not ship.
+
+**Concurrency ceiling: default 5, configurable (operator decision,
+2026-07-27).** `workflow.max_concurrent_agents` in `config.json`, resolved
+through the same user→project precedence as `default_effort`. It lowers the
+engine's existing cap (§3's `min(16, cores-2)`) for workflow runs; the two
+compose as a minimum, so the ceiling can only ever tighten, never widen past
+what the machine can take.
+
+Why concurrency is the right lever for a *default*: it bounds the burn RATE,
+which is what makes a mistake cheap to notice and cheap to stop. A run that
+would have spawned 40 agents at once instead spawns 5, and the operator sees
+the cost climbing with 35 still queued and time to hit `/workflow kill`. Five
+is deliberately conservative — the point of a default is to be safe before
+anyone knows what these runs cost.
+
+**Still needed, and NOT the same thing:** a total-agents ceiling per run. The
+concurrency cap bounds rate, not total spend — a loop-until-dry pattern (§6)
+can run 500 agents five at a time and cost exactly as much as 500 at once. The
+§3 lifetime cap (1000) is a runaway backstop, not a cost control. v1 must
+therefore also display a **live agent count and elapsed** while a run is
+active (§8.6), so an operator can see 200 agents deep and act. A configured
+total ceiling should follow once `ctx.budget` can express cost rather than
+count.
 
 Recorded as a build-order constraint because it is the one part of this that
 can lose real money.
@@ -276,13 +327,19 @@ count display (§8.10).
 invocation (§8.1); surviving a daemon restart as a live waiting object (§7
 already defers this — v1 recovers a parked run by journal replay).
 
-**Open for the operator, not decided here:**
+**Decided by the operator (2026-07-27):**
 
-1. **Does a live run survive session exit, or get killed with it?** §8.9
-   assumes survives. The alternative is safer against runaways and worse for
-   long jobs.
-2. **The agent-count ceiling in §8.10** — a number, and whether it is a refusal
-   or a confirmation prompt.
+1. **A live run dies with session exit** — no survive-and-reattach (§8.9).
+2. **Concurrency ceiling defaults to 5, configurable** (§8.10).
+
+**Still open:**
+
 3. **Whether the headless `agora workflow run` lane is consolidated onto the
    shared seam now or later** (§8.3). Consolidating is more work and removes a
    real drift; deferring keeps two lanes with different tool surfaces.
+4. **Does the "5" in §8.10 cap concurrent agents or total agents per run?**
+   Specced as CONCURRENT, because a total cap of 5 would make most of §6's
+   pattern library (adversarial verify with N skeptics, judge panels,
+   loop-until-dry) unusable — those routinely want more than five agents across
+   a run, just not five at a time. If a total cap was meant, it is a one-line
+   default change plus the refusal path in §8.10, and §6 needs revisiting.
