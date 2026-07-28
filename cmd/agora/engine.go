@@ -105,7 +105,7 @@ func newTurnEngineManager(threadID string, provider bridle.Provider, store contr
 		// tool; enginerunner never re-wires it onto children (structural
 		// depth guard — see turnengine.Manager.subagents' doc comment).
 		turnengine.WithSubagents(subagent.NewManager(store, graph, subagent.NewRegistry(agentDefs),
-			enginerunner.New(provider, store, enginerunner.WithProfile(subagentProfile())))),
+			newSubagentRunner(provider, store, roots))),
 	}
 	// Apply the resolved approval posture LAST among the policy-bearing
 	// options, so an explicit -mode/config choice wins over anything the
@@ -266,4 +266,29 @@ func subagentProfile() turnengine.ProfileConfig {
 	prof := turnengine.DevProfile()
 	prof.Policy = contracts.BuiltinPresets()[contracts.PresetNeverEscalate]
 	return prof
+}
+
+// newSubagentRunner builds the AgentRunner behind agent() spawns.
+//
+// ONE constructor for every lane that spawns children — interactive,
+// daemon-hosted, and headless `agora workflow run` (spec §8.3). The two lanes
+// previously had separate definitions that agreed only by coincidence, and
+// they HAD already drifted once: the never-escalate profile reached the
+// workflow lane long before the interactive one (agora#152). This prevents
+// the next drift rather than repairing a current one.
+//
+// roots is the PARENT's sandbox, threaded deliberately (agora#160). Without
+// it a child hits turnengine's defaultRoots() fallback and is rooted at the
+// PROCESS cwd — wrong in the daemon lane, where parent roots come from the
+// thread's persisted meta.WorkingDir and have no reason to match the daemon's
+// cwd. The information existed (ParentContext.Cwd) and was dropped before it
+// could become Roots, because subagent.RunRequest carries no Cwd field.
+//
+// One Runner shares managerOpts across every child it builds, which is right
+// here: each lane constructs a Runner per parent/run, so roots are per-parent.
+func newSubagentRunner(provider bridle.Provider, store contracts.ThreadStore, roots toolrunner.Roots) *enginerunner.Runner {
+	return enginerunner.New(provider, store,
+		enginerunner.WithProfile(subagentProfile()),
+		enginerunner.WithManagerOption(turnengine.WithRoots(roots)),
+	)
 }

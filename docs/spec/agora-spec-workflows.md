@@ -352,9 +352,7 @@ already defers this — v1 recovers a parked run by journal replay).
    later.
 
 **Still open:**
-4. **Does the "5" in §8.10 cap concurrent agents or total agents per run?**
-   Specced as CONCURRENT, because a total cap of 5 would make most of §6's
-   pattern library (adversarial verify with N skeptics, judge panels,
-   loop-until-dry) unusable — those routinely want more than five agents across
-   a run, just not five at a time. If a total cap was meant, it is a one-line
-   default change plus the refusal path in §8.10, and §6 needs revisiting.
+(Resolved 2026-07-27: the ceiling is CONCURRENT, confirmed by the operator —
+"some workflows may require many more agents, just running them concurrently".
+A run's total agent count stays bounded only by §3's 1000 lifetime backstop and,
+once it exists, `ctx.budget`.)
