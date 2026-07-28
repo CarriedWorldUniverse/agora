@@ -619,12 +619,14 @@ func (m *Manager) askAndWait(turnCtx context.Context, htc *turnHookCtx, c bridle
 		// turnCtx.Done(), since it's already closed — but returning here
 		// is the more honest statement of what happened: the ask was never
 		// even sent, so there is nothing for a client to have answered).
+		m.persistAbandonedAsk(c.Call.ID, kind, abortNotDelivered)
 		return c, bridle.HookAbort, nil
 	}
 
 	select {
 	case out := <-waiter:
 		if out.Cancelled {
+			m.persistAbandonedAsk(c.Call.ID, kind, abortCancelled)
 			return c, bridle.HookAbort, nil
 		}
 		if out.Decision == contracts.DecisionAllow {
@@ -651,8 +653,49 @@ func (m *Manager) askAndWait(turnCtx context.Context, htc *turnHookCtx, c bridle
 		return c, bridle.HookContinue, nil
 
 	case <-turnCtx.Done():
+		m.persistAbandonedAsk(c.Call.ID, kind, abortInterrupted)
 		return c, bridle.HookAbort, nil
 	}
+}
+
+// Reasons an ask was abandoned rather than answered. Distinct actors, not
+// one lumped "aborted", because they say different things: an interrupt is
+// the operator deliberately refusing to engage, a not-delivered ask never
+// reached anyone to refuse.
+const (
+	abortNotDelivered = "aborted:not-delivered"
+	abortCancelled    = "aborted:cancelled"
+	abortInterrupted  = "aborted:turn-interrupted"
+)
+
+// persistAbandonedAsk records an approval request that was never answered
+// (agora#150).
+//
+// An ActionAsk is otherwise recorded only once the operator ANSWERS it —
+// deliberately, so the line carries the real outcome rather than "we asked".
+// The gap that left: a pending ask abandoned by an interrupt, a cancelled
+// waiter, or an undeliverable request wrote NOTHING, so the durable trail
+// could only ever contain allows. A live thread's audit read 323 decisions,
+// every one an allow, in a session where a call had in fact been refused and
+// did not run. An audit that structurally cannot record a refusal is not an
+// audit: it cannot answer "what has this thing been stopped from doing?",
+// and it cannot distinguish "never attempted" from "attempted, gated, and
+// killed".
+//
+// Recorded as ActionDeny because that is what happened to the call — it did
+// not execute. `by` keeps an abandonment distinguishable from an operator's
+// explicit "no" (which records By: answeringIdentity), so a reader never
+// conflates the two. Deliberately NOT a new contracts action value: the
+// outcome really is "did not run", and a new enum would ripple into the wire
+// schema, the TUI modal and every preset table for no gain in meaning.
+func (m *Manager) persistAbandonedAsk(callID string, kind contracts.ApprovalKind, by string) {
+	m.persistApprovalAudit(callID, approval.Result{
+		Kind:    kind,
+		Action:  approval.ActionDeny,
+		Stage:   contracts.StageApprover,
+		By:      by,
+		Message: "approval abandoned before it was answered (" + by + ")",
+	})
 }
 
 // recordScopeGrant persists an approved Ask's scope (Session/Prefix/Host)
