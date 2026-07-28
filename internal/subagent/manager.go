@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -389,6 +390,22 @@ func (m *Manager) Spawn(ctx context.Context, parentThread, prompt string, opts S
 		}
 		status := n.status
 		n.mu.Unlock()
+		// Persist the terminal outcome (agora#158). Until this existed the
+		// run status — which cancel.go calls "the source of truth for is it
+		// still running" — lived only in this in-memory map, so nothing
+		// could answer "did this child finish, and how?" once the process
+		// exited. The graph recorded shape and not outcome, leaving
+		// completed, errored and abandoned-mid-run indistinguishable on
+		// disk.
+		//
+		// Best-effort and non-fatal, exactly as cancel.go treats its graph
+		// write: the result is already computed and a graph write must never
+		// fail it.
+		if m.graph != nil && status.isFinished() {
+			if oerr := m.graph.RecordOutcome(parentThread, childID, status, m.clock.Now()); oerr != nil {
+				fmt.Fprintf(os.Stderr, "subagent: record outcome %s->%s (%s): %v\n", parentThread, childID, status, oerr)
+			}
+		}
 		// FIX 3: notify BEFORE close(myDone). A caller that blocks on
 		// Result()/Status() (observes myDone closed) and then
 		// non-blocking-checks Notifications() must never be able to miss

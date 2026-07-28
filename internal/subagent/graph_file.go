@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"time"
 )
 
 // FileGraphStore is a JSONL-persisted GraphStore: an append-only event log
@@ -21,7 +22,7 @@ type FileGraphStore struct {
 
 // graphEvent is one JSONL line: an edge add or a status close.
 type graphEvent struct {
-	Op   string `json:"op"` // "add" | "close"
+	Op   string `json:"op"` // "add" | "close" | "reopen" | "outcome"
 	Edge Edge   `json:"edge"`
 }
 
@@ -88,6 +89,13 @@ func replayGraphLog(f *os.File, mem *MemGraphStore) error {
 			if err := mem.ReopenEdge(ev.Edge.ParentThread, ev.Edge.ChildThread); err != nil {
 				continue
 			}
+		case "outcome":
+			// agora#158. Best-effort like the others: an outcome for an edge
+			// this replay has not seen (a torn prior run) is skipped rather
+			// than failing the whole reload.
+			if err := mem.RecordOutcome(ev.Edge.ParentThread, ev.Edge.ChildThread, ev.Edge.Outcome, ev.Edge.FinishedAt); err != nil {
+				continue
+			}
 		}
 	}
 	return nil
@@ -126,6 +134,16 @@ func (g *FileGraphStore) CloseEdge(parent, child string) error {
 	}
 	e, _, _ := g.mem.Edge(parent, child)
 	return g.appendEvent(graphEvent{Op: "close", Edge: e})
+}
+func (g *FileGraphStore) RecordOutcome(parent, child string, status NodeStatus, ts time.Time) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if err := g.mem.RecordOutcome(parent, child, status, ts); err != nil {
+		return err
+	}
+	return g.appendEvent(graphEvent{Op: "outcome", Edge: Edge{
+		ParentThread: parent, ChildThread: child, Outcome: status, FinishedAt: ts.UTC(),
+	}})
 }
 
 func (g *FileGraphStore) ReopenEdge(parent, child string) error {
