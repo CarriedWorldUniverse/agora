@@ -134,6 +134,9 @@ type Model struct {
 	modalCursor    int
 
 	statusErr string
+	// runningAgents tracks in-flight agent() spawns by item seq, so the
+	// status row can surface a long-running child (agora#155).
+	runningAgents map[int64]runningAgent
 
 	// statusNote is a non-terminal warning (EvWarning). It renders in the
 	// idle status row BELOW statusErr's precedence: a real error must never
@@ -388,7 +391,7 @@ func (m *Model) renderStatusRow() string {
 	}
 	frame := spinnerFrames[m.spinnerFrame%len(spinnerFrames)]
 	elapsed := m.cfg.Now().Sub(m.turnStart).Round(time.Second)
-	return m.cfg.Theme.Warning.Render(frame) + m.cfg.Theme.Muted.Render(fmt.Sprintf(" running · %s%s · %s%s · Esc to interrupt", m.currentModel, m.effortSegment(), elapsed, m.usageSegment()))
+	return m.cfg.Theme.Warning.Render(frame) + m.cfg.Theme.Muted.Render(fmt.Sprintf(" running · %s%s · %s%s%s · Esc to interrupt", m.currentModel, m.effortSegment(), elapsed, m.usageSegment(), m.agentsSegment()))
 }
 
 // effortSegment renders " · <tier>" when a session-level /effort pin
@@ -741,6 +744,30 @@ func (m *Model) handleEvent(ev contracts.Event) []tea.Cmd {
 			break
 		}
 		switch ev.Item.Type {
+		case contracts.ItemAgentSpawn:
+			// A subagent is the longest-running thing a turn can do, and a
+			// foreground spawn blocks the parent for the child's whole
+			// lifetime. Print it AND track it, so it is visible in the live
+			// status row rather than only in scrollback that has since
+			// scrolled away (agora#155).
+			if m.stream != nil {
+				for _, line := range m.stream.Finalize() {
+					cmds = append(cmds, m.cfg.Printer(line))
+				}
+				m.stream = nil
+			}
+			var p struct {
+				AgentType string `json:"agent_type"`
+			}
+			_ = json.Unmarshal(ev.Payload, &p)
+			if p.AgentType == "" {
+				p.AgentType = "agent"
+			}
+			if m.runningAgents == nil {
+				m.runningAgents = make(map[int64]runningAgent)
+			}
+			m.runningAgents[ev.Item.Seq] = runningAgent{agentType: p.AgentType, started: m.cfg.Now()}
+			cmds = append(cmds, m.cfg.Printer(m.cfg.Theme.Muted.Render("agent("+p.AgentType+") started")))
 		case contracts.ItemCommandExecution, contracts.ItemFileChange, contracts.ItemMCPToolCall:
 			if m.stream != nil {
 				for _, line := range m.stream.Finalize() {
@@ -776,6 +803,25 @@ func (m *Model) handleEvent(ev contracts.Event) []tea.Cmd {
 			break
 		}
 		switch ev.Item.Type {
+		case contracts.ItemAgentSpawn:
+			ra, tracked := m.runningAgents[ev.Item.Seq]
+			delete(m.runningAgents, ev.Item.Seq)
+			var p struct {
+				Error string `json:"error"`
+			}
+			_ = json.Unmarshal(ev.Payload, &p)
+			label := "agent"
+			if tracked {
+				label = "agent(" + ra.agentType + ")"
+			}
+			if p.Error != "" {
+				cmds = append(cmds, m.cfg.Printer(m.cfg.Theme.Danger.Render("  ✗ "+label+": "+p.Error)))
+				break
+			}
+			if tracked {
+				cmds = append(cmds, m.cfg.Printer(m.cfg.Theme.Muted.Render(
+					fmt.Sprintf("%s finished in %s", label, m.cfg.Now().Sub(ra.started).Round(time.Second)))))
+			}
 		case contracts.ItemCommandExecution, contracts.ItemFileChange, contracts.ItemMCPToolCall:
 			var p struct {
 				Error string `json:"error"`
@@ -1360,4 +1406,38 @@ func capsText(caps []contracts.Capability) string {
 		parts[i] = string(c)
 	}
 	return strings.Join(parts, "+")
+}
+
+// runningAgent tracks one in-flight agent() spawn for the status row.
+type runningAgent struct {
+	agentType string
+	started   time.Time
+}
+
+// agentsSegment renders " · 2 agents (4m12s)" while children are in flight.
+//
+// This exists because of a real incident (agora#152/#155): a foreground
+// subagent deadlocked and the operator's ENTIRE view for 30+ minutes was
+// "⣾ running · <model> · <elapsed>" — indistinguishable from a slow turn,
+// which is why it read as a frozen session rather than something to
+// interrupt. The elapsed time shown is the OLDEST live child's, since that
+// is the one worth noticing.
+//
+// Empty when nothing is running, so the common case is unchanged.
+func (m *Model) agentsSegment() string {
+	if len(m.runningAgents) == 0 {
+		return ""
+	}
+	oldest := time.Time{}
+	var one string
+	for _, ra := range m.runningAgents {
+		if oldest.IsZero() || ra.started.Before(oldest) {
+			oldest, one = ra.started, ra.agentType
+		}
+	}
+	age := m.cfg.Now().Sub(oldest).Round(time.Second)
+	if len(m.runningAgents) == 1 {
+		return fmt.Sprintf(" · agent(%s) %s", one, age)
+	}
+	return fmt.Sprintf(" · %d agents (oldest %s)", len(m.runningAgents), age)
 }
