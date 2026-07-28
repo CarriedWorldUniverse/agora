@@ -32,6 +32,21 @@ type Edge struct {
 	// the turn" children from background ones.
 	Foreground bool      `json:"foreground"`
 	CreatedAt  time.Time `json:"created_at"`
+	// Outcome is the child's TERMINAL run status, or "" if none was ever
+	// recorded (agora#158). Distinct from Status, which is the graph-SHAPE
+	// view: an edge stays open after a normal finish because the child is
+	// resumable-by-continuation, so Status cannot tell you whether anything
+	// is still running.
+	//
+	// NodeRunning is deliberately NEVER persisted here. A stored "running"
+	// becomes a lie the instant the process dies, and reload would report
+	// children as live that nothing is executing. So the absence of an
+	// outcome IS the non-terminal state: in a fresh process it means
+	// abandoned, since no run survives a restart. That keeps the record
+	// honest without needing a liveness protocol.
+	Outcome NodeStatus `json:"outcome,omitempty"`
+	// FinishedAt is when Outcome was recorded; zero while Outcome is "".
+	FinishedAt time.Time `json:"finished_at,omitempty"`
 }
 
 // GraphStore is the storage-neutral seam for the agent graph — parallels
@@ -53,6 +68,12 @@ type GraphStore interface {
 	// child is resumable-by-continuation like any finished agent". Returns
 	// ErrEdgeNotFound if the pair was never recorded.
 	ReopenEdge(parent, child string) error
+	// RecordOutcome stores a child's terminal run status (agora#158).
+	// Rejects a non-terminal status with ErrNonTerminalOutcome so
+	// NodeRunning can never be persisted by mistake — see Edge.Outcome for
+	// why absence, not a stored "running", represents an unfinished run.
+	// Last write wins; returns ErrEdgeNotFound if the pair is unknown.
+	RecordOutcome(parent, child string, status NodeStatus, ts time.Time) error
 	// Edge looks up one edge by (parent,child).
 	Edge(parent, child string) (Edge, bool, error)
 	// Children returns parent's direct children, deterministic order
@@ -98,6 +119,26 @@ func (g *MemGraphStore) addEdgeLocked(e Edge) error {
 		e.Status = EdgeOpen
 	}
 	children[e.ChildThread] = e
+	return nil
+}
+
+func (g *MemGraphStore) RecordOutcome(parent, child string, status NodeStatus, ts time.Time) error {
+	if !status.isFinished() {
+		return fmt.Errorf("%w: %s", ErrNonTerminalOutcome, status)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	children, ok := g.byParent[parent]
+	if !ok {
+		return fmt.Errorf("%w: %s -> %s", ErrEdgeNotFound, parent, child)
+	}
+	e, ok := children[child]
+	if !ok {
+		return fmt.Errorf("%w: %s -> %s", ErrEdgeNotFound, parent, child)
+	}
+	e.Outcome = status
+	e.FinishedAt = ts.UTC()
+	children[child] = e
 	return nil
 }
 

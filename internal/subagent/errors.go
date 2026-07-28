@@ -15,6 +15,10 @@ var (
 
 	// ErrEdgeExists: AddEdge called for a (parent,child) pair already in the graph.
 	ErrEdgeExists = errors.New("subagent: graph edge already exists")
+	// ErrNonTerminalOutcome: RecordOutcome called with NodeRunning (or any
+	// non-terminal status). Persisting "running" would be a lie after a
+	// crash — see Edge.Outcome (agora#158).
+	ErrNonTerminalOutcome = errors.New("subagent: outcome status is not terminal")
 	// ErrEdgeNotFound: CloseEdge/Edge lookup on a pair not in the graph.
 	ErrEdgeNotFound = errors.New("subagent: graph edge not found")
 
