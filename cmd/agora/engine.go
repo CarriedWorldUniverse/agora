@@ -105,7 +105,7 @@ func newTurnEngineManager(threadID string, provider bridle.Provider, store contr
 		// tool; enginerunner never re-wires it onto children (structural
 		// depth guard — see turnengine.Manager.subagents' doc comment).
 		turnengine.WithSubagents(subagent.NewManager(store, graph, subagent.NewRegistry(agentDefs),
-			enginerunner.New(provider, store))),
+			enginerunner.New(provider, store, enginerunner.WithProfile(subagentProfile())))),
 	}
 	// Apply the resolved approval posture LAST among the policy-bearing
 	// options, so an explicit -mode/config choice wins over anything the
@@ -235,4 +235,35 @@ func resolvePermissionMode(workingDir string) string {
 		return permissionModeOverride
 	}
 	return turnengine.LoadPermissionMode(userHomeOrDot(), workingDir)
+}
+
+// subagentProfile is the profile every interactive agent() child runs under.
+//
+// It exists because of the ONE thing a subagent thread does not have: an
+// attached approver. No client is listening on a child's event stream, so an
+// approval that resolves to ASK has no counterparty — askAndWait blocks on
+// the rendezvous until turnCtx is cancelled, toolrunner/agent.go waits on
+// manager.Result with no independent timeout, and the PARENT's turn wedges
+// with it. Observed live: a child pointed at a path outside the working dir
+// classified KindEscalation, parked, and produced nothing for 30+ minutes
+// until the operator interrupted (agora#152).
+//
+// cmd/agora/workflow_agent.go already reached this conclusion and says so
+// plainly — "no interactive approver is attached, so PresetPrompt would park
+// a child's tool call forever" — and gives its children PresetNeverEscalate.
+// The interactive agent() lane was simply never given the same treatment.
+//
+// never-escalate makes an escalation a clean DENY the child model can see
+// and react to, rather than an indefinite hang. The tradeoff, stated:
+// a subagent can no longer escalate at all, so work outside the sandbox
+// fails closed instead of asking. That is the right default when the
+// alternative is a wedged turn with no signal — and the parent, which DOES
+// have an approver, can always do that part itself.
+//
+// Everything else is inherited from DevProfile so a child's model, system
+// prompt and scope store match the parent's lane.
+func subagentProfile() turnengine.ProfileConfig {
+	prof := turnengine.DevProfile()
+	prof.Policy = contracts.BuiltinPresets()[contracts.PresetNeverEscalate]
+	return prof
 }
