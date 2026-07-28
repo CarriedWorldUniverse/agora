@@ -106,3 +106,29 @@ func TestSink_TerminalStages_AreErrors(t *testing.T) {
 		}
 	}
 }
+
+// TestSink_AgentCallEmitsAgentSpawnItem pins the wire half of agora#155: an
+// agent() call must be distinguishable on the stream, not folded into the
+// generic command_execution bucket. Without a distinct item type no consumer
+// — TUI, pipe, or a daemon client — can tell a subagent is running, which is
+// how a deadlocked child stayed invisible for 30+ minutes.
+func TestSink_AgentCallEmitsAgentSpawnItem(t *testing.T) {
+	if got := itemTypeForTool("agent"); got != contracts.ItemAgentSpawn {
+		t.Fatalf("itemTypeForTool(agent) = %q; want %q", got, contracts.ItemAgentSpawn)
+	}
+	// The payload must name the agent type, since that is what a display
+	// shows, and must default rather than render empty.
+	if got := agentSpawnSummary(json.RawMessage(`{"agent_type":"reviewer","prompt":"x"}`)); got != "reviewer" {
+		t.Errorf("agentSpawnSummary = %q; want \"reviewer\"", got)
+	}
+	if got := agentSpawnSummary(json.RawMessage(`{"prompt":"x"}`)); got != "general-purpose" {
+		t.Errorf("agentSpawnSummary with no agent_type = %q; want the toolrunner default", got)
+	}
+	if got := agentSpawnSummary(json.RawMessage(`not json`)); got != "general-purpose" {
+		t.Errorf("agentSpawnSummary on malformed args = %q; want the default, never empty", got)
+	}
+	// And the other tools must be unaffected.
+	if got := itemTypeForTool("run_command"); got != contracts.ItemCommandExecution {
+		t.Errorf("run_command regressed to %q", got)
+	}
+}

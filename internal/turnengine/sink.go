@@ -153,6 +153,19 @@ func itemTypeForTool(name string) contracts.ItemType {
 		return contracts.ItemFileChange
 	case contracts.ToolPlan:
 		return contracts.ItemPlan
+	case toolrunner.ToolAgent:
+		// agent() gets its OWN item type rather than falling through to
+		// command_execution (agora#155). A subagent is the longest-running
+		// thing a turn can do — a foreground spawn blocks the parent's tool
+		// call for the child's whole lifetime — and it was the one tool with
+		// no distinguishable wire signal at all. During the agora#152
+		// incident the operator's entire view of a deadlocked child was the
+		// generic spinner for 30+ minutes.
+		//
+		// contracts.ItemAgentSpawn was already defined and registered in the
+		// contracts known-items test with zero production emitters; this
+		// wires it rather than inventing a shape.
+		return contracts.ItemAgentSpawn
 	default:
 		if strings.HasPrefix(name, mcpToolPrefix) {
 			return contracts.ItemMCPToolCall
@@ -461,6 +474,9 @@ func (s *turnSink) emitToolStart(ev bridle.ToolCallStart) {
 	case contracts.ItemMCPToolCall:
 		summary = ev.Name
 		payload = mustMarshal(mcpToolCallStartedPayload{Tool: ev.Name, Args: ev.Args})
+	case contracts.ItemAgentSpawn:
+		summary = agentSpawnSummary(ev.Args)
+		payload = mustMarshal(agentSpawnStartedPayload{AgentType: summary})
 	case contracts.ItemPlan:
 		// planning-questions §7 / contracts/testdata/flows/plan_gate.jsonl:
 		// item.started carries NO payload for plan (the artifact only
@@ -546,6 +562,15 @@ func (s *turnSink) emitToolResult(ev bridle.ToolCallResult) {
 			result = json.RawMessage(`null`)
 		}
 		payload = mustMarshal(mcpToolCallCompletedPayload{Tool: state.summary, Result: result, Error: ev.Err})
+	case contracts.ItemAgentSpawn:
+		// Agent-shaped, not command-shaped: falling through to the default
+		// would emit a commandExecCompletedPayload (with the agent type
+		// sitting in a "command" field) under an agent_spawn item type, so a
+		// consumer decoding by item type would find the wrong shape. Result
+		// carries the child's final message, which IS the tool's output.
+		payload = mustMarshal(agentSpawnCompletedPayload{
+			AgentType: state.summary, Result: toolResultText(ev.Result), Error: ev.Err,
+		})
 	case contracts.ItemPlan:
 		// item.completed's payload IS the plan artifact verbatim (matching
 		// contracts/testdata/flows/plan_gate.jsonl) — state.summary is the
@@ -646,4 +671,33 @@ func mustMarshal(v any) json.RawMessage {
 		panic(fmt.Sprintf("turnengine: marshal payload: %v", err))
 	}
 	return b
+}
+
+// agentSpawnStartedPayload is the item.started payload for an agent() call.
+// Deliberately just the agent type: the prompt is often thousands of tokens
+// and every consumer here is a live display, not an archive — the child's
+// own thread holds the full prompt.
+type agentSpawnStartedPayload struct {
+	AgentType string `json:"agent_type"`
+}
+
+// agentSpawnCompletedPayload is the item.completed payload for an agent()
+// call: which agent ran, what it returned, and any failure.
+type agentSpawnCompletedPayload struct {
+	AgentType string `json:"agent_type"`
+	Result    string `json:"result,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+// agentSpawnSummary pulls the agent type out of an agent() call's args,
+// defaulting to the same "general-purpose" the toolrunner defaults to so the
+// display never shows an empty type.
+func agentSpawnSummary(args json.RawMessage) string {
+	var a struct {
+		AgentType string `json:"agent_type"`
+	}
+	if err := json.Unmarshal(args, &a); err == nil && a.AgentType != "" {
+		return a.AgentType
+	}
+	return "general-purpose"
 }

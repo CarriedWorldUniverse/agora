@@ -114,10 +114,19 @@ func TestEndToEnd_ParentSpawnsChild_ResultRoundTrips(t *testing.T) {
 		if ev.Type == contracts.EvTurnCompleted {
 			sawTurnCompleted = true
 		}
-		if ev.Type == contracts.EvItemCompleted && ev.Item != nil && ev.Item.Type == contracts.ItemCommandExecution {
-			var p commandExecCompletedWire
-			if json.Unmarshal(ev.Payload, &p) == nil && p.Command != "" {
-				agentToolOutput = p.Output
+		// agent() carries its own item type as of agora#155 (it used to fold
+		// into command_execution, which made a running subagent
+		// indistinguishable from any other tool on the wire). The assertion
+		// that matters is unchanged: the child's final message must round-trip
+		// to the parent as the tool's result.
+		if ev.Type == contracts.EvItemCompleted && ev.Item != nil && ev.Item.Type == contracts.ItemAgentSpawn {
+			var p struct {
+				AgentType string `json:"agent_type"`
+				Result    string `json:"result"`
+				Error     string `json:"error"`
+			}
+			if json.Unmarshal(ev.Payload, &p) == nil && p.AgentType != "" {
+				agentToolOutput = p.Result
 				sawAgentToolOutput = true
 			}
 		}

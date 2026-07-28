@@ -241,6 +241,31 @@ address still walks through, where web_fetch catches it at dial time via
 the resolved IP in `Dialer.Control`. Closing that for exec needs the parked
 sandbox (§3a) or a resolving pre-check with its own TOCTOU window.
 
+### `agent_spawn` item events for agent() calls (2026-07-27, agora#155)
+
+`itemTypeForTool` had no case for the `agent` tool, so an `agent()` call fell
+through `default:` to `ItemCommandExecution`. A subagent — the longest-running
+thing a turn can do, and one that blocks the parent for the child's whole
+lifetime when foreground — was therefore indistinguishable on the wire from
+any other tool call. During agora#152 the operator's entire view of a
+deadlocked child was the generic spinner, for 30+ minutes.
+
+`contracts.ItemAgentSpawn` and `ItemWorkflowProgress` were already defined and
+registered in the contracts known-items test with ZERO production emitters.
+This wires the first of the two rather than inventing a shape.
+
+**External contract note:** `item.started`/`item.completed` for an `agent`
+call now carry `agent_spawn`, not `command_execution`, with agent-shaped
+payloads (`{agent_type}` on start; `{agent_type, result, error}` on
+completion) instead of `{command, output, error}`. A consumer matching agent
+activity on `command_execution` must be updated. The child's final message
+still round-trips as the tool result — it moved from the payload's `output`
+field to `result`.
+
+`ItemWorkflowProgress` remains unemitted: `agora workflow run` is a separate
+CLI entry point and no tool exposes workflows to a live turn, so there is no
+session surface for workflow progress to appear in yet.
+
 ## 10. Environment / housekeeping notes
 - **`go.starlark.net`** (U14) must be added to the **go-gate proxy allowlist** for
   sovereign builds on croft/dMon. GitHub CI uses the public proxy, so CI is fine.
