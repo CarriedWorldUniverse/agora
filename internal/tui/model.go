@@ -137,6 +137,15 @@ type Model struct {
 	// runningAgents tracks in-flight agent() spawns by item seq, so the
 	// status row can surface a long-running child (agora#155).
 	runningAgents map[int64]runningAgent
+	// itemStart tracks when each in-flight tool item began, so completion
+	// can report how long it took. Derived client-side from the
+	// item.started/item.completed pair (same Item.Seq) — the wire carries no
+	// duration, and it does not need to.
+	itemStart map[int64]time.Time
+	// lastEventAt is when this client last saw ANY event. Drives the stall
+	// indicator: a spinner alone cannot distinguish "working" from "wedged",
+	// which is how a deadlocked subagent stayed invisible for 30+ minutes.
+	lastEventAt time.Time
 
 	// statusNote is a non-terminal warning (EvWarning). It renders in the
 	// idle status row BELOW statusErr's precedence: a real error must never
@@ -391,7 +400,20 @@ func (m *Model) renderStatusRow() string {
 	}
 	frame := spinnerFrames[m.spinnerFrame%len(spinnerFrames)]
 	elapsed := m.cfg.Now().Sub(m.turnStart).Round(time.Second)
-	return m.cfg.Theme.Warning.Render(frame) + m.cfg.Theme.Muted.Render(fmt.Sprintf(" running · %s%s · %s%s%s · Esc to interrupt", m.currentModel, m.effortSegment(), elapsed, m.usageSegment(), m.agentsSegment()))
+	// Ordered by the question being asked, most urgent first: is it alive
+	// (spinner + elapsed + stall), what is it doing (agents), what is it
+	// costing (usage), and only then ambient context (model/effort). The
+	// previous order interleaved all four at equal weight on one faint line,
+	// so cost sat between cache%% and the agent segment.
+	//
+	// cache%% is deliberately dropped while running: it informs no in-flight
+	// decision. It stays on the idle row, where it is a useful curiosity.
+	head := m.cfg.Theme.Warning.Render(frame) + m.cfg.Theme.Muted.Render(" "+fmtDuration(elapsed))
+	if stall := m.stallSegment(); stall != "" {
+		head += m.cfg.Theme.Warning.Render(stall)
+	}
+	return head + m.cfg.Theme.Muted.Render(fmt.Sprintf("%s%s · %s%s · Esc to interrupt",
+		m.agentsSegment(), m.costSegment(), m.currentModel, m.effortSegment()))
 }
 
 // effortSegment renders " · <tier>" when a session-level /effort pin
@@ -640,6 +662,8 @@ func (m *Model) handleEvent(ev contracts.Event) []tea.Cmd {
 	if ev.Item != nil && ev.Item.Seq > m.lastItemSeq {
 		m.lastItemSeq = ev.Item.Seq
 	}
+	// Any event is a sign of life — see stallSegment.
+	m.lastEventAt = m.cfg.Now()
 	var cmds []tea.Cmd
 	switch ev.Type {
 	case contracts.EvClientAttached:
@@ -796,6 +820,10 @@ func (m *Model) handleEvent(ev contracts.Event) []tea.Cmd {
 				_ = json.Unmarshal(ev.Payload, &p)
 				line = m.cfg.Theme.Muted.Render("tool " + p.Tool)
 			}
+			if m.itemStart == nil {
+				m.itemStart = make(map[int64]time.Time)
+			}
+			m.itemStart[ev.Item.Seq] = m.cfg.Now()
 			cmds = append(cmds, m.cfg.Printer(line))
 		}
 	case contracts.EvItemCompleted:
@@ -827,8 +855,18 @@ func (m *Model) handleEvent(ev contracts.Event) []tea.Cmd {
 				Error string `json:"error"`
 			}
 			_ = json.Unmarshal(ev.Payload, &p)
+			took, known := m.itemElapsed(ev.Item.Seq)
 			if p.Error != "" {
-				cmds = append(cmds, m.cfg.Printer(m.cfg.Theme.Danger.Render("  ✗ "+p.Error)))
+				cmds = append(cmds, m.cfg.Printer(m.cfg.Theme.Danger.Render("  ✗ "+p.Error+durationSuffix(took, known))))
+				break
+			}
+			// Quiet by default, loud when it matters: a fast success adds
+			// nothing a reader needs, and printing one per call would double
+			// the transcript for no signal. A SLOW success is the thing you
+			// cannot currently see — after the fact there is no way to tell
+			// which step ate the minutes.
+			if known && took >= slowOpThreshold {
+				cmds = append(cmds, m.cfg.Printer(m.cfg.Theme.Success.Render("  ✓ "+fmtDuration(took))))
 			}
 		}
 	case contracts.EvApprovalRequested:
@@ -1440,4 +1478,73 @@ func (m *Model) agentsSegment() string {
 		return fmt.Sprintf(" · agent(%s) %s", one, age)
 	}
 	return fmt.Sprintf(" · %d agents (oldest %s)", len(m.runningAgents), age)
+}
+
+// slowOpThreshold is where a successful operation stops being background
+// noise and starts being something the reader should notice. Below it a
+// success prints nothing; at or above it the transcript records the cost.
+const slowOpThreshold = 2 * time.Second
+
+// stallThreshold is how long with NO events before the status row says so.
+// A spinner cannot distinguish "working" from "wedged": during agora#152 a
+// deadlocked subagent produced an identical spinner for 30+ minutes, which
+// read as a slow turn rather than something to interrupt.
+const stallThreshold = 45 * time.Second
+
+// itemElapsed returns how long an item took, if its start was observed.
+func (m *Model) itemElapsed(seq int64) (time.Duration, bool) {
+	start, ok := m.itemStart[seq]
+	if !ok {
+		return 0, false
+	}
+	delete(m.itemStart, seq)
+	return m.cfg.Now().Sub(start), true
+}
+
+// fmtDuration renders a duration for a status line: sub-minute values keep
+// sub-second precision (1.4s reads differently from 1s when scanning for
+// what was slow), minute-plus values round to the second.
+func fmtDuration(d time.Duration) string {
+	if d < time.Minute {
+		return d.Round(100 * time.Millisecond).String()
+	}
+	return d.Round(time.Second).String()
+}
+
+// durationSuffix appends " (1.4s)" to a failure line when the duration is
+// known — a command that failed FAST is a different problem from one that
+// failed after two minutes.
+func durationSuffix(d time.Duration, known bool) string {
+	if !known {
+		return ""
+	}
+	return " (" + fmtDuration(d) + ")"
+}
+
+// stallSegment reports how long the stream has been silent, once that
+// crosses stallThreshold. Empty otherwise, so a healthy turn is unchanged.
+func (m *Model) stallSegment() string {
+	if m.lastEventAt.IsZero() {
+		return ""
+	}
+	quiet := m.cfg.Now().Sub(m.lastEventAt)
+	if quiet < stallThreshold {
+		return ""
+	}
+	return " · ⚠ no activity " + fmtDuration(quiet)
+}
+
+// costSegment is the spend-so-far half of usageSegment, promoted for the
+// running row: tokens and dollars answer "what is this costing me", which is
+// the question that decides whether to let a long turn continue.
+func (m *Model) costSegment() string {
+	if !m.haveUsage {
+		return ""
+	}
+	totalIn := m.sessIn + m.sessCached + m.sessWrite
+	seg := fmt.Sprintf(" · ↑%s ↓%s", humanTokens(totalIn), humanTokens(m.sessOut))
+	if m.sessCost > 0 {
+		seg += " · " + fmtUSD(m.sessCost)
+	}
+	return seg
 }
