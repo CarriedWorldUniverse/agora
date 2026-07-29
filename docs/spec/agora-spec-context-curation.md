@@ -5,6 +5,17 @@ the ctxmap/wset testing thread (agora `docs/ctxmap.md` arms A–F; `bridle/wset`
 merged PR #78). Slots behind the §1 interface; every §2 contract is honored
 (compliance map in §7 below).
 
+> **Reference note, 2026-07-29.** The `docs/ctxmap.md` citation above now resolves
+> on `main`. It was written on the `ctxmap-harness` branch, which was never merged,
+> so this spec's evidence base pointed at a file that did not exist here — see its
+> status header for what shipped and what did not.
+>
+> The `bridle/wset` pointer is **historical**. Arm F shipped in this repo as
+> `internal/ctxmgr` — a reimplementation, not an import — and `bridle/wset` is
+> superseded and consumed by nothing. Read it for the arm-F design that §0 below
+> summarises, never as the running code. The running code is `internal/ctxmgr`,
+> wired by `internal/turnengine/ctxcuration.go`.
+
 ## 0. Evidence base (why THIS algorithm)
 
 Six experimental arms, three model families (DeepSeek v4-pro, GLM-5.2, Sonnet
