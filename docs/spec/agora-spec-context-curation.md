@@ -10,11 +10,14 @@ merged PR #78). Slots behind the §1 interface; every §2 contract is honored
 > so this spec's evidence base pointed at a file that did not exist here — see its
 > status header for what shipped and what did not.
 >
-> The `bridle/wset` pointer is **historical**. Arm F shipped in this repo as
-> `internal/ctxmgr` — a reimplementation, not an import — and `bridle/wset` is
-> superseded and consumed by nothing. Read it for the arm-F design that §0 below
-> summarises, never as the running code. The running code is `internal/ctxmgr`,
-> wired by `internal/turnengine/ctxcuration.go`.
+> The `bridle/wset` pointer is **historical and no longer resolves**. Arm F shipped
+> in this repo as `internal/ctxmgr` — a reimplementation, not an import — so the
+> bridle package never acquired a consumer and was deleted in bridle PR #96. It
+> remains readable in that repo's history at PR #78.
+>
+> Nothing was lost: the arm-F design is recorded in §0 and §§2–3 below, the
+> evidence in `docs/ctxmap.md` §3, and the running code is `internal/ctxmgr`, wired
+> by `internal/turnengine/ctxcuration.go`. **This spec is now the reference.**
 
 ## 0. Evidence base (why THIS algorithm)
 

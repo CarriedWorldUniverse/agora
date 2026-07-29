@@ -12,7 +12,7 @@
 > |---|---|
 > | Arm F — working-set retention (§3) | **LIVE.** Reimplemented as `internal/ctxmgr` (not `bridle/wset` as §6 predicted), wired by `internal/turnengine/ctxcuration.go` into the **direct-api path only**. Spec: `docs/spec/agora-spec-context-curation.md`. |
 > | `bridle/ctxmap` packages | **LANDED and maintained.** The migration the header calls "underway" completed. |
-> | `bridle/wset` | **Superseded and unimported.** agora reimplemented it; the package is consumed by nothing. |
+> | `bridle/wset` | **Deleted** (bridle PR #96). Superseded before it ever acquired a consumer — agora reimplemented the policy as `internal/ctxmgr`. Readable in bridle's history at PR #78. |
 > | The fact store — dialogue path (§3's 100% / 40–90× result) | **NOT RUNNING.** See below. |
 > | `ctxbench`, `ctxmapd`, `ctxagent`, workloads | **Branch-only.** Not ported — their agora dependencies no longer exist on main (see below). |
 >
